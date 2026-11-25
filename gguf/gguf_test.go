@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -289,5 +290,134 @@ func TestReferenceModel(t *testing.T) {
 	// tensor bytes plus the header must account for (almost) the whole file
 	if d := in.FileSize - in.ExpertBytes - in.DenseBytes; d < 0 || d > 32<<20 {
 		t.Errorf("tensor bytes %d vs file %d (gap %d)", in.ExpertBytes+in.DenseBytes, in.FileSize, d)
+	}
+}
+
+// lingLike mirrors the header keys of Ling 3.0-tiny (bailingmoe3): MLA attention every fourth
+// layer (head_count_kv 1), Kimi delta attention (head_count_kv 0, fixed state) elsewhere.
+func lingLike() []byte {
+	kvh := make([]uint32, 24)
+	for i := 3; i < 24; i += 4 {
+		kvh[i] = 1
+	}
+	kvs := []kv{
+		{"general.architecture", "bailingmoe3"},
+		{"bailingmoe3.block_count", uint32(24)},
+		{"bailingmoe3.embedding_length", uint32(1536)},
+		{"bailingmoe3.attention.head_count", uint32(16)},
+		{"bailingmoe3.attention.head_count_kv", kvh},
+		{"bailingmoe3.attention.key_length", uint32(576)},
+		{"bailingmoe3.attention.value_length", uint32(128)},
+		{"bailingmoe3.attention.kv_lora_rank", uint32(512)},
+		{"bailingmoe3.rope.dimension_count", uint32(64)},
+		{"bailingmoe3.kda.head_dim", uint32(128)},
+		{"bailingmoe3.ssm.conv_kernel", uint32(4)},
+		{"bailingmoe3.expert_count", uint32(128)},
+		{"bailingmoe3.expert_used_count", uint32(8)},
+	}
+	var ts []tn
+	for i := 1; i < 24; i++ {
+		ts = append(ts, tn{name: "blk." + itoa(i) + ".ffn_up_exps.weight", dims: []uint64{1536, 512, 128}, typ: 12})
+	}
+	ts = append(ts, tn{name: "token_embd.weight", dims: []uint64{1536, 1000}, typ: 12})
+	return build(3, kvs, ts)
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
+
+func TestMLAAndLinearAttention(t *testing.T) {
+	f, err := Parse(bytes.NewReader(lingLike()), 5<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := f.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := 0
+	for i, l := range in.Layers {
+		if l.HasKV {
+			full++
+			if i%4 != 3 || l.KVHeads != 1 || l.HeadDimK != 576 || l.HeadDimV != 0 {
+				t.Errorf("layer %d: %+v", i, l)
+			}
+		} else if !l.Recurrent {
+			t.Errorf("layer %d should be recurrent: %+v", i, l)
+		}
+	}
+	if full != 6 || in.KVLoraRank != 512 || in.NKVHead != 1 || in.HeadDimK != 576 || in.HeadDimV != 0 {
+		t.Errorf("%+v", in)
+	}
+	// 18 delta-attention layers: (3*3*16*128 + 128*128*16) f32 each
+	if want := int64(18 * (3*3*16*128 + 128*128*16) * 4); in.StateBytesPerSlot != want {
+		t.Errorf("state %d want %d", in.StateBytesPerSlot, want)
+	}
+	if in.Estimated || in.ExpertLayers != 23 {
+		t.Errorf("%+v", in)
+	}
+}
+
+func TestUnknownArchitectureIsEstimated(t *testing.T) {
+	data := build(3, []kv{{"general.architecture", "mystery"}}, []tn{
+		{name: "blk.0.attn_q.weight", dims: []uint64{64, 64}, typ: 0},
+		{name: "blk.1.attn_q.weight", dims: []uint64{64, 64}, typ: 0},
+	})
+	f, err := Parse(bytes.NewReader(data), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := f.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !in.Estimated || in.Note == "" || in.NLayer != 2 || len(in.Layers) != 2 {
+		t.Fatalf("%+v", in)
+	}
+	for _, l := range in.Layers {
+		if !l.HasKV || l.KVHeads <= 0 || l.HeadDimK <= 0 {
+			t.Errorf("estimate must never be zero: %+v", l)
+		}
+	}
+	// no layer count anywhere: still an estimate
+	f2, _ := Parse(bytes.NewReader(build(3, []kv{{"general.architecture", "mystery"}}, nil)), 1<<20)
+	in2, err := f2.Info()
+	if err != nil || in2.NLayer != 32 || !in2.Estimated {
+		t.Errorf("%+v %v", in2, err)
+	}
+}
+
+// The real Ling 3.0-tiny header (first 8 MiB of the Q4_K_M file, fetched by Range request).
+// Skipped where it is not on disk.
+func TestLingRealHeader(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".local/share", "rim"+"world-hermes-engine", "tmp/ling-head.bin")
+	fh, err := os.Open(p)
+	if err != nil {
+		t.Skip("Ling header not on this machine")
+	}
+	defer fh.Close()
+	f, err := Parse(fh, 4820000000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := f.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%+v", in)
+	if in.Arch != "bailingmoe3" || in.NLayer != 24 || in.NExpert != 128 || in.NExpertUsed != 8 || in.KVLoraRank != 512 {
+		t.Errorf("%+v", in)
+	}
+	full := 0
+	for i, l := range in.Layers {
+		if l.HasKV {
+			full++
+			if i%4 != 3 || l.HeadDimK != 576 || l.KVHeads != 1 || l.HeadDimV != 0 {
+				t.Errorf("layer %d %+v", i, l)
+			}
+		}
+	}
+	if full != 6 || in.ExpertLayers != 23 || in.Estimated {
+		t.Errorf("full=%d %+v", full, in)
 	}
 }

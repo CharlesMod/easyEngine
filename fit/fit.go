@@ -7,6 +7,7 @@ package fit
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"time"
@@ -57,6 +58,9 @@ type Footprint struct {
 	ExpertMiBPerLayer float64 `json:"expert_mib_per_layer"`
 	ExpertLayers      int     `json:"expert_layers"`
 	MoE               bool    `json:"moe"`
+
+	StatePerSlotMiB float64 `json:"state_per_slot_mib"` // recurrent (linear-attention/SSM) state per slot; fixed, not per token
+	Estimated       bool    `json:"estimated"`          // built from a conservative guess, not a known architecture
 
 	SWAPerTokenMiB float64 `json:"swa_per_token_mib"` // sliding-window KV per cached token
 	SWAWindow      int     `json:"swa_window"`        // tokens kept per slot by those layers
@@ -146,6 +150,9 @@ func DefaultMargin(vramTotal int) int {
 
 const mib = 1 << 20
 
+// Logf receives the planner's notes (an unknown architecture was estimated). Tests may replace it.
+var Logf = log.Printf
+
 // Seed builds a footprint from a GGUF header.
 func Seed(info gguf.Info, kvType string) Footprint {
 	if kvType == "" {
@@ -184,6 +191,23 @@ func Seed(info gguf.Info, kvType string) Footprint {
 		SWAPerTokenMiB: swa * b / mib,
 		SWAWindow:      info.SlidingWindow,
 		ScratchMiB:     scratchSeed,
+
+		StatePerSlotMiB: float64(info.StateBytesPerSlot) / mib,
+		Estimated:       info.Estimated,
+	}
+	if info.Estimated {
+		Logf("fit: %s: architecture not fully understood (%s); using a conservative KV estimate", info.Arch, info.Note)
+	}
+	if fp.PerTokenMiB+fp.SWAPerTokenMiB <= 0 && fp.StatePerSlotMiB <= 0 {
+		// Nothing in the header says what the cache costs: never plan with zero. Scale with the
+		// weights like SeedFromSize does.
+		gib := float64(info.DenseBytes+info.ExpertBytes) / mib / 1024
+		if gib < 1 {
+			gib = 1
+		}
+		fp.PerTokenMiB = 0.0006 * gib * 1.25 * b / kvBytes("q4_0")
+		fp.Estimated = true
+		Logf("fit: %s: header gave no KV dimensions; guessing %.4f MiB per token from the weight size", info.Arch, fp.PerTokenMiB)
 	}
 	if info.NExpert > 0 && info.ExpertLayers > 0 && info.ExpertBytes > 0 {
 		fp.MoE = true
@@ -195,7 +219,7 @@ func Seed(info gguf.Info, kvType string) Footprint {
 
 // kvAt returns the KV cache MiB for a layout.
 func (fp Footprint) kvAt(slots, ctxPerSlot int) float64 {
-	kv := fp.PerTokenMiB * float64(slots*ctxPerSlot)
+	kv := fp.PerTokenMiB*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
 		if fp.SWAWindow > 0 && fp.SWAWindow < w {

@@ -17,8 +17,8 @@ type startReq struct {
 }
 
 var (
-	spawnOnce sync.Once
-	spawnCh   chan startReq
+	launchOnce sync.Once
+	launchCh   chan startReq
 )
 
 func prepare(cmd *exec.Cmd) {
@@ -26,16 +26,16 @@ func prepare(cmd *exec.Cmd) {
 }
 
 func startChild(cmd *exec.Cmd) error {
-	spawnOnce.Do(func() {
-		spawnCh = make(chan startReq)
+	launchOnce.Do(func() {
+		launchCh = make(chan startReq)
 		go func() {
 			runtime.LockOSThread() // never unlocked: the thread lives as long as the engine
-			for r := range spawnCh {
+			for r := range launchCh {
 				r.res <- r.cmd.Start()
 			}
 		}()
 	})
 	r := startReq{cmd, make(chan error, 1)}
-	spawnCh <- r
+	launchCh <- r
 	return <-r.res
 }

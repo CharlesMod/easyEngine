@@ -117,8 +117,8 @@ func (g *Group) changed() {
 	}
 }
 
-// Spawn starts a child that dies with the engine.
-func (g *Group) Spawn(spec Spec) (*Proc, error) {
+// Launch starts a child that dies with the engine.
+func (g *Group) Launch(spec Spec) (*Proc, error) {
 	if spec.Path == "" {
 		return nil, errors.New("empty path")
 	}

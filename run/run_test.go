@@ -105,7 +105,7 @@ func TestLoadOOMTwiceStepsDownAndRecords(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	// Fails at the first shape and again at the measured retry (which only drops a little).
-	e.Llama["FAKELLAMA_OOM_ABOVE"] = "100000"
+	e.Llama["FAKELLAMA_OOM_ABOVE"] = "170000"
 	e.Llama["FAKELLAMA_BYTES_PER_TOKEN"] = "1000"
 	s := ready(t, e)
 	lines := e.Starts()
@@ -115,7 +115,7 @@ func TestLoadOOMTwiceStepsDownAndRecords(t *testing.T) {
 	st := run.LoadState(e.Data)
 	capped := false
 	for _, c := range st.Book.Entries {
-		if c.CapCtxTotal > 0 && c.CapCtxTotal <= 100000 {
+		if c.CapCtxTotal > 0 && c.CapCtxTotal <= 170000 {
 			capped = true
 		}
 	}

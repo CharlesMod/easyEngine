@@ -73,7 +73,13 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 // startLocked chooses a shape and loads it. opMu must be held.
 func (s *Supervisor) startLocked() error {
 	if _, ok := s.resolveInstall(); !ok {
-		s.setPhase("not_installed", "No model installed")
+		// a failed or running install job owns the phase; do not paint over it
+		s.mu.Lock()
+		busy := s.jobRunning || s.phase == "error" || s.phase == "downloading" || s.phase == "installing"
+		s.mu.Unlock()
+		if !busy {
+			s.setPhase("not_installed", "No model installed")
+		}
 		return nil
 	}
 	ctx, cancel := context.WithCancel(s.root)
@@ -176,7 +182,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		return launchResult{err: err}
 	}
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
-	proc, err := s.cfg.Group.Spawn(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, s.cfg.ExtraEnv), Log: sink})
+	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, s.cfg.ExtraEnv), Log: sink})
 	if err != nil {
 		sink.Close()
 		return launchResult{err: err}

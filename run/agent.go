@@ -231,7 +231,7 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 		sink, _ := lifecycle.OpenLog(filepath.Join(s.dir, "logs", "agent.log"))
 		args := append([]string{"-m", module}, ag.Args...)
 		started := s.cfg.Now()
-		proc, err := s.cfg.Group.Spawn(lifecycle.Spec{Name: "agent", Path: venvPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
+		proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "agent", Path: venvPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
 		if err != nil {
 			s.addError("agent start: %v", err)
 			a.set("error", err.Error(), 0)

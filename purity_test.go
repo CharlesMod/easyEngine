@@ -18,7 +18,7 @@ func TestPurity(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if d.Name() == ".git" || (p == "dist" && d.Name() == "dist") { // dist holds compiled binaries
 				return filepath.SkipDir
 			}
 			return nil

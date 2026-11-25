@@ -192,6 +192,12 @@ function render(){
   if(!st)return;
   $('phase').textContent=st.phase||'?';
   $('msg').textContent=(st.message||'')+(st.version?'  (v'+st.version+')':'');
+  var ex=[];
+  if(st.tok_s!=null)ex.push(st.tok_s.toFixed(1)+' tok/s');
+  if(st.agent&&st.agent.phase)ex.push('agent: '+st.agent.phase+(st.agent.restarts?' ('+st.agent.restarts+' restarts)':'')+(st.agent.message?' - '+st.agent.message:''));
+  var live=(st.parents||[]).filter(function(q){return q.alive}).length;
+  if(st.parents&&st.parents.length)ex.push(live+' of '+st.parents.length+' game process(es) alive');
+  $('msg').textContent+=ex.length?'  |  '+ex.join('  |  '):'';
   setLight($('light'),phaseColor(st.phase));
   var errs=(st.errors||[]).slice();if(toast)errs.push(toast);
   errs.forEach(function(e,i){if(i)eb.appendChild(document.createElement('br'));eb.appendChild(document.createTextNode(e))});

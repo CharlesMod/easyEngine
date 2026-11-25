@@ -7,6 +7,7 @@ package main
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,44 @@ const (
 	refFile   = "gemma4-rp-maxxed-Q3_K_XL.gguf"
 	refSHA256 = "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29"
 )
+
+// measured.json is the checked-in measured footprint per model id (written by tools/fitcheck from
+// the sweep CSV). Every regeneration carries it into the catalog, so a refreshed llama.cpp pin
+// or model list never drops the numbers.
+//
+//go:embed measured.json
+var measuredJSON []byte
+
+// loadMeasured parses measured.json.
+func loadMeasured(b []byte) (map[string]catalog.Footprint, error) {
+	var m map[string]catalog.Footprint
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("measured.json: %w", err)
+	}
+	return m, nil
+}
+
+// applyMeasured attaches the measured footprint to every model that has one and reports the
+// ids in measured.json that match no model (a typo or a removed model).
+func applyMeasured(models []catalog.Model, measured map[string]catalog.Footprint) (unused []string) {
+	used := map[string]bool{}
+	for i := range models {
+		if fp, ok := measured[models[i].ID]; ok {
+			fp := fp
+			models[i].Footprint = &fp
+			used[models[i].ID] = true
+		} else {
+			models[i].Footprint = nil
+		}
+	}
+	for id := range measured {
+		if !used[id] {
+			unused = append(unused, id)
+		}
+	}
+	sort.Strings(unused)
+	return unused
+}
 
 type ghAsset struct {
 	Name               string `json:"name"`
@@ -365,9 +404,17 @@ func main() {
 	minAge := flag.Duration("min-age", 24*time.Hour, "when every release is a prerelease, skip builds newer than this")
 	ref := flag.String("ref-file", filepath.Join(os.Getenv("HOME"), ".hive/models/gemma4-rp-maxxed", refFile), "the reference model file; its size is recorded (not copied or loaded)")
 	version := flag.Int("version", 1, "catalog version to write")
+	measuredOnly := flag.Bool("measured-only", false, "no network: re-read -out, attach tools/gencatalog/measured.json and write it back with -version")
 	flag.Parse()
 
 	logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, "gencatalog: "+f+"\n", a...) }
+	if *measuredOnly {
+		if err := refreshMeasured(*out, *version); err != nil {
+			fmt.Fprintln(os.Stderr, "gencatalog:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	c := &client{http: &http.Client{Timeout: 30 * time.Minute}, token: os.Getenv("GITHUB_TOKEN"), log: logf}
 	if err := run(c, *out, *pin, *minAge, *ref, *version); err != nil {
 		fmt.Fprintln(os.Stderr, "gencatalog:", err)
@@ -425,14 +472,46 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 		c.log("model %s %d bytes", m.ID, m.Size)
 		cat.Models = append(cat.Models, m)
 	}
-	b, err := json.MarshalIndent(cat, "", "  ")
+	measured, err := loadMeasured(measuredJSON)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	if err := os.WriteFile(out, b, 0o644); err != nil {
+	if un := applyMeasured(cat.Models, measured); len(un) > 0 {
+		c.log("WARNING: measured.json has footprints for models not in the catalog: %v", un)
+	}
+	if err := writeCatalog(out, &cat); err != nil {
 		return err
 	}
 	c.log("wrote %s", out)
 	return nil
+}
+
+func writeCatalog(out string, cat *catalog.Catalog) error {
+	b, err := json.MarshalIndent(cat, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(out, append(b, '\n'), 0o644)
+}
+
+// refreshMeasured re-attaches measured.json to an existing catalog file without touching the
+// network, at the given version.
+func refreshMeasured(out string, version int) error {
+	b, err := os.ReadFile(out)
+	if err != nil {
+		return err
+	}
+	cat, err := catalog.Parse(b)
+	if err != nil {
+		return err
+	}
+	measured, err := loadMeasured(measuredJSON)
+	if err != nil {
+		return err
+	}
+	if un := applyMeasured(cat.Models, measured); len(un) > 0 {
+		return fmt.Errorf("measured.json has footprints for models not in %s: %v", out, un)
+	}
+	cat.Version = version
+	return writeCatalog(out, cat)
 }

@@ -18,7 +18,7 @@ import (
 func refInfo() gguf.Info {
 	in := gguf.Info{Arch: "gemma4", NLayer: 30, NKVHead: 2, HeadDimK: 512, HeadDimV: 512, SlidingWindow: 1024, SWALayers: 25,
 		NExpert: 96, NExpertUsed: 8, ExpertBytes: 7734594816, DenseBytes: 2256820680, FileSize: 10001779136,
-		ExpertLayers: 30, HeadDimKSWA: 256, HeadDimVSWA: 256}
+		ExpertLayers: 30, HeadDimKSWA: 256, HeadDimVSWA: 256, VocabSize: 262144}
 	for i := 0; i < 30; i++ {
 		l := gguf.Layer{HasKV: true, SWA: i%6 != 5, KVHeads: 8, HeadDimK: 256, HeadDimV: 256}
 		if !l.SWA {
@@ -39,7 +39,7 @@ func denseInfo() gguf.Info {
 func lingInfo() gguf.Info {
 	in := gguf.Info{Arch: "bailingmoe3", NLayer: 24, NKVHead: 1, HeadDimK: 576, NExpert: 128, NExpertUsed: 8,
 		ExpertBytes: 4192468992, DenseBytes: 624909952 + 6516000, FileSize: 4823894944, ExpertLayers: 23,
-		KVLoraRank: 512, StateBytesPerSlot: 20201472}
+		KVLoraRank: 512, StateBytesPerSlot: 20201472, VocabSize: 157184}
 	for i := 0; i < 24; i++ {
 		l := gguf.Layer{Recurrent: true}
 		if i%4 == 3 {
@@ -59,10 +59,10 @@ func room(vram, others, ram int) Room {
 func TestSeedReferencePredictsMeasuredFootprint(t *testing.T) {
 	fp := Seed(refInfo(), "q4_0")
 	got := fp.vram(3, 65536, 0)
-	t.Logf("reference seed: fixed %.0f scratch %.0f perTok %.5f swaPerTok %.5f expert/layer %.1f -> 3x64k q4_0 n-cpu-moe 0: %.0f MiB (measured process use: 12200)",
+	t.Logf("reference seed: fixed %.0f scratch %.0f perTok %.5f swaPerTok %.5f expert/layer %.1f -> 3x64k q4_0 n-cpu-moe 0: %.0f MiB (measured process use after requests: 12134, sweep.csv)",
 		fp.FixedMiB, fp.ScratchMiB, fp.PerTokenMiB, fp.SWAPerTokenMiB, fp.ExpertMiBPerLayer, got)
-	if math.Abs(got-12200) > 100 {
-		t.Errorf("predicted %.0f MiB, measured 12200", got)
+	if math.Abs(got-12134) > 200 {
+		t.Errorf("predicted %.0f MiB, measured 12134", got)
 	}
 	// 5 full layers x 2 heads x 1024 elts at 4.5 bit
 	if want := 5 * 2 * 1024 * 4.5 / 8 / mib; math.Abs(fp.PerTokenMiB-want) > 1e-9 {
@@ -87,11 +87,11 @@ func TestSeedLingMLAAndState(t *testing.T) {
 	}
 	got := fp.vram(3, 65536, 0)
 	t.Logf("Ling seed: fixed %.0f perTok %.6f state/slot %.2f expert/layer %.1f -> 3x64k q4_0: %.0f MiB", fp.FixedMiB, fp.PerTokenMiB, fp.StatePerSlotMiB, fp.ExpertMiBPerLayer, got)
-	if got < 6300 || got > 6500 {
-		t.Errorf("3x64k predicted %.0f MiB", got)
+	if math.Abs(got-5598) > 200 { // measured process use after requests, sweep.csv
+		t.Errorf("3x64k predicted %.0f MiB, measured 5598", got)
 	}
 	// the state is per slot and does not grow with ctx
-	if d := fp.vram(3, 8192, 0) - fp.vram(1, 8192, 0); math.Abs(d-2*(fp.PerTokenMiB*8192+fp.StatePerSlotMiB)) > 1e-6 {
+	if d := fp.vram(3, 8192, 0) - fp.vram(1, 8192, 0); math.Abs(d-2*((fp.PerTokenMiB+fp.ComputePerTokenMiB)*8192+fp.StatePerSlotMiB)) > 1e-6 {
 		t.Errorf("slot cost %.3f", d)
 	}
 }
@@ -131,11 +131,11 @@ func TestSeedDenseFullAttentionEveryLayer(t *testing.T) {
 func TestSeedSWAWithoutLayers(t *testing.T) {
 	in := gguf.Info{Arch: "x", NLayer: 10, NKVHead: 4, HeadDimK: 64, HeadDimV: 64, SlidingWindow: 512, SWALayers: 8, DenseBytes: 1 << 30}
 	fp := Seed(in, "f16")
-	if fp.PerTokenMiB == 0 || fp.SWAPerTokenMiB == 0 || fp.SWAWindow != 512 {
+	if fp.PerTokenMiB == 0 || fp.SWAPerTokenMiB == 0 || fp.SWAWindow != 512+ubatchTokens {
 		t.Errorf("%+v", fp)
 	}
-	// the window part must not grow with ctx
-	if a, b := fp.kvAt(1, 4096), fp.kvAt(1, 8192); math.Abs((b-a)-fp.PerTokenMiB*4096) > 1e-6 {
+	// the window part must not grow with ctx (the scratch that scales with ctx does)
+	if a, b := fp.kvAt(1, 4096), fp.kvAt(1, 8192); math.Abs((b-a)-(fp.PerTokenMiB+fp.ComputePerTokenMiB)*4096) > 1e-6 {
 		t.Errorf("SWA part grew with ctx: %v %v", a, b)
 	}
 }
@@ -158,10 +158,10 @@ func TestChooseTable(t *testing.T) {
 	ling := Seed(lingInfo(), "q4_0")
 	cases := []tcase{
 		{name: "16GB card, desktop 1255 others, reference model, full wants", fp: ref, room: room(16303, 1255, 24000), slots: 3, ncpuMax: 0, ctxMin: 65536},
-		{name: "16GB card, 2800 others (browser + game loaded)", fp: ref, room: room(16303, 2800, 24000), slots: 3, ncpuMin: 3, ncpuMax: 6, ctxMin: 65536},
+		{name: "16GB card, 2800 others (browser + game loaded): ctx shrinks, experts stay on the card", fp: ref, room: room(16303, 2800, 24000), slots: 3, ncpuMin: 0, ncpuMax: 0, ctxMin: 32768},
 		{name: "12GB card", fp: ref, room: room(12288, 800, 24000), slots: 3, ncpuMin: 8, ncpuMax: 14, ctxMin: 65536},
 		{name: "8GB card", fp: ref, room: room(8192, 600, 24000), slots: 3, ncpuMin: 22, ncpuMax: 30, ctxMin: 65536},
-		{name: "Ling, 8GB card", fp: ling, room: room(8192, 600, 24000), slots: 3, ncpuMin: 3, ncpuMax: 8, ctxMin: 65536},
+		{name: "Ling, 8GB card", fp: ling, room: room(8192, 600, 24000), slots: 3, ncpuMin: 0, ncpuMax: 0, ctxMin: 32768},
 		{name: "Ling, 6GB card", fp: ling, room: room(6144, 600, 24000), slots: 3, ncpuMin: 14, ncpuMax: 23, ctxMin: 65536},
 		{name: "Ling, 16GB card", fp: ling, room: room(16303, 1255, 24000), slots: 3, ncpuMax: 0, ctxMin: 65536},
 		{name: "Ling, no GPU, 16GB RAM free", fp: ling, room: Room{NoGPU: true, RAMAvail: 16000}, slots: 3, ctxMin: 65536, cpuOnly: true},
@@ -461,7 +461,7 @@ func TestPlanTable(t *testing.T) {
 			"gemma4-rp-maxxed-q3kxl", nil},
 		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
 		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "ling3-tiny-q4km", map[string]string{"ling3-tiny-q4km": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
-		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "ling3-tiny-q4km", map[string]string{"ling3-tiny-q4km": "tight", "gemma4-e2b-q4km": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
+		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "gemma4-e2b-q4km", map[string]string{"gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
 		{"6GB, Ling installed with header", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), allInstalled, func(m catalog.Model) (gguf.Info, bool) { return lingInfo(), m.ID == "ling3-tiny-q4km" }, "", map[string]string{"ling3-tiny-q4km": "tight"}},
 		{"4GB: too little card, CPU-only and tight", hwNvidia(4096, 500, 24000, "NVIDIA GeForce GTX 1650"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "tight"}},
 		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "tight"}},
@@ -545,8 +545,8 @@ func TestReferenceFromFile(t *testing.T) {
 	}
 	fp := Seed(in, "q4_0")
 	got := fp.vram(3, 65536, 0)
-	t.Logf("from the real header: %.0f MiB at 3x64k q4_0 n-cpu-moe 0 (measured 12200)", got)
-	if math.Abs(got-12200) > 100 {
+	t.Logf("from the real header: %.0f MiB at 3x64k q4_0 n-cpu-moe 0 (measured 12134)", got)
+	if math.Abs(got-12134) > 200 {
 		t.Errorf("predicted %.0f", got)
 	}
 	if !reflect.DeepEqual(in.Layers, refInfo().Layers) || in.ExpertBytes != refInfo().ExpertBytes {

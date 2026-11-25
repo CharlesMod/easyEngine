@@ -34,6 +34,15 @@ func (s *Supervisor) room(ctx context.Context, hw probe.Hardware, ourPIDs []int)
 	g, ok := bestGPU(hw)
 	r := fit.Room{RAMAvail: hw.RAMAvailMiB, GameReserve: s.cfg.Profile.GameReserveMiB, NoGPU: !ok || g.VRAMTotalMiB == 0, Unified: g.UnifiedMemory}
 	if ok {
+		r.GPUName = g.Name
+		s.mu.Lock()
+		id := s.st.Model
+		s.mu.Unlock()
+		if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
+			if m, ok := cat.Model(id); ok {
+				r.SpeedScale = fit.SpeedScaleFor(g.Name, m.Footprint)
+			}
+		}
 		r.VRAMTotal = g.VRAMTotalMiB
 		r.Margin = fit.DefaultMargin(g.VRAMTotalMiB)
 		if o, err := s.cfg.Others(ctx, g, ourPIDs); err == nil {

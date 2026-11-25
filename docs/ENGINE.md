@@ -187,7 +187,7 @@ and gives no measured answer):
 ```
 llama-server -m <gguf> -ngl 999 [--n-cpu-moe N] -np <slots> -c <slots*ctx_per_slot>
   --no-kv-unified  (independent slots: each one gets exactly ctx_per_slot)
-  -ctk <kv> -ctv <kv> -fa on --jinja --cache-reuse 256 --no-webui --metrics --slots
+  -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --no-webui --metrics --slots
   --host 127.0.0.1 --port <free port> -a <model id>
 ```
 

@@ -30,7 +30,7 @@ import (
 
 var withValue = map[string]bool{
 	"-m": true, "-ngl": true, "--n-cpu-moe": true, "-np": true, "-c": true, "-ctk": true, "-ctv": true,
-	"-fa": true, "--cache-reuse": true, "--host": true, "--port": true, "-a": true,
+	"-fa": true, "--cache-reuse": true, "--host": true, "--port": true, "-a": true, "--reasoning": true,
 	"--alias": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
@@ -51,6 +51,7 @@ func helpText(hidden map[string]bool) string {
 		"-ctv,  --cache-type-v TYPE     KV cache data type for V",
 		"-fa,   --flash-attn [on|off|auto]  set Flash Attention use",
 		"-kvu,  --kv-unified, -no-kvu, --no-kv-unified   use single unified KV buffer",
+		"-rea,  --reasoning [on|off|auto]        Use reasoning/thinking in the chat",
 		"--jinja                        use jinja template for chat",
 		"--cache-reuse N                min chunk size to attempt reusing from the cache",
 		"--no-webui                     disable the Web UI",

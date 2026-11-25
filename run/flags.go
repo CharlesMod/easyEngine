@@ -84,7 +84,7 @@ func BuildArgs(model string, shape fit.Shape, host string, port int, alias strin
 		}
 	}
 	fixed := [][]string{
-		{"--no-kv-unified"}, {"-fa", "on"}, {"--jinja"}, {"--cache-reuse", "256"},
+		{"--no-kv-unified"}, {"-fa", "on"}, {"--jinja"}, {"--reasoning", "off"}, {"--cache-reuse", "256"},
 		{"--no-webui"}, {"--metrics"}, {"--slots"},
 	}
 	for _, g := range fixed {
@@ -94,6 +94,14 @@ func BuildArgs(model string, shape fit.Shape, host string, port int, alias strin
 			// --no-kv-unified (-no-kvu); "--kv-unified off" would turn unified KV ON and leave a stray arg.
 			if has(known, "--no-kv-unified", "-no-kvu") {
 				args = append(args, "--no-kv-unified")
+			} else {
+				dropped = append(dropped, g[0])
+			}
+		case "--reasoning":
+			// Game lines are short: thinking would eat the whole token budget and leave an empty reply.
+			// A client that wants it can still ask per request.
+			if has(known, "--reasoning", "-rea") {
+				args = append(args, g...)
 			} else {
 				dropped = append(dropped, g[0])
 			}

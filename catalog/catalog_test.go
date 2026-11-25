@@ -124,3 +124,50 @@ func TestEmbeddedLadder(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryModelHasSamplerProfiles(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range c.Models {
+		if m.SamplerSource == "" || len(m.SamplerMatch) == 0 {
+			t.Errorf("%s: sampler_source or sampler_match missing", m.ID)
+		}
+		for _, name := range []string{ProfileOfficial, ProfileRP, ProfileStructured} {
+			p, ok := m.Profile(name)
+			if !ok {
+				t.Errorf("%s: no %s profile", m.ID, name)
+				continue
+			}
+			// every Gemma 4 build: Google's generation_config.json (temperature 1.0, top_k 64, top_p 0.95), DRY off
+			if p.Temperature == nil || *p.Temperature != 1 || p.TopK == nil || *p.TopK != 64 || p.TopP == nil || *p.TopP != 0.95 ||
+				p.MinP == nil || *p.MinP != 0 || p.RepeatPenalty == nil || *p.RepeatPenalty != 1 || p.DryMultiplier == nil || *p.DryMultiplier != 0 {
+				t.Errorf("%s/%s: %+v", m.ID, name, p)
+			}
+		}
+	}
+}
+
+func TestModelByName(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"google/gemma-4-E4B-it":         "gemma4-e4b-q4km",
+		"gemma4:e4b":                    "gemma4-e4b-q4km",
+		"unsloth/gemma-4-E2B-it-GGUF":   "gemma4-e2b-q4km",
+		"google/gemma-4-26B-A4B-it":     "gemma4-rp-maxxed-q3kxl",
+		"gemma4-rp-maxxed-Q3_K_XL.gguf": "gemma4-rp-maxxed-q3kxl",
+	} {
+		if m, ok := c.ModelByName(name); !ok || m.ID != want {
+			t.Errorf("%q: got %q %v, want %q", name, m.ID, ok, want)
+		}
+	}
+	for _, name := range []string{"", "gpt-4o", "llama-3.1-8b", "gemma-3-27b", "gemma-2-9b"} {
+		if m, ok := c.ModelByName(name); ok {
+			t.Errorf("%q matched %s", name, m.ID)
+		}
+	}
+}

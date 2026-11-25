@@ -50,6 +50,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad external URL")
 			return
 		}
+		a.applySampler(w, r)
 		rest := strings.TrimPrefix(r.URL.Path, "/v1")
 		rp := &httputil.ReverseProxy{
 			Transport:     transport,
@@ -72,6 +73,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad server URL")
 			return
 		}
+		a.applySampler(w, r)
 		rp := &httputil.ReverseProxy{
 			Transport:     transport,
 			FlushInterval: -1, // flush every write: SSE tokens must not sit in a buffer

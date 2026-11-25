@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "llamacpp": {
     "tag": "b12680",
     "assets": [
@@ -245,7 +245,39 @@
           "date": "2026-11-25",
           "flags": "-ngl 999 -fa on --no-kv-unified -ub 512 --cache-reuse 256"
         }
-      }
+      },
+      "sampler": {
+        "official": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "rp": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "structured": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        }
+      },
+      "sampler_source": "https://huggingface.co/google/gemma-4-26B-A4B-it/blob/4d7ae4984b7db7de8f8457170b3f1a419ee76d52/generation_config.json (base model of this build); https://unsloth.ai/docs (Gemma 4: same values)",
+      "sampler_match": [
+        "gemma4rpmaxxed",
+        "gemma426b",
+        "gemma4a4b"
+      ]
     },
     {
       "id": "gemma4-e4b-q4km",
@@ -289,7 +321,37 @@
           "date": "2026-11-25",
           "flags": "-ngl 999 -fa on --no-kv-unified -ub 512 --cache-reuse 256"
         }
-      }
+      },
+      "sampler": {
+        "official": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "rp": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "structured": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        }
+      },
+      "sampler_source": "https://huggingface.co/google/gemma-4-E4B-it/blob/4ecc2ba63bcac23ba4a767fc87025b1450f84c9c/generation_config.json (the QAT repo google/gemma-4-E4B-it-qat-q4_0-unquantized@476025a0 is identical); https://unsloth.ai/docs (Gemma 4: same values)",
+      "sampler_match": [
+        "gemma4e4b"
+      ]
     },
     {
       "id": "gemma4-e2b-q4km",
@@ -335,7 +397,37 @@
           "date": "2026-11-25",
           "flags": "-ngl 999 -fa on --no-kv-unified -ub 512 --cache-reuse 256"
         }
-      }
+      },
+      "sampler": {
+        "official": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "rp": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        },
+        "structured": {
+          "temperature": 1,
+          "top_k": 64,
+          "top_p": 0.95,
+          "min_p": 0,
+          "repeat_penalty": 1,
+          "dry_multiplier": 0
+        }
+      },
+      "sampler_source": "https://huggingface.co/google/gemma-4-E2B-it/blob/4adf15748de9e1a0097b6274cee9c15836c41c37/generation_config.json (the QAT repo google/gemma-4-E2B-it-qat-q4_0-unquantized@6befbaca is identical); https://unsloth.ai/docs (Gemma 4: same values)",
+      "sampler_match": [
+        "gemma4e2b"
+      ]
     }
   ]
 }

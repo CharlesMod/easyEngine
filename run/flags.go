@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"hermesengine/catalog"
 	"hermesengine/fit"
 )
 
@@ -73,7 +74,9 @@ func group(args []string) [][]string {
 
 // BuildArgs is the llama-server command line (after the binary) for a shape.
 // Flags the pinned release does not know are dropped and reported.
-func BuildArgs(model string, shape fit.Shape, host string, port int, alias string, known map[string]bool) (args, dropped []string) {
+// official, when set, becomes llama-server's own sampling defaults (--temp, --top-k, ...), so a
+// client that sends no sampler fields gets the model's vendor values.
+func BuildArgs(model string, shape fit.Shape, host string, port int, alias string, known map[string]bool, official *catalog.SamplerProfile) (args, dropped []string) {
 	args = []string{"-m", model}
 	required := map[string]bool{"-ngl": true, "-np": true, "-c": true}
 	for _, g := range group(fit.Args(shape)) {
@@ -118,6 +121,11 @@ func BuildArgs(model string, shape fit.Shape, host string, port int, alias strin
 				dropped = append(dropped, g[0])
 			}
 		}
+	}
+	if official != nil {
+		sa, sd := SamplerArgs(*official, known)
+		args = append(args, sa...)
+		dropped = append(dropped, sd...)
 	}
 	args = append(args, "--host", host, "--port", strconv.Itoa(port))
 	if has(known, "-a", "--alias") {

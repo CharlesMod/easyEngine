@@ -101,9 +101,9 @@ func TestChooseTable(t *testing.T) {
 	ref := Seed(refInfo(), "q4_0")
 	cases := []tcase{
 		{name: "16GB card, desktop 1255 others, reference model, full wants", fp: ref, room: room(16303, 1255, 24000), slots: 3, ncpuMax: 0, ctxMin: 65536},
-		{name: "16GB card, 2800 others (browser + game loaded)", fp: ref, room: room(16303, 2800, 24000), slots: 3, ncpuMax: 6, ctxMin: 8192},
-		{name: "12GB card", fp: ref, room: room(12288, 800, 24000), slots: 3, ncpuMin: 4, ncpuMax: 12, ctxMin: 8192},
-		{name: "8GB card", fp: ref, room: room(8192, 600, 24000), slots: 3, ncpuMin: 15, ncpuMax: 28, ctxMin: 8192},
+		{name: "16GB card, 2800 others (browser + game loaded)", fp: ref, room: room(16303, 2800, 24000), slots: 3, ncpuMin: 3, ncpuMax: 6, ctxMin: 65536},
+		{name: "12GB card", fp: ref, room: room(12288, 800, 24000), slots: 3, ncpuMin: 8, ncpuMax: 14, ctxMin: 65536},
+		{name: "8GB card", fp: ref, room: room(8192, 600, 24000), slots: 3, ncpuMin: 22, ncpuMax: 30, ctxMin: 65536},
 		{name: "8GB card, only 5 GB host RAM free: experts will not fit in RAM", fp: ref, room: room(8192, 600, 5000), wantErr: true},
 		{name: "4GB card: dense part alone does not fit", fp: ref, room: room(4096, 500, 24000), wantErr: true},
 		{name: "no GPU, 32GB RAM (24000 free)", fp: ref, room: Room{NoGPU: true, RAMAvail: 24000}, slots: 3, ctxMin: 8192, cpuOnly: true},
@@ -154,6 +154,19 @@ func TestChooseOrderCtxBeforeExpertsBeforeSlots(t *testing.T) {
 	s, err := Choose(ref, r, game)
 	if err != nil || s.NCpuMoe != 0 || s.Slots != 3 || s.CtxPerSlot < 40960-1024 || s.CtxPerSlot >= 65536 {
 		t.Errorf("ctx should shrink first: %v %v", s, err)
+	}
+	// Below half the max ctx at zero layers: layers move to RAM and ctx grows back past half
+	r.VRAMTotal = int(need(20480)) + r.Others + r.GameReserve + r.Margin
+	s, err = Choose(ref, r, game)
+	if err != nil || s.NCpuMoe < 1 || s.Slots != 3 || s.CtxPerSlot <= 32768 {
+		t.Errorf("experts should move before ctx drops under half: %v %v", s, err)
+	}
+	// equal ctx: the fewer CPU layers wins
+	if s.NCpuMoe > 1 {
+		lower := ref.vram(3, s.CtxPerSlot, s.NCpuMoe-1)
+		if lower <= budgetOf(r) {
+			t.Errorf("a smaller n-cpu-moe also fits: %v", s)
+		}
 	}
 	// Below the floor ctx at zero layers: layers move, ctx grows back
 	r.VRAMTotal = int(need(8192)) + r.Others + r.GameReserve + r.Margin - 300
@@ -381,14 +394,16 @@ func TestPlanTable(t *testing.T) {
 	cases := []pc{
 		{"16GB, reference installed with header", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), allInstalled, refInfoFn,
 			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
+		{"16GB, 2800 others: a few expert layers in RAM keep the long ctx", func() probe.Hardware { h := hwNvidia(16303, 2800, 24000, "NVIDIA GeForce RTX 5080"); return h }(), allInstalled, refInfoFn,
+			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes"}},
 		{"16GB, nothing installed: reference is downloadable now", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), noneInstalled, nil,
 			"gemma4-rp-maxxed-q3kxl", nil},
-		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
-		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "yes"}},
+		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
+		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "gemma4-e2b-q4km", map[string]string{"gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
 		{"4GB: too little card, CPU-only and tight", hwNvidia(4096, 500, 24000, "NVIDIA GeForce GTX 1650"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "tight"}},
 		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "tight"}},
 		{"no GPU 8GB RAM", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 8000, RAMAvailMiB: 5000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
-		{"Apple unified 16GB", apple, noneInstalled, nil, "", map[string]string{"gemma4-rp-maxxed-q3kxl": "no", "gemma4-26b-a4b-q3kxl": "no"}},
+		{"Apple unified 16GB", apple, noneInstalled, nil, "", map[string]string{"gemma4-rp-maxxed-q3kxl": "no"}},
 		{"16GB but 3 GB of disk", func() probe.Hardware {
 			h := hwNvidia(16303, 600, 24000, "NVIDIA GeForce RTX 5080")
 			h.DiskFreeMiB = 3000

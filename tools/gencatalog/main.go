@@ -312,8 +312,6 @@ type modelSpec struct {
 }
 
 var modelSpecs = []modelSpec{
-	{id: "gemma4-26b-a4b-q3kxl", name: "Gemma 4 26B A4B (stock, UD-Q3_K_XL)", repo: "unsloth/gemma-4-26B-A4B-it-GGUF", file: "gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf",
-		moe: true, quality: 85, chat: "gemma4", notes: "stock unsloth quant, same shape as the reference build"},
 	{id: "gemma4-e4b-q4km", name: "Gemma 4 E4B (Q4_K_M)", repo: "unsloth/gemma-4-E4B-it-GGUF", file: "gemma-4-E4B-it-Q4_K_M.gguf", quality: 60, chat: "gemma4"},
 	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4"},
 }

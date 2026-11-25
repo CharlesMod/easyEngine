@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "llamacpp": {
+    "tag": "b12680",
+    "assets": [
+      {
+        "id": "cuda-linux-x64",
+        "os": "linux",
+        "arch": "amd64",
+        "accel": "cuda",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "sha256": "0eb25efe0c16da6eec9a58dfdd1ba5ecfd67df22648e35c8617079189e5064a1",
+        "size": 220399512,
+        "extra": [
+          "cudart-linux-x64"
+        ]
+      },
+      {
+        "id": "cudart-linux-x64",
+        "os": "linux",
+        "arch": "amd64",
+        "accel": "cudart",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-b12680-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "sha256": "11a964834ab1bf83385543a3509bb2b5c10826345550245c158ad839937f4429",
+        "size": 594371571
+      },
+      {
+        "id": "vulkan-linux-x64",
+        "os": "linux",
+        "arch": "amd64",
+        "accel": "vulkan",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-vulkan-x64.tar.gz",
+        "sha256": "cba44b0656cbcb912570fad9427a6840c171cea934cabef98a8c9a53411a8396",
+        "size": 37067528
+      },
+      {
+        "id": "cpu-linux-x64",
+        "os": "linux",
+        "arch": "amd64",
+        "accel": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-x64.tar.gz",
+        "sha256": "91968c0feedb560428b798d37fa9a34732563900dba7876cb234d879d4e96085",
+        "size": 23378427
+      },
+      {
+        "id": "cuda-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "cuda",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cuda-12.4-x64.zip",
+        "sha256": "69dd907090f6c5b2d01279a5b8cd530e1774f462477b80e9fdbf0c78567d90de",
+        "size": 358327050,
+        "extra": [
+          "cudart-win-x64"
+        ]
+      },
+      {
+        "id": "cudart-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "cudart",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+        "size": 391443627
+      },
+      {
+        "id": "cuda13-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "cuda",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cuda-13.5-x64.zip",
+        "sha256": "7aebf7c42cb2c5d841dd2690899c7bee7c73b5a1299fa3095e68ce29d2b81db7",
+        "size": 225953261,
+        "extra": [
+          "cudart13-win-x64"
+        ]
+      },
+      {
+        "id": "cudart13-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "cudart",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-bin-win-cuda-13.5-x64.zip",
+        "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
+        "size": 426314199
+      },
+      {
+        "id": "vulkan-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "vulkan",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-vulkan-x64.zip",
+        "sha256": "cd659f5443977280dd82c5906a999723dd5bc8eed959580e1dc810c6df43ac21",
+        "size": 39065295
+      },
+      {
+        "id": "cpu-win-x64",
+        "os": "windows",
+        "arch": "amd64",
+        "accel": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cpu-x64.zip",
+        "sha256": "78604b34f3580d331352d9ea8cb81db25f64c49e53f273e8b60c6cc1cf744d45",
+        "size": 25216296
+      },
+      {
+        "id": "metal-mac-arm64",
+        "os": "darwin",
+        "arch": "arm64",
+        "accel": "metal",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-macos-arm64.tar.gz",
+        "sha256": "c1a79ede3620510f8ab648290a0e8182f8289f6dd64fb79dd8ebc11ae73c119a",
+        "size": 16820164
+      },
+      {
+        "id": "cpu-mac-x64",
+        "os": "darwin",
+        "arch": "amd64",
+        "accel": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-macos-x64.tar.gz",
+        "sha256": "76b526754e834b48087a2c82a867f9f02675e502504c074f65f4c2a6de6a663e",
+        "size": 12540847
+      }
+    ]
+  },
+  "uv": [
+    {
+      "id": "uv-linux-amd64",
+      "os": "linux",
+      "arch": "amd64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c",
+      "size": 17113138
+    },
+    {
+      "id": "uv-linux-arm64",
+      "os": "linux",
+      "arch": "arm64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-unknown-linux-gnu.tar.gz",
+      "sha256": "14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2",
+      "size": 16275135
+    },
+    {
+      "id": "uv-windows-amd64",
+      "os": "windows",
+      "arch": "amd64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-pc-windows-msvc.zip",
+      "sha256": "297b3881fe1adfb922becc2c1613202abb41dc83ea5ff43d472aa087ca1f8683",
+      "size": 15641577
+    },
+    {
+      "id": "uv-windows-arm64",
+      "os": "windows",
+      "arch": "arm64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-pc-windows-msvc.zip",
+      "sha256": "f223bcd3fa010174ffeeb885cc1d5334bb81388640c65baa5b8b42b47017337e",
+      "size": 15841571
+    },
+    {
+      "id": "uv-darwin-arm64",
+      "os": "darwin",
+      "arch": "arm64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-apple-darwin.tar.gz",
+      "sha256": "e419bf07533bdbf48795fc793601c834dd79db57a8c49ce8e25cfe3a8639958d",
+      "size": 14700626
+    },
+    {
+      "id": "uv-darwin-amd64",
+      "os": "darwin",
+      "arch": "amd64",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-apple-darwin.tar.gz",
+      "sha256": "153e03197588204c04fc4c81cc4bafbfa4280222a385e4ee36a87aeec0ae63b4",
+      "size": 17489953
+    }
+  ],
+  "models": [
+    {
+      "id": "gemma4-rp-maxxed-q3kxl",
+      "name": "Gemma 4 26B RP (HermesVoice build)",
+      "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
+      "sha256": "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29",
+      "size": 10001779136,
+      "moe": true,
+      "quality": 100,
+      "chat": "gemma4",
+      "notes": "reference model"
+    },
+    {
+      "id": "gemma4-26b-a4b-q3kxl",
+      "name": "Gemma 4 26B A4B (stock, UD-Q3_K_XL)",
+      "file": "gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/c099eb48e663fd284577b04978a94ffccb261841/gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf",
+      "sha256": "90a918830420e6a36e01c0d219e563f1d0ca7f223dffd90ad4e02ef4f3253fde",
+      "size": 12907280096,
+      "moe": true,
+      "quality": 85,
+      "chat": "gemma4",
+      "notes": "stock unsloth quant, same shape as the reference build"
+    },
+    {
+      "id": "gemma4-e4b-q4km",
+      "name": "Gemma 4 E4B (Q4_K_M)",
+      "file": "gemma-4-E4B-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/gemma-4-E4B-it-Q4_K_M.gguf",
+      "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
+      "size": 4977171584,
+      "moe": false,
+      "quality": 60,
+      "chat": "gemma4"
+    },
+    {
+      "id": "gemma4-e2b-q4km",
+      "name": "Gemma 4 E2B (Q4_K_M)",
+      "file": "gemma-4-E2B-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf",
+      "sha256": "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
+      "size": 3106738272,
+      "moe": false,
+      "quality": 40,
+      "chat": "gemma4"
+    }
+  ]
+}

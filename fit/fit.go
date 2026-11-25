@@ -264,8 +264,9 @@ func budgetOf(room Room) float64 {
 }
 
 // Choose picks the shape, in the order of ENGINE.md section 5: all on GPU at the largest ctx;
-// ctx shrinks toward the floor; MoE experts move to RAM a layer at a time (then ctx grows back
-// as far as it fits); then fewer slots; else ErrTooBig. Dense models are never split between
+// ctx per slot down to half; MoE only: as many expert layers in RAM as RAM allows, then the
+// most ctx that fits (fewer CPU layers on equal ctx); ctx down to the floor; then fewer slots;
+// else ErrTooBig. Dense models are never split between
 // card and RAM; with no usable GPU they run CPU-only.
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	w = w.norm()
@@ -280,19 +281,45 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 			}
 			continue
 		}
-		maxN := 0
+		okAt := func(n int) func(int) bool {
+			return func(c int) bool { return fp.vram(slots, c, n) <= budget }
+		}
+		// (1) all on GPU at the largest ctx.
+		if ctx, ok := maxCtx(ceil, ceil, okAt(0)); ok {
+			return fp.shape(w, slots, ctx, 0, false), nil
+		}
+		// (2) ctx per slot down to half the largest.
+		half := alignDown(ceil / 2)
+		if half < w.CtxFloor {
+			half = w.CtxFloor
+		}
+		if ctx, ok := maxCtx(half, ceil, okAt(0)); ok {
+			return fp.shape(w, slots, ctx, 0, false), nil
+		}
+		// (3) MoE only: expert layers to RAM, as many as RAM allows, then the most ctx that fits;
+		// equal ctx goes to the fewer CPU layers.
 		if fp.MoE && !room.Unified {
-			maxN = fp.ExpertLayers
-		}
-		for n := 0; n <= maxN; n++ {
-			if fp.ExpertMiBPerLayer*float64(n) > ram {
-				break
+			maxN := fp.ExpertLayers
+			if fp.ExpertMiBPerLayer > 0 {
+				if byRAM := int(ram / fp.ExpertMiBPerLayer); byRAM < maxN {
+					maxN = byRAM
+				}
 			}
-			ctx, ok := maxCtx(w.CtxFloor, ceil, func(c int) bool { return fp.vram(slots, c, n) <= budget })
-			if ok {
-				return fp.shape(w, slots, ctx, n, false), nil
+			bestN, bestCtx := 0, 0
+			for n := 1; n <= maxN; n++ {
+				if ctx, ok := maxCtx(w.CtxFloor, ceil, okAt(n)); ok && ctx > bestCtx {
+					bestN, bestCtx = n, ctx
+				}
+			}
+			if bestN > 0 {
+				return fp.shape(w, slots, bestCtx, bestN, false), nil
 			}
 		}
+		// (4) ctx down to the floor (dense models, or MoE with nothing found above).
+		if ctx, ok := maxCtx(w.CtxFloor, ceil, okAt(0)); ok {
+			return fp.shape(w, slots, ctx, 0, false), nil
+		}
+		// (5) fewer slots: next loop turn.
 	}
 	return Shape{}, ErrTooBig
 }

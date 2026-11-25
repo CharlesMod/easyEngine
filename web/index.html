@@ -66,6 +66,7 @@ pre{margin:8px 0 0;max-height:260px;overflow:auto;background:var(--bg);border:1p
 <h2>Local model</h2>
 <div id="shape" class="mut"></div>
 <div id="prog" class="hide"><div class="bar"><i id="pbar"></i></div><div class="mut" id="ptxt"></div></div>
+<div id="uprog" class="hide"><div class="mut" id="utit"></div><div class="bar"><i id="ubar"></i></div><div class="mut" id="utxt"></div></div>
 <div class="row" style="margin:10px 0"><button id="bStart" class="pri">Start</button><button id="bStop">Stop</button><button id="bCancel" class="hide">Cancel</button></div>
 <div id="models"></div>
 <label for="impPath">Import a model from a local path</label>
@@ -207,7 +208,7 @@ function render(){
   setLight($('light'),phaseColor(st.phase));
   var errs=(st.errors||[]).slice();if(toast)errs.push(toast);
   errs.forEach(function(e,i){if(i)eb.appendChild(document.createElement('br'));eb.appendChild(document.createTextNode(e))});
-  $('fbwarn').textContent=st.model_fallback?'Warning: the model in use is a fallback. '+(st.model_note||'Expect weaker results.')+' Pick a larger model below if your hardware allows.':'';
+  $('fbwarn').textContent=st.model_tier==='starter'?(st.model_note||'A smaller model is serving for now.'):st.model_fallback?'Warning: the model in use is a fallback. '+(st.model_note||'Expect weaker results.')+' Pick a larger model below if your hardware allows.':'';
   var ext=st.mode==='external';
   $('mLocal').className=ext?'':'on';$('mExt').className=ext?'on':'';
   $('local').classList.toggle('hide',ext);$('ext').classList.toggle('hide',!ext);
@@ -221,6 +222,16 @@ function render(){
     $('pbar').style.width=pc.toFixed(1)+'%';
     $('ptxt').textContent=(p.step||'')+'  '+fmtB(p.done_bytes)+' / '+fmtB(p.total_bytes)+' ('+pc.toFixed(0)+'%)  '+(p.rate_bps!=null?(p.rate_bps/1048576).toFixed(1)+' MB/s':'')+'  ETA '+fmtEta(p.eta_s);
   }
+  var u=st.upgrade,ua=u&&u.state!=='done';
+  $('uprog').classList.toggle('hide',!ua);
+  if(ua){
+    var q=u.progress,uc=q&&q.total_bytes>0?Math.min(100,q.done_bytes*100/q.total_bytes):0;
+    var lab={queued:'queued behind the starter model',downloading:'downloading',retrying:'failed, retrying',no_space:'not enough disk space, staying on the smaller model',swapping:'switching over',cancelled:'cancelled (install it again to resume)',failed:'would not load, staying on the smaller model'}[u.state]||u.state;
+    $('utit').textContent='Full model '+(u.target_name||u.target)+': '+lab+(u.retry_in_s?' (retry in '+u.retry_in_s+' s)':'')+(u.error?' - '+u.error:'');
+    $('ubar').style.width=uc.toFixed(1)+'%';
+    $('utxt').textContent=q?fmtB(q.done_bytes)+' / '+fmtB(q.total_bytes)+' ('+uc.toFixed(0)+'%)  '+(q.rate_bps!=null?(q.rate_bps/1048576).toFixed(1)+' MB/s':'')+'  ETA '+fmtEta(q.eta_s):'';
+  }
+  $('bCancel').classList.toggle('hide',!p&&!(ua&&u.state!=='cancelled'));
   var up=['ready','loading','starting','resizing'].indexOf(st.phase)>=0;
   $('bStart').disabled=up||!!p;$('bStop').disabled=!up&&st.phase!=='sleeping';
   $('bSleep').disabled=st.phase!=='ready';$('bWake').disabled=st.phase!=='sleeping';

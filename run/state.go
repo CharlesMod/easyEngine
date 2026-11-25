@@ -22,10 +22,12 @@ type State struct {
 	LingerS  int      `json:"linger_s"`
 	KVType   string   `json:"kv_type"`
 	// SamplerPolicy is enforce (default) | fill | off (docs/SAMPLERS.md).
-	SamplerPolicy string   `json:"sampler_policy,omitempty"`
-	Model         string   `json:"model"`
-	Backend       string   `json:"backend"`
-	Book          fit.Book `json:"book"`
+	SamplerPolicy string `json:"sampler_policy,omitempty"`
+	Model         string `json:"model"`
+	Backend       string `json:"backend"`
+	// Target is the model a first run is still upgrading to while a smaller starter serves (run/starter.go).
+	Target string   `json:"target,omitempty"`
+	Book   fit.Book `json:"book"`
 }
 
 func (s *State) defaults() {

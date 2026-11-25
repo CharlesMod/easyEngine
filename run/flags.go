@@ -84,16 +84,16 @@ func BuildArgs(model string, shape fit.Shape, host string, port int, alias strin
 		}
 	}
 	fixed := [][]string{
-		{"--kv-unified", "off"}, {"-fa", "on"}, {"--jinja"}, {"--cache-reuse", "256"},
+		{"--no-kv-unified"}, {"-fa", "on"}, {"--jinja"}, {"--cache-reuse", "256"},
 		{"--no-webui"}, {"--metrics"}, {"--slots"},
 	}
 	for _, g := range fixed {
 		switch g[0] {
-		case "--kv-unified":
-			if !has(known, "--kv-unified") && has(known, "--no-kv-unified") {
+		case "--no-kv-unified":
+			// Independent slots: each gets exactly ctx_per_slot. llama-server's switch is the bare
+			// --no-kv-unified (-no-kvu); "--kv-unified off" would turn unified KV ON and leave a stray arg.
+			if has(known, "--no-kv-unified", "-no-kvu") {
 				args = append(args, "--no-kv-unified")
-			} else if has(known, "--kv-unified") {
-				args = append(args, g...)
 			} else {
 				dropped = append(dropped, g[0])
 			}

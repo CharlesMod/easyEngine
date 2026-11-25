@@ -31,9 +31,12 @@ func TestEmbedded(t *testing.T) {
 		}
 	}
 	ref, ok := c.Model("gemma4-rp-maxxed-q3kxl")
-	if !ok || ref.URL != "" || !ref.MoE || ref.File != "gemma4-rp-maxxed-Q3_K_XL.gguf" ||
+	if !ok || !ref.MoE || ref.File != "gemma4-rp-maxxed-Q3_K_XL.gguf" ||
 		ref.SHA256 != "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29" || ref.Size != 10001779136 {
 		t.Errorf("reference model %+v", ref)
+	}
+	if ref.URL != "" && ref.URL != "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf" {
+		t.Errorf("reference url %q", ref.URL)
 	}
 	for _, id := range []string{"gemma4-e4b-q4km", "gemma4-e2b-q4km", "gemma4-26b-a4b-q3kxl"} {
 		m, ok := c.Model(id)

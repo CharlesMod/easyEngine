@@ -26,7 +26,8 @@ import (
 	"hermesengine/catalog"
 )
 
-// The reference build is import-only (url ""): its sha256 is the keeper's published digest.
+// The reference build is published on Hugging Face by the keeper; its sha256 is checked against
+// the digest below. If the upload is not visible yet the entry falls back to import-only (url "").
 const (
 	refID     = "gemma4-rp-maxxed-q3kxl"
 	refFile   = "gemma4-rp-maxxed-Q3_K_XL.gguf"
@@ -306,7 +307,7 @@ type hfEntry struct {
 
 type modelSpec struct {
 	id, name, repo, file, chat, notes string
-	moe                               bool
+	moe, useMain                      bool // useMain: url says resolve/main (the keeper's own repo)
 	quality                           int
 }
 
@@ -343,14 +344,21 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 		if size == 0 {
 			size = e.Size
 		}
+		rev := info.SHA
+		if sp.useMain {
+			rev = "main"
+		}
 		return catalog.Model{
 			ID: sp.id, Name: sp.name, File: sp.file,
-			URL:    "https://huggingface.co/" + sp.repo + "/resolve/" + info.SHA + "/" + url.PathEscape(sp.file),
+			URL:    "https://huggingface.co/" + sp.repo + "/resolve/" + rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size, MoE: sp.moe, Quality: sp.quality, Chat: sp.chat, Notes: sp.notes,
 		}, nil
 	}
 	return catalog.Model{}, fmt.Errorf("%s: file %s not in the repo", sp.repo, sp.file)
 }
+
+var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP (HermesVoice build)", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
+	moe: true, useMain: true, quality: 100, chat: "gemma4", notes: "reference model"}
 
 func main() {
 	out := flag.String("out", "catalog/catalog.json", "output file")
@@ -395,14 +403,20 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 	if err != nil {
 		return err
 	}
+	refModel, err := c.hfModel(refSpec)
+	switch {
+	case err != nil:
+		c.log("WARNING: reference model not on Hugging Face yet (%v); writing it import-only", err)
+		refModel = catalog.Model{ID: refID, Name: refSpec.name, File: refFile, SHA256: refSHA256, Size: st.Size(),
+			MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only"}
+	case refModel.SHA256 != refSHA256:
+		return fmt.Errorf("reference model on Hugging Face has sha256 %s, expected %s", refModel.SHA256, refSHA256)
+	}
 	cat := catalog.Catalog{
 		Version:  version,
 		LlamaCpp: catalog.LlamaCpp{Tag: rel.TagName, Assets: la},
 		UV:       ua,
-		Models: []catalog.Model{{
-			ID: refID, Name: "Gemma 4 26B RP (HermesVoice build)", File: refFile, URL: "", SHA256: refSHA256,
-			Size: st.Size(), MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only until published",
-		}},
+		Models:   []catalog.Model{refModel},
 	}
 	for _, sp := range modelSpecs {
 		m, err := c.hfModel(sp)

@@ -177,13 +177,13 @@
       "id": "gemma4-rp-maxxed-q3kxl",
       "name": "Gemma 4 26B RP (HermesVoice build)",
       "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
-      "url": "",
+      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
       "sha256": "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29",
       "size": 10001779136,
       "moe": true,
       "quality": 100,
       "chat": "gemma4",
-      "notes": "reference model; import-only until published"
+      "notes": "reference model"
     },
     {
       "id": "gemma4-26b-a4b-q3kxl",

@@ -54,9 +54,9 @@ type Verdict struct {
 	EstDecodeTPS float64 `json:"est_decode_tps"`
 	// Estimated is true when the numbers rest on a guess rather than a measurement: a CPU-only
 	// run (no CPU runs were ever measured) or a model with no measured footprint.
-	Estimated  bool   `json:"estimated"`
-	Installed  bool   `json:"installed"`
-	ImportOnly bool   `json:"import_only"` // the catalog has no url: only `import` can install it
+	Estimated  bool `json:"estimated"`
+	Installed  bool `json:"installed"`
+	ImportOnly bool `json:"import_only"` // the catalog has no url: only `import` can install it
 }
 
 type PlanResult struct {

@@ -45,7 +45,7 @@ type Info struct {
 	// VocabSize is the token count, from token_embd.weight; it sets the size of the output
 	// (logits) buffers on the card.
 	VocabSize int
-	FileSize      int64
+	FileSize  int64
 
 	ExpertLayers int     // layers that hold *_exps* tensors
 	Layers       []Layer // per layer, len == NLayer when known

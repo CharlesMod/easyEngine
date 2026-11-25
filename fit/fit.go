@@ -22,8 +22,8 @@ import (
 var ErrTooBig = errors.New("fit: model does not fit this machine")
 
 const (
-	alignTokens   = 1024
-	osReserveMiB  = 2048 // host RAM kept for the OS when moving experts to RAM
+	alignTokens  = 1024
+	osReserveMiB = 2048 // host RAM kept for the OS when moving experts to RAM
 	// The constants below were measured on an RTX 5080 with llama.cpp b12680 at -ub 512, -fa on,
 	// --no-kv-unified (docs/FOOTPRINTS.md; tools/fitcheck reproduces them from the sweep CSV).
 	// They are the same for every model: nothing here is a per-model fudge.
@@ -35,7 +35,7 @@ const (
 	dequantBytes    = 2.0  // quantised KV is expanded to f16 for the biggest layer: bytes per element per token
 	moeSchedMiB     = 180  // GPU cost of the expert-offload copy buffers once any layer is in RAM (measured 90-230)
 	expertRAMFactor = 1.25 // host RAM gained per expert layer moved off the card, vs the tensor bytes (measured 1.02-1.23)
-	minUsableVRAM = 2048 // a GPU whose budget is below this is treated as no GPU by Plan
+	minUsableVRAM   = 2048 // a GPU whose budget is below this is treated as no GPU by Plan
 )
 
 // DefaultMinTPS is the decode floor (tokens/s per stream) used when the game names none: below
@@ -312,7 +312,9 @@ func (fp Footprint) expertRAM(nCpuMoe int) float64 {
 }
 
 // VRAM is the predicted GPU use in MiB of a layout with nCpuMoe expert layers moved to RAM.
-func (fp Footprint) VRAM(slots, ctxPerSlot, nCpuMoe int) float64 { return fp.vram(slots, ctxPerSlot, nCpuMoe) }
+func (fp Footprint) VRAM(slots, ctxPerSlot, nCpuMoe int) float64 {
+	return fp.vram(slots, ctxPerSlot, nCpuMoe)
+}
 
 // ExpertRAM is the predicted extra host RAM in MiB of moving nCpuMoe expert layers off the card.
 func (fp Footprint) ExpertRAM(nCpuMoe int) float64 { return fp.expertRAM(nCpuMoe) }

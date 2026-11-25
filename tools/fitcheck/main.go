@@ -25,15 +25,15 @@ import (
 
 // Row is one measured run.
 type Row struct {
-	Model                   string
-	Slots, CtxPerSlot       int
-	CtxTotal                int
-	KV                      string
-	NCpuMoe                 int
-	Status                  string
-	VRAMLoad, VRAMUsed      float64
-	RSSLoad, RSSUsed        float64
-	DecodeTPS, PromptTPS    float64
+	Model                string
+	Slots, CtxPerSlot    int
+	CtxTotal             int
+	KV                   string
+	NCpuMoe              int
+	Status               string
+	VRAMLoad, VRAMUsed   float64
+	RSSLoad, RSSUsed     float64
+	DecodeTPS, PromptTPS float64
 }
 
 // ReadRows parses the sweep CSV, keeping only status "ok" rows.

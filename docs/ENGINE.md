@@ -147,7 +147,7 @@ A generic port of the hive's measure-then-try launcher
 (`~/hive-mind/serve/bin/hive-mind-llm-run`, design in
 `~/.local/share/sprinter-llm/WORKLOG-adaptive-ctx.md`), with the machine-specific constants
 replaced by numbers from the GGUF header and a calibration book. Pure functions; the runtime
-loop lives in `engine/run`.
+loop lives in `run`.
 
 ### Inputs
 

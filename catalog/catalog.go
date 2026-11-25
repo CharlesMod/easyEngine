@@ -44,6 +44,53 @@ type Model struct {
 	Quality int    `json:"quality"`
 	Chat    string `json:"chat,omitempty"`
 	Notes   string `json:"notes,omitempty"`
+	// Footprint is what a real llama-server took for this file on a reference machine. The
+	// planner uses it for a model that is not downloaded yet; once the file is on disk the GGUF
+	// header gives the same numbers (docs/FOOTPRINTS.md). Generated, never typed: tools/fitcheck
+	// fits it from the sweep CSV into tools/gencatalog/measured.json.
+	Footprint *Footprint `json:"footprint,omitempty"`
+}
+
+// TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU.
+type TPSPoint struct {
+	NCpuMoe int     `json:"n_cpu_moe"`
+	TPS     float64 `json:"tps"`
+}
+
+// MeasuredOn says where a footprint came from.
+type MeasuredOn struct {
+	GPU      string `json:"gpu"`
+	VRAMMiB  int    `json:"vram_mib"`
+	Backend  string `json:"backend"`
+	LlamaCpp string `json:"llamacpp"`
+	Date     string `json:"date"`
+	Flags    string `json:"flags,omitempty"`
+}
+
+// Footprint is the measured memory and speed of one model. Process VRAM in MiB:
+//
+//	vram = fixed_mib + mib_per_1k_ctx[kv] * ctx_total/1024 + state_mib_per_slot[kv] * slots + scratch_mib
+//	       - expert_mib_per_layer * n_cpu_moe + (n_cpu_moe > 0 ? moe_sched_mib : 0)
+//
+// "1k" is 1024 tokens. state_mib_per_slot is the per-slot cost: the sliding-window cache
+// (it scales with the KV type) and any recurrent state.
+type Footprint struct {
+	FixedMiB             float64            `json:"fixed_mib"`
+	MiBPer1kCtx          map[string]float64 `json:"mib_per_1k_ctx"`
+	StateMiBPerSlot      map[string]float64 `json:"state_mib_per_slot"`
+	ScratchMiB           float64            `json:"scratch_mib"`
+	HostMiB              float64            `json:"host_mib,omitempty"` // weights that stay in RAM with -ngl 999
+	ExpertMiBPerLayer    float64            `json:"expert_mib_per_layer,omitempty"`
+	ExpertRAMMiBPerLayer float64            `json:"expert_ram_mib_per_layer,omitempty"`
+	ExpertLayers         int                `json:"expert_layers,omitempty"`
+	MoESchedMiB          float64            `json:"moe_sched_mib,omitempty"`
+	// DecodeTPS and PromptTPS are per stream at the reference shape (q4_0, 65536 ctx per slot,
+	// every layer on the card), keyed by the number of slots decoding at once ("1","2","3").
+	DecodeTPS map[string]float64 `json:"decode_tps,omitempty"`
+	PromptTPS map[string]float64 `json:"prompt_tps,omitempty"`
+	// TPSByNCpuMoe is decode speed against --n-cpu-moe at 3 slots x 65536, q4_0.
+	TPSByNCpuMoe []TPSPoint `json:"tps_by_n_cpu_moe,omitempty"`
+	MeasuredOn   MeasuredOn `json:"measured_on"`
 }
 
 type Catalog struct {

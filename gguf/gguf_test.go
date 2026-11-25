@@ -421,3 +421,33 @@ func TestLingRealHeader(t *testing.T) {
 		t.Errorf("full=%d %+v", full, in)
 	}
 }
+
+func TestHostBytesAndVocabSize(t *testing.T) {
+	kvs := []kv{
+		{"general.architecture", "gemma3n"},
+		{"gemma3n.block_count", uint32(1)},
+		{"gemma3n.attention.head_count", uint32(4)},
+		{"gemma3n.attention.head_count_kv", uint32(1)},
+		{"gemma3n.attention.key_length", uint32(64)},
+		{"gemma3n.attention.value_length", uint32(64)},
+	}
+	ts := []tn{
+		{"token_embd.weight", []uint64{256, 100}, 8},
+		{"per_layer_token_embd.weight", []uint64{256, 100}, 8},
+		{"blk.0.attn_q.weight", []uint64{256, 64}, 12},
+	}
+	in, err := Read(writeFile(t, build(3, kvs, ts)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := int64(100 * 256 / 32 * 34)
+	if in.VocabSize != 100 {
+		t.Errorf("vocab %d", in.VocabSize)
+	}
+	if in.HostBytes != host {
+		t.Errorf("host bytes %d want %d", in.HostBytes, host)
+	}
+	if in.DenseBytes < in.HostBytes*2 {
+		t.Errorf("host bytes must be part of dense bytes: %d vs %d", in.HostBytes, in.DenseBytes)
+	}
+}

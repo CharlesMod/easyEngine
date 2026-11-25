@@ -8,25 +8,33 @@ import (
 	"hermesengine/probe"
 )
 
-// SeedFromSize is the footprint of a model not yet downloaded: the catalog size and a guess
-// at the KV cost scaled by size (about 0.0006 MiB per token per GiB of weights at q4_0, with a
-// 25 % safety factor). Fit is re-checked from the real header after download.
+// SeedFromSize is the footprint of a model not yet downloaded. With a measured footprint in the
+// catalog (m.Footprint, from a real llama-server run) it is that block, so the verdict before
+// download matches the one after. Without one it is a guess scaled by the file size: about 0.0006
+// MiB per token per GiB of weights at q4_0 with a 25 % safety factor, 30 expert layers for a MoE.
+// Fit is re-checked from the real header after download.
 func SeedFromSize(m catalog.Model, kvType string) Footprint {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
+	if m.Footprint != nil {
+		return FromMeasured(m.Footprint, kvType)
+	}
 	sizeMiB := float64(m.Size) / mib
 	gib := sizeMiB / 1024
 	fp := Footprint{
-		FixedMiB:    sizeMiB + cudaCtxMiB,
+		FixedMiB:    sizeMiB + baseOverheadMiB + 200*vocabMiBPer1k, // a typical 200k vocabulary
 		PerTokenMiB: 0.0006 * gib * 1.25 * kvBytes(kvType) / kvBytes("q4_0"),
-		ScratchMiB:  scratchSeed,
+		ScratchMiB:  runtimeMiB,
+		Estimated:   true,
 	}
 	if m.MoE {
 		const layers = 30 // typical; the header gives the real count after download
 		fp.MoE = true
 		fp.ExpertLayers = layers
 		fp.ExpertMiBPerLayer = 0.75 * sizeMiB / layers
+		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
+		fp.MoESchedMiB = moeSchedMiB
 	}
 	return fp
 }
@@ -41,8 +49,14 @@ type Verdict struct {
 	Shape      Shape  `json:"shape"`
 	EstVRAMMiB int    `json:"est_vram_mib"`
 	EstRAMMiB  int    `json:"est_ram_mib"`
-	Installed  bool   `json:"installed"`
-	ImportOnly bool   `json:"import_only"` // the catalog has no url: only `import` can install it
+	// EstDecodeTPS is the expected decode speed per stream in tokens/s on this machine (0 = no
+	// measured curve for this model).
+	EstDecodeTPS float64 `json:"est_decode_tps"`
+	// Estimated is true when the numbers rest on a guess rather than a measurement: a CPU-only
+	// run (no CPU runs were ever measured) or a model with no measured footprint.
+	Estimated  bool `json:"estimated"`
+	Installed  bool `json:"installed"`
+	ImportOnly bool `json:"import_only"` // the catalog has no url: only `import` can install it
 }
 
 type PlanResult struct {
@@ -66,6 +80,7 @@ func RoomFor(hw probe.Hardware, gameReserve int) Room {
 		return r
 	}
 	g := hw.GPUs[best]
+	r.GPUName = g.Name
 	r.VRAMTotal = g.VRAMTotalMiB
 	r.Margin = DefaultMargin(g.VRAMTotalMiB)
 	if g.UnifiedMemory {
@@ -107,12 +122,18 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 		if info != nil && v.Installed {
 			if in, ok := info(m); ok {
 				fp = Seed(in, w.KVType)
+				if m.Footprint != nil { // the header gives the sizes; the measurement gives the speed
+					fp.TPS = FromMeasured(m.Footprint, w.KVType).TPS
+				}
 			}
 		}
 		if fp.FixedMiB == 0 {
 			fp = SeedFromSize(m, w.KVType)
 		}
-		sh, err := Choose(fp, room, w)
+		rm := room
+		rm.SpeedScale = SpeedScaleFor(room.GPUName, m.Footprint)
+		sh, err := Choose(fp, rm, w)
+		v.Estimated = room.NoGPU || (m.Footprint == nil && fp.Estimated)
 		switch {
 		case err != nil:
 			v.Fits, v.Why = "no", whyNot(fp, room, w)
@@ -120,7 +141,7 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 			v.Fits, v.Shape = "no", sh
 			v.Why = fmt.Sprintf("needs %d MiB of free disk, %d MiB available", m.Size/mib+1024, hw.DiskFreeMiB)
 		default:
-			v.Shape, v.EstVRAMMiB, v.EstRAMMiB = sh, sh.VRAMMiB, sh.RAMMiB
+			v.Shape, v.EstVRAMMiB, v.EstRAMMiB, v.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 			v.Fits, v.Why = verdictFor(fp, sh, w)
 		}
 		res.Models = append(res.Models, v)
@@ -135,6 +156,8 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 		}
 	}
 	switch {
+	case room.NoGPU:
+		res.Recommended = cpuOnlyPick(res.Models, room)
 	case bestYes >= 0:
 		res.Recommended = res.Models[bestYes].ID
 	case bestTight >= 0:
@@ -143,11 +166,44 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 	return res
 }
 
+// cpuComfort is the share of free RAM (after the OS reserve) a CPU-only model may take and still
+// count as comfortable: the rest is for the game and the OS caches.
+const cpuComfort = 0.6
+
+// cpuOnlyPick is the recommendation without a usable GPU. Nothing was ever measured on a CPU, so
+// the choice is conservative: the smallest installable model that fits in RAM, preferring one
+// whose need stays within cpuComfort of the free RAM, not the best-quality one. The verdicts are
+// marked Estimated.
+func cpuOnlyPick(vs []Verdict, room Room) string {
+	free := float64(room.RAMAvail - osReserveMiB)
+	best, bestComfy := -1, -1
+	for i, v := range vs {
+		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
+			continue
+		}
+		if best < 0 || v.Size < vs[best].Size {
+			best = i
+		}
+		if float64(v.EstRAMMiB) <= cpuComfort*free && (bestComfy < 0 || v.Size < vs[bestComfy].Size) {
+			bestComfy = i
+		}
+	}
+	if bestComfy >= 0 {
+		return vs[bestComfy].ID
+	}
+	if best >= 0 {
+		return vs[best].ID
+	}
+	return ""
+}
+
 func verdictFor(fp Footprint, s Shape, w Wants) (string, string) {
 	desc := fmt.Sprintf("%d slots x %d ctx", s.Slots, s.CtxPerSlot)
 	switch {
 	case s.CPUOnly:
-		return "tight", desc + ", CPU only (no usable GPU; slow)"
+		return "tight", desc + ", CPU only (no usable GPU; estimate: no CPU speed was measured, expect it slow)"
+	case s.EstTPS > 0 && w.MinTPS > 0 && s.EstTPS < w.MinTPS:
+		return "tight", fmt.Sprintf("%s, %d of %d expert layers in RAM: about %.0f tok/s, under the %.0f floor (slow)", desc, s.NCpuMoe, fp.ExpertLayers, s.EstTPS, w.MinTPS)
 	case s.Slots < w.Slots:
 		return "tight", fmt.Sprintf("only %d of %d slots, %d ctx each", s.Slots, w.Slots, s.CtxPerSlot)
 	case s.CtxPerSlot < 2*w.CtxFloor:

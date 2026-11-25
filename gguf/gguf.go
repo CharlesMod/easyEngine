@@ -38,8 +38,14 @@ type Info struct {
 	NExpert       int
 	NExpertUsed   int
 	ExpertBytes   int64 // tensors named *_exps*
-	DenseBytes    int64 // everything else
-	FileSize      int64
+	DenseBytes    int64 // everything else (includes HostBytes)
+	// HostBytes is the part of DenseBytes llama.cpp keeps in system RAM even with -ngl 999: the
+	// per-layer token embeddings of the Gemma E-series (a lookup table, never a matmul).
+	HostBytes int64
+	// VocabSize is the token count, from token_embd.weight; it sets the size of the output
+	// (logits) buffers on the card.
+	VocabSize int
+	FileSize  int64
 
 	ExpertLayers int     // layers that hold *_exps* tensors
 	Layers       []Layer // per layer, len == NLayer when known
@@ -608,6 +614,14 @@ func (f *File) Info() (Info, error) {
 			}
 		} else {
 			in.DenseBytes += t.Bytes
+			switch t.Name {
+			case "per_layer_token_embd.weight":
+				in.HostBytes += t.Bytes
+			case "token_embd.weight":
+				if len(t.Dims) == 2 {
+					in.VocabSize = int(t.Dims[1])
+				}
+			}
 		}
 	}
 	in.ExpertLayers = len(exLayers)

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"hermesengine/catalog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +110,53 @@ func TestHFEntryParse(t *testing.T) {
 	js := fmt.Sprintf(`[{"path":"a.gguf","size":134,"lfs":{"oid":"%s","size":4977171584}}]`, strings.Repeat("b", 64))
 	if err := json.Unmarshal([]byte(js), &tree); err != nil || tree[0].LFS.Size != 4977171584 {
 		t.Fatal(err, tree)
+	}
+}
+
+func TestMeasuredEmbeddedAndApplied(t *testing.T) {
+	m, err := loadMeasured(measuredJSON)
+	if err != nil || len(m) == 0 {
+		t.Fatalf("embedded measured.json: %v (%d entries)", err, len(m))
+	}
+	for id, fp := range m {
+		if fp.FixedMiB <= 0 || len(fp.MiBPer1kCtx) == 0 || fp.MeasuredOn.GPU == "" {
+			t.Errorf("%s: incomplete footprint %+v", id, fp)
+		}
+	}
+	models := []catalog.Model{{ID: "keep"}, {ID: "stale", Footprint: &catalog.Footprint{FixedMiB: 1}}}
+	measured := map[string]catalog.Footprint{"keep": {FixedMiB: 5}, "gone": {FixedMiB: 9}}
+	unused := applyMeasured(models, measured)
+	if models[0].Footprint == nil || models[0].Footprint.FixedMiB != 5 {
+		t.Errorf("footprint not attached: %+v", models[0])
+	}
+	if models[1].Footprint != nil {
+		t.Errorf("a model without measurements must not keep a stale block")
+	}
+	if len(unused) != 1 || unused[0] != "gone" {
+		t.Errorf("unused %v", unused)
+	}
+	if _, err := loadMeasured([]byte("{")); err == nil {
+		t.Error("bad json must be an error")
+	}
+}
+
+func TestCommittedCatalogCarriesMeasured(t *testing.T) {
+	b, err := os.ReadFile("../../catalog/catalog.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c catalog.Catalog
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Version < 3 {
+		t.Errorf("catalog version %d, footprints arrived in 3", c.Version)
+	}
+	m, _ := loadMeasured(measuredJSON)
+	for id := range m {
+		mod, ok := c.Model(id)
+		if !ok || mod.Footprint == nil {
+			t.Errorf("%s: catalog.json lacks the measured footprint (run gencatalog -measured-only)", id)
+		}
 	}
 }

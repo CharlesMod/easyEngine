@@ -10,8 +10,10 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
+	"hermesengine/catalog"
 	"hermesengine/gguf"
 )
 
@@ -20,13 +22,40 @@ import (
 var ErrTooBig = errors.New("fit: model does not fit this machine")
 
 const (
-	alignTokens   = 1024
-	osReserveMiB  = 2048 // host RAM kept for the OS when moving experts to RAM
-	cudaCtxMiB    = 300  // CUDA context and runtime, seeded; calibrated after the first load
-	scratchSeed   = 1100 // compute buffers at -ub 512, seeded from the reference build's measured footprint
-	runtimeMiB    = 40   // scratch a request takes beyond what load allocates (hive RUNTIME_MIB)
-	minUsableVRAM = 2048 // a GPU whose budget is below this is treated as no GPU by Plan
+	alignTokens  = 1024
+	osReserveMiB = 2048 // host RAM kept for the OS when moving experts to RAM
+	// The constants below were measured on an RTX 5080 with llama.cpp b12680 at -ub 512, -fa on,
+	// --no-kv-unified (docs/FOOTPRINTS.md; tools/fitcheck reproduces them from the sweep CSV).
+	// They are the same for every model: nothing here is a per-model fudge.
+	baseOverheadMiB = 135  // CUDA context and the compute buffers that do not depend on the vocabulary
+	vocabMiBPer1k   = 1.2  // output (logits) buffers: MiB per 1000 vocabulary entries at -ub 512
+	runtimeMiB      = 58   // what the first requests take beyond what load allocates (measured 52-62)
+	ubatchTokens    = 512  // -ub; a sliding-window layer caches window+ub tokens per slot
+	maskMiBPer1k    = 0.44 // attention-mask / flash-attention scratch per 1000 tokens of total ctx
+	dequantBytes    = 2.0  // quantised KV is expanded to f16 for the biggest layer: bytes per element per token
+	moeSchedMiB     = 180  // GPU cost of the expert-offload copy buffers once any layer is in RAM (measured 90-230)
+	expertRAMFactor = 1.25 // host RAM gained per expert layer moved off the card, vs the tensor bytes (measured 1.02-1.23)
+	minUsableVRAM   = 2048 // a GPU whose budget is below this is treated as no GPU by Plan
 )
+
+// DefaultMinTPS is the decode floor (tokens/s per stream) used when the game names none: below
+// about 20 tok/s a spoken line of 60 tokens takes more than 3 s to generate.
+const DefaultMinTPS = 20
+
+// OtherHardwareSpeed is the fraction of the measured decode speed the planner assumes on a GPU
+// that is not the one the curve was measured on. Decode is memory-bandwidth bound: common 8-12 GB
+// cards have 30-45 % of an RTX 5080's bandwidth and the host's RAM may be slower too, so half
+// is the conservative guess (a faster card only gets a better result than planned).
+const OtherHardwareSpeed = 0.5
+
+// SpeedScaleFor is the Room.SpeedScale for a GPU: 1 on the card the footprint was measured on,
+// else OtherHardwareSpeed.
+func SpeedScaleFor(gpuName string, m *catalog.Footprint) float64 {
+	if m != nil && gpuName != "" && strings.EqualFold(strings.TrimSpace(gpuName), strings.TrimSpace(m.MeasuredOn.GPU)) {
+		return 1
+	}
+	return OtherHardwareSpeed
+}
 
 // Wants is what the game asks for.
 type Wants struct {
@@ -35,6 +64,10 @@ type Wants struct {
 	CtxMax   int    `json:"ctx_max"` // per slot
 	CtxFloor int    `json:"ctx_floor"`
 	KVType   string `json:"kv_type"`
+	// MinTPS is the decode speed floor in tokens/s per stream (default 20, negative = no floor).
+	// Where the footprint has a measured speed curve, the planner keeps the expert layers moved to
+	// RAM few enough to stay above it, before it keeps max ctx.
+	MinTPS float64 `json:"min_tps"`
 }
 
 // Room is what the machine offers, all in MiB.
@@ -46,6 +79,10 @@ type Room struct {
 	RAMAvail    int  `json:"ram_avail"`
 	NoGPU       bool `json:"no_gpu"`  // no usable GPU: CPU-only runs are allowed
 	Unified     bool `json:"unified"` // Apple: VRAM is RAM, no expert offload
+	// SpeedScale is how fast this machine decodes compared with the machine the speed curve was
+	// measured on (1 = the same card). 0 means 1. Plan sets it per model with SpeedScaleFor.
+	SpeedScale float64 `json:"speed_scale"`
+	GPUName    string  `json:"gpu_name"`
 }
 
 // Footprint models the memory of (model, device, backend):
@@ -58,6 +95,14 @@ type Footprint struct {
 	ExpertMiBPerLayer float64 `json:"expert_mib_per_layer"`
 	ExpertLayers      int     `json:"expert_layers"`
 	MoE               bool    `json:"moe"`
+
+	ComputePerTokenMiB float64 `json:"compute_per_token_mib"` // scratch that grows with total ctx (mask, f16 expansion of a quantised KV)
+	MoESchedMiB        float64 `json:"moe_sched_mib"`         // extra GPU use when any expert layer is on the CPU
+	ExpertRAMPerLayer  float64 `json:"expert_ram_per_layer"`  // host RAM per expert layer moved; 0 = ExpertMiBPerLayer
+	HostMiB            float64 `json:"host_mib"`              // weights that stay in RAM even when the model is on the card (they count in a CPU-only run)
+
+	// Speed on the machine the footprint was measured on (zero when unknown).
+	TPS *TPSCurve `json:"tps,omitempty"`
 
 	StatePerSlotMiB float64 `json:"state_per_slot_mib"` // recurrent (linear-attention/SSM) state per slot; fixed, not per token
 	Estimated       bool    `json:"estimated"`          // built from a conservative guess, not a known architecture
@@ -76,6 +121,9 @@ type Shape struct {
 	VRAMMiB    int    `json:"vram_mib"`
 	RAMMiB     int    `json:"ram_mib"`
 	CPUOnly    bool   `json:"cpu_only"`
+	// EstTPS is the expected decode speed per stream (tokens/s) on this machine, 0 when no
+	// measured curve exists for the model.
+	EstTPS float64 `json:"est_decode_tps"`
 }
 
 // CtxTotal is the -c value.
@@ -108,6 +156,9 @@ func (w Wants) norm() Wants {
 	if w.KVType == "" {
 		w.KVType = "q4_0"
 	}
+	if w.MinTPS == 0 {
+		w.MinTPS = DefaultMinTPS
+	}
 	return w
 }
 
@@ -138,6 +189,9 @@ func kvBytes(t string) float64 {
 	}
 	return 2 // unknown: assume f16
 }
+
+// KVBytes is the bytes per element of a llama.cpp KV cache type (unknown types count as f16).
+func KVBytes(t string) float64 { return kvBytes(t) }
 
 // DefaultMargin is max(512 MiB, 4 % of the card).
 func DefaultMargin(vramTotal int) int {
@@ -173,7 +227,7 @@ func Seed(info gguf.Info, kvType string) Footprint {
 			layers = append(layers, l)
 		}
 	}
-	var full, swa float64
+	var full, swa, maxFull float64
 	for _, l := range layers {
 		if !l.HasKV {
 			continue
@@ -183,17 +237,24 @@ func Seed(info gguf.Info, kvType string) Footprint {
 			swa += e
 		} else {
 			full += e
+			maxFull = math.Max(maxFull, e)
 		}
 	}
+	compute := maskMiBPer1k / 1024
+	if kvType != "f16" && kvType != "bf16" && kvType != "f32" {
+		compute += dequantBytes * maxFull / mib
+	}
 	fp := Footprint{
-		FixedMiB:       float64(info.DenseBytes+info.ExpertBytes)/mib + cudaCtxMiB,
+		FixedMiB:       float64(info.DenseBytes+info.ExpertBytes-info.HostBytes)/mib + baseOverheadMiB + float64(info.VocabSize)/1000*vocabMiBPer1k,
+		HostMiB:        float64(info.HostBytes) / mib,
 		PerTokenMiB:    full * b / mib,
 		SWAPerTokenMiB: swa * b / mib,
-		SWAWindow:      info.SlidingWindow,
-		ScratchMiB:     scratchSeed,
+		SWAWindow:      info.SlidingWindow + ubatchTokens,
+		ScratchMiB:     runtimeMiB,
 
-		StatePerSlotMiB: float64(info.StateBytesPerSlot) / mib,
-		Estimated:       info.Estimated,
+		ComputePerTokenMiB: compute,
+		StatePerSlotMiB:    float64(info.StateBytesPerSlot) / mib,
+		Estimated:          info.Estimated,
 	}
 	if info.Estimated {
 		Logf("fit: %s: architecture not fully understood (%s); using a conservative KV estimate", info.Arch, info.Note)
@@ -213,13 +274,15 @@ func Seed(info gguf.Info, kvType string) Footprint {
 		fp.MoE = true
 		fp.ExpertLayers = info.ExpertLayers
 		fp.ExpertMiBPerLayer = float64(info.ExpertBytes) / mib / float64(info.ExpertLayers)
+		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
+		fp.MoESchedMiB = moeSchedMiB
 	}
 	return fp
 }
 
 // kvAt returns the KV cache MiB for a layout.
 func (fp Footprint) kvAt(slots, ctxPerSlot int) float64 {
-	kv := fp.PerTokenMiB*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
+	kv := (fp.PerTokenMiB+fp.ComputePerTokenMiB)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
 		if fp.SWAWindow > 0 && fp.SWAWindow < w {
@@ -232,12 +295,33 @@ func (fp Footprint) kvAt(slots, ctxPerSlot int) float64 {
 
 // vram is the GPU use of a layout with nCpuMoe expert layers moved to RAM.
 func (fp Footprint) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
-	return fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
+	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
+	if nCpuMoe > 0 {
+		v += fp.MoESchedMiB
+	}
+	return v
 }
+
+// expertRAM is the host RAM taken by nCpuMoe expert layers.
+func (fp Footprint) expertRAM(nCpuMoe int) float64 {
+	per := fp.ExpertRAMPerLayer
+	if per <= 0 {
+		per = fp.ExpertMiBPerLayer
+	}
+	return per * float64(nCpuMoe)
+}
+
+// VRAM is the predicted GPU use in MiB of a layout with nCpuMoe expert layers moved to RAM.
+func (fp Footprint) VRAM(slots, ctxPerSlot, nCpuMoe int) float64 {
+	return fp.vram(slots, ctxPerSlot, nCpuMoe)
+}
+
+// ExpertRAM is the predicted extra host RAM in MiB of moving nCpuMoe expert layers off the card.
+func (fp Footprint) ExpertRAM(nCpuMoe int) float64 { return fp.expertRAM(nCpuMoe) }
 
 // allHost is the RAM use of a CPU-only run.
 func (fp Footprint) allHost(slots, ctxPerSlot int) float64 {
-	return fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
+	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
 }
 
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }
@@ -250,7 +334,7 @@ func (fp Footprint) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 		return s
 	}
 	s.VRAMMiB = ceilMiB(fp.vram(slots, ctx, n))
-	s.RAMMiB = ceilMiB(fp.ExpertMiBPerLayer * float64(n))
+	s.RAMMiB = ceilMiB(fp.expertRAM(n))
 	return s
 }
 
@@ -291,9 +375,36 @@ func budgetOf(room Room) float64 {
 // ctx per slot down to half; MoE only: as many expert layers in RAM as RAM allows, then the
 // most ctx that fits (fewer CPU layers on equal ctx); ctx down to the floor; then fewer slots;
 // else ErrTooBig. Dense models are never split between
-// card and RAM; with no usable GPU they run CPU-only.
+// card and RAM; with no usable GPU they run CPU-only. When the footprint has a measured speed
+// curve the CPU layers stop at the Wants.MinTPS floor (scaled by Room.SpeedScale) even if that
+// costs ctx; if nothing reaches the floor the best shape is returned, with EstTPS under it.
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	w = w.norm()
+	s, err := choose(fp, room, w, true)
+	if errors.Is(err, ErrTooBig) && fp.TPS != nil && w.MinTPS > 0 && !room.NoGPU {
+		// Nothing fits above the speed floor. A slow shape still runs, so offer it (the verdict
+		// says it is slow) rather than refusing a model that does fit.
+		s, err = choose(fp, room, w, false)
+	}
+	if err == nil && !s.CPUOnly {
+		s.EstTPS = fp.estTPS(s.NCpuMoe, room.SpeedScale)
+	}
+	return s, err
+}
+
+// estTPS is the measured speed with n layers on the CPU, scaled for this machine; 0 if unknown.
+func (fp Footprint) estTPS(n int, scale float64) float64 {
+	t, ok := fp.TPS.At(n)
+	if !ok {
+		return 0
+	}
+	if scale <= 0 {
+		scale = 1
+	}
+	return math.Round(t*scale*10) / 10
+}
+
+func choose(fp Footprint, room Room, w Wants, enforceSpeed bool) (Shape, error) {
 	budget := budgetOf(room)
 	ram := float64(room.RAMAvail - osReserveMiB)
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
@@ -324,13 +435,16 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 		// equal ctx goes to the fewer CPU layers.
 		if fp.MoE && !room.Unified {
 			maxN := fp.ExpertLayers
-			if fp.ExpertMiBPerLayer > 0 {
-				if byRAM := int(ram / fp.ExpertMiBPerLayer); byRAM < maxN {
+			if per := fp.expertRAM(1); per > 0 {
+				if byRAM := int(ram / per); byRAM < maxN {
 					maxN = byRAM
 				}
 			}
 			bestN, bestCtx := 0, 0
 			for n := 1; n <= maxN; n++ {
+				if enforceSpeed && fp.TPS != nil && w.MinTPS > 0 && fp.estTPS(n, room.SpeedScale) < w.MinTPS {
+					break // each further layer on the CPU is slower still
+				}
 				if ctx, ok := maxCtx(w.CtxFloor, ceil, okAt(n)); ok && ctx > bestCtx {
 					bestN, bestCtx = n, ctx
 				}
@@ -367,8 +481,8 @@ func better(a, b Shape) bool {
 func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (Shape, error) {
 	w = w.norm()
 	byBuf := cur.CtxPerSlot
-	if failedBufMiB > 0 && fp.PerTokenMiB > 0 && cur.Slots > 0 {
-		drop := int(math.Ceil((float64(failedBufMiB) + runtimeMiB) / (fp.PerTokenMiB * float64(cur.Slots))))
+	if perTok := fp.PerTokenMiB + fp.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
+		drop := int(math.Ceil((float64(failedBufMiB) + runtimeMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}
 	cap := byBuf
@@ -407,7 +521,7 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	ram := float64(room.RAMAvail - osReserveMiB)
 	if !cur.CPUOnly && fp.MoE && !room.Unified && cur.NCpuMoe < fp.ExpertLayers &&
-		fp.ExpertMiBPerLayer*float64(cur.NCpuMoe+1) <= ram {
+		fp.expertRAM(cur.NCpuMoe+1) <= ram {
 		return fp.shape(w, cur.Slots, cur.CtxPerSlot, cur.NCpuMoe+1, false), nil
 	}
 	if cur.Slots > w.MinSlots {

@@ -100,8 +100,12 @@ wins when its `version` is higher.
   layer full multi-head attention) and a log line, never zero.
 - Architecture numbers for the footprint (layers, KV heads, head dims, sliding window,
   expert count, per-layer expert bytes) are **read from the GGUF header** (`gguf`)
-  after download, never typed into the catalog. Before download the planner uses the catalog
-  `size` and a conservative per-token guess, and fit is re-checked from the header after.
+  after download, never typed into the catalog. Before download the planner uses the model's
+  optional **`footprint`** block (measured on a real card with `tools/fitcheck`, carried from
+  `tools/gencatalog/measured.json`; see `docs/FOOTPRINTS.md`): fixed load, MiB per 1k ctx and
+  per-slot state for each KV type, scratch, MiB per expert layer, and decode speed against
+  `--n-cpu-moe`. A model with no block gets the catalog `size` and a conservative per-token
+  guess, flagged `estimated`. Fit is re-checked from the header after download.
 - Backend choice: NVIDIA GPU → `cuda` (with `cudart` extra on Windows); AMD/Intel GPU on
   Linux/Windows → `vulkan`; Apple Silicon → `metal`; else `cpu`. If a backend fails its smoke
   test (`llama-server --version` and `--list-devices` show the GPU) the next one is tried
@@ -154,16 +158,36 @@ loop lives in `run`.
 - **Wants** (from the game profile): `slots` (HermesVoice: 3), `ctx_per_slot` max and floor
   (HermesVoice: 65536 and 8192), `kv_type` (default `q4_0`; q4_0 KV is allowed).
 - **Footprint** of (model, device, backend):
-  `vram(shape) = fixed + per_token*ctx_total + scratch(ub) - expert_mib*n_cpu_moe`,
-  with `per_token` from the header (`2 * n_layer_full * n_kv_head * head_dim * bytes(kv_type)`
-  plus the SWA layers capped at their window per slot) and `fixed`/`scratch`/`expert_mib`
-  seeded from tensor sizes in the header, then **calibrated** after every healthy load from
+  `vram(shape) = fixed + (per_token + compute_per_token)*ctx_total
+  + swa_per_token*min(ctx_per_slot, window+ub)*slots + state*slots + scratch
+  - expert_mib*n_cpu_moe + (n_cpu_moe>0 ? moe_sched : 0)`,
+  with `per_token` from the header (`2 * n_layer_full * n_kv_head * head_dim * bytes(kv_type)`),
+  `fixed` = dense + expert tensor bytes + the output/vocab buffers + the CUDA context, minus
+  host-resident tensors (`per_layer_token_embd.weight` of Gemma E-series stays in RAM), and the
+  compute/mask/dequant terms measured once on llama.cpp b12680 (`fit` constants; none per
+  model). Header seeds land within 4 % or 120 MiB of the sweep on all four catalog models.
+  The seed is then **calibrated** after every healthy load from
   the measured use (as `calibrate()` does in the hive launcher: accept a new `fixed` only
   within ±15 % of the seed). The book is keyed by model sha256 + GPU name + backend id and
   kept in `state.json`.
 - **Room:** `budget = VRAM total - others - game_reserve - margin`. `game_reserve` comes from the
   profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
   loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.
+
+### Decode speed floor, and CPU-only
+
+`Wants.MinTPS` (default 20 tok/s per stream; negative turns it off) outranks max ctx: step 3
+stops adding CPU layers at the first `n` whose estimated speed falls under the floor, using the
+model's measured `tps_by_n_cpu_moe` (time per token is linear in `n`, so 1/tps is
+interpolated). The measured speed is multiplied by `SpeedScale`: 1 on the exact GPU the numbers
+were measured on, 0.5 on any other hardware (decode is memory-bandwidth bound and common 8-12 GB
+cards have 30-45 % of the reference card's bandwidth, so halving is conservative). If no shape
+reaches the floor, the planner still returns the best shape, flagged slow ("tight ... (slow)",
+`est_decode_tps` in the verdict) rather than refusing a model that fits.
+
+With no usable GPU the recommendation is the smallest model whose estimated RAM is at most 60 %
+of `RAMAvail - 2 GiB`, else the smallest that fits at all. Nothing was measured on a CPU, so
+the verdict is marked `estimated` and says so.
 
 ### Choosing a shape, in order
 

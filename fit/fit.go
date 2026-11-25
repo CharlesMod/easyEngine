@@ -375,7 +375,9 @@ func budgetOf(room Room) float64 {
 // ctx per slot down to half; MoE only: as many expert layers in RAM as RAM allows, then the
 // most ctx that fits (fewer CPU layers on equal ctx); ctx down to the floor; then fewer slots;
 // else ErrTooBig. Dense models are never split between
-// card and RAM; with no usable GPU they run CPU-only.
+// card and RAM; with no usable GPU they run CPU-only. When the footprint has a measured speed
+// curve the CPU layers stop at the Wants.MinTPS floor (scaled by Room.SpeedScale) even if that
+// costs ctx; if nothing reaches the floor the best shape is returned, with EstTPS under it.
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	w = w.norm()
 	s, err := choose(fp, room, w, true)

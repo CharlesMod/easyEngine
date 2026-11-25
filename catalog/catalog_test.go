@@ -38,7 +38,7 @@ func TestEmbedded(t *testing.T) {
 	if ref.URL != "" && ref.URL != "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf" {
 		t.Errorf("reference url %q", ref.URL)
 	}
-	for _, id := range []string{"gemma4-e4b-q4km", "gemma4-e2b-q4km", "gemma4-26b-a4b-q3kxl"} {
+	for _, id := range []string{"gemma4-e4b-q4km", "gemma4-e2b-q4km"} {
 		m, ok := c.Model(id)
 		if !ok || !hex64.MatchString(m.SHA256) || !strings.HasPrefix(m.URL, "https://huggingface.co/unsloth/") || m.Size <= 0 {
 			t.Errorf("%s: %+v", id, m)

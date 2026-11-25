@@ -186,18 +186,6 @@
       "notes": "reference model"
     },
     {
-      "id": "gemma4-26b-a4b-q3kxl",
-      "name": "Gemma 4 26B A4B (stock, UD-Q3_K_XL)",
-      "file": "gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf",
-      "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/c099eb48e663fd284577b04978a94ffccb261841/gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf",
-      "sha256": "90a918830420e6a36e01c0d219e563f1d0ca7f223dffd90ad4e02ef4f3253fde",
-      "size": 12907280096,
-      "moe": true,
-      "quality": 85,
-      "chat": "gemma4",
-      "notes": "stock unsloth quant, same shape as the reference build"
-    },
-    {
       "id": "gemma4-e4b-q4km",
       "name": "Gemma 4 E4B (Q4_K_M)",
       "file": "gemma-4-E4B-it-Q4_K_M.gguf",

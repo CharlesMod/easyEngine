@@ -18,7 +18,7 @@ func TestPurity(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" || p == "dist" || p == "docs" { // dist holds compiled binaries; docs may name games as examples
+			if d.Name() == ".git" || p == ".claude" || p == "dist" || p == "docs" { // .claude holds agent worktrees (other checkouts) // dist holds compiled binaries; docs may name games as examples
 				return filepath.SkipDir
 			}
 			return nil

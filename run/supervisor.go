@@ -74,6 +74,8 @@ type Status struct {
 	// ModelNote says what to expect from it. Front ends show it as a warning.
 	ModelFallback bool   `json:"model_fallback"`
 	ModelNote     string `json:"model_note,omitempty"`
+	// Sampler is the sampler policy mode and the profiles in force (docs/SAMPLERS.md).
+	Sampler SamplerInfo `json:"sampler"`
 }
 
 // Parent is a watched parent process.
@@ -90,6 +92,8 @@ type Settings struct {
 	ClearAPIKey bool   `json:"clear_api_key,omitempty"`
 	LingerS     int    `json:"linger_s"`
 	KVType      string `json:"kv_type"`
+	// SamplerPolicy is enforce | fill | off; empty keeps the stored value.
+	SamplerPolicy string `json:"sampler_policy,omitempty"`
 }
 
 // Route tells the proxy where a request goes.
@@ -251,6 +255,7 @@ func (s *Supervisor) Status() Status {
 	if m, ok := s.selectedModelLocked(); ok && m.Fallback {
 		st.ModelFallback, st.ModelNote = true, m.FallbackNote
 	}
+	st.Sampler = s.samplerLocked()
 	return st
 }
 
@@ -619,7 +624,7 @@ func (s *Supervisor) Settings() Settings {
 	defer s.mu.Unlock()
 	e := s.st.External
 	e.APIKey = ""
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType}
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy}
 }
 
 // LingerS is the stored linger setting.
@@ -644,6 +649,9 @@ func (s *Supervisor) SetSettings(in Settings) error {
 			return fmt.Errorf("unknown kv_type %q", in.KVType)
 		}
 	}
+	if in.SamplerPolicy != "" && !ValidPolicy(in.SamplerPolicy) {
+		return fmt.Errorf("sampler_policy must be enforce, fill or off")
+	}
 	if in.LingerS < 0 {
 		return fmt.Errorf("linger_s must not be negative")
 	}
@@ -660,6 +668,10 @@ func (s *Supervisor) SetSettings(in Settings) error {
 		s.st.External.APIKey = ""
 	}
 	s.st.LingerS = in.LingerS
+	if in.SamplerPolicy != "" && in.SamplerPolicy != s.st.SamplerPolicy {
+		s.logf("sampler policy %s -> %s", s.st.SamplerPolicy, in.SamplerPolicy)
+		s.st.SamplerPolicy = in.SamplerPolicy
+	}
 	if in.KVType != "" {
 		s.st.KVType = in.KVType
 	}

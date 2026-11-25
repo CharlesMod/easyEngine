@@ -84,6 +84,8 @@ pre{margin:8px 0 0;max-height:260px;overflow:auto;background:var(--bg);border:1p
 <h2>Settings</h2>
 <div class="row"><div style="flex:1 1 160px"><label for="sLinger">Linger seconds</label><input id="sLinger" type="number" min="0" step="1"></div>
 <div style="flex:1 1 160px"><label for="sKv">KV type</label><select id="sKv"><option>q4_0</option><option>q8_0</option><option>f16</option></select></div></div>
+<div style="margin-top:10px"><label for="sPol">Sampler policy</label><select id="sPol"><option value="enforce">enforce (replace every sampler field)</option><option value="fill">fill (only missing fields)</option><option value="off">off (no rewriting)</option></select>
+<div id="samp" class="mut" style="margin-top:6px"></div></div>
 <div class="row" style="margin-top:12px"><button id="sSave">Save settings</button><button id="bSleep">Sleep</button><button id="bWake">Wake</button></div>
 </section>
 
@@ -224,8 +226,20 @@ function render(){
   $('bSleep').disabled=st.phase!=='ready';$('bWake').disabled=st.phase!=='sleeping';
   if(!dirtyExt&&st.external){$('xUrl').value=st.external.base_url||'';$('xModel').value=st.external.model||'';
     $('xKey').placeholder=st.external.api_key_set?'(key saved - leave blank to keep)':'API key'}
-  if(!dirtySet){if(st.linger_s!=null)$('sLinger').value=st.linger_s;if(st.kv_type)$('sKv').value=st.kv_type}
+  if(!dirtySet){if(st.linger_s!=null)$('sLinger').value=st.linger_s;if(st.kv_type)$('sKv').value=st.kv_type;if(st.sampler&&st.sampler.policy)$('sPol').value=st.sampler.policy}
+  renderSampler(st.sampler)
   if(st.phase!==lastPhase){lastPhase=st.phase;renderModels()}
+}
+
+function renderSampler(sm){
+  var el=$('samp');el.textContent='';
+  if(!sm)return;
+  var f=function(p){var o=[];for(var k in p)o.push(k+' '+p[k]);return o.join(', ')};
+  if(!sm.active){el.textContent='Sampler profiles: none in force. '+(sm.note||'');return}
+  var t='Profiles in force for '+(sm.model||'game profile')+' ('+sm.basis+'), requests without X-Hermes-Sampler get rp:';
+  Object.keys(sm.profiles).sort().forEach(function(n){t+='\n'+n+': '+f(sm.profiles[n])});
+  if(sm.source)t+='\nofficial values from: '+sm.source;
+  el.style.whiteSpace='pre-wrap';el.textContent=t;
 }
 
 function poll(){
@@ -237,7 +251,7 @@ function poll(){
 
 function settings(extra){
   var body={mode:st?st.mode:'local',external:{base_url:$('xUrl').value.trim(),model:$('xModel').value.trim(),api_key:$('xKey').value},
-    linger_s:parseInt($('sLinger').value,10)||0,kv_type:$('sKv').value};
+    linger_s:parseInt($('sLinger').value,10)||0,kv_type:$('sKv').value,sampler_policy:$('sPol').value};
   for(var k in extra)body[k]=extra[k];
   return act('settings',body,'PUT').then(function(){dirtyExt=false;dirtySet=false;$('xKey').value=''});
 }
@@ -246,7 +260,7 @@ $('mExt').addEventListener('click',function(){settings({mode:'external'})});
 $('xSave').addEventListener('click',function(){settings()});
 $('sSave').addEventListener('click',function(){settings()});
 ['xUrl','xModel','xKey'].forEach(function(i){$(i).addEventListener('input',function(){dirtyExt=true})});
-['sLinger','sKv'].forEach(function(i){$(i).addEventListener('input',function(){dirtySet=true})});
+['sLinger','sKv','sPol'].forEach(function(i){$(i).addEventListener('input',function(){dirtySet=true})});
 $('xTest').addEventListener('click',function(){
   setLight($('tLight'),'amber');$('tMsg').textContent='Testing...';
   call('POST','test',{}).then(function(r){

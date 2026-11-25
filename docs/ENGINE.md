@@ -93,6 +93,13 @@ wins when its `version` is higher.
   (`models[].fallback`, `fallback_note`) and, when the selected local model is a fallback, into
   `GET status` as `model_fallback` and `model_note`. Front ends show it as a warning; the setup page
   does. `tools/gencatalog` sets it from the model spec.
+- **Sampler block.** Every model carries `sampler` (named profiles `official`, `rp`,
+  `structured`; each a set of sampling values), `sampler_source` (URL and commit the official
+  values were read from) and `sampler_match` (name fragments that recognise the model when an
+  external endpoint reports it). `tools/gencatalog/samplers.go` holds the spec. `official` is
+  the vendor's own values; today all three profiles of all three Gemma 4 models are
+  temperature 1.0, top_k 64, top_p 0.95, min_p 0, repeat_penalty 1.0, DRY off. See
+  `docs/SAMPLERS.md`.
 - A model with an empty `url` is **import-only** (`hermes-engine import <path>` copies or
   hard-links a local file after checking its sha256). The mechanism stays for future models
   that are not public. gemma4-rp-maxxed is public on Hugging Face (`cmod/gemma4-rp-maxxed-GGUF`)
@@ -217,8 +224,13 @@ and gives no measured answer):
 llama-server -m <gguf> -ngl 999 [--n-cpu-moe N] -np <slots> -c <slots*ctx_per_slot>
   --no-kv-unified  (independent slots: each one gets exactly ctx_per_slot)
   -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --no-webui --metrics --slots
+  --temp T --top-k K --top-p P --min-p M --repeat-penalty R --dry-multiplier 0   (the model's `official` sampler profile)
   --host 127.0.0.1 --port <free port> -a <model id>
 ```
+
+The sampler flags make the model's official values llama-server's own defaults, so a client that
+sends no sampler fields still samples as the vendor intends (`docs/SAMPLERS.md`). They are
+checked against the release's help like every other flag (all exist in b12680: `common/arg.cpp`).
 
 (Check every flag against `llama-server --help` of the pinned release at startup; drop and log
 flags it does not know, as the hive's `ReadEngineHelp()` does.)
@@ -271,7 +283,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note}` |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, sampler}`; `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
 | `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, fallback, fallback_note}], backend}` |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs |
@@ -279,7 +291,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode, external:{base_url, model, api_key}, linger_s, kv_type}` | saved in `state.json`; mode change takes effect at once |
+| `PUT settings {mode, external:{base_url, model, api_key}, linger_s, kv_type, sampler_policy?}` | saved in `state.json`; mode change takes effect at once |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid}` | adds a parent pid |
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
@@ -298,12 +310,36 @@ resizing the engine answers **503** with
 own shape, so clients that already retry on 503 work). In external mode, `/v1/*` is forwarded
 to the external base URL with its key added, so the agent always talks to the engine.
 
+### Sampler policy
+
+The proxy applies a sampler policy to every completion request (`POST /v1/chat/completions`,
+`/chat/completions`, `/v1/completions`, `/completions`, `/completion`), for any client. The
+request names a profile with `X-Hermes-Sampler: rp|structured|official` (or a name the game
+profile adds); missing or unknown means `rp` (unknown is logged). The header is removed before
+forwarding. `sampler_policy` (a setting, saved in `state.json`) is:
+
+- `enforce` (default): every sampler field in the request (`temperature`, `top_k`, `top_p`,
+  `min_p`, `typical_p`, `typical`, `tfs_z`, `top_n_sigma`, `repeat_penalty`, `repeat_last_n`,
+  `presence_penalty`, `frequency_penalty`, `penalize_nl`, `dry_*`, `xtc_*`, `mirostat*`,
+  `dynatemp_*`, `samplers`) is replaced with the profile's values; fields the profile does not
+  set are removed, so the server defaults (the official values, §5) apply.
+- `fill`: only missing fields are filled from the profile.
+- `off`: no rewriting.
+
+Non-sampler fields (`max_tokens`, `grammar`, `json_schema`, `stop`, `seed`, `cache_prompt`,
+`id_slot`, `n_probs`, `logit_bias`, ...) are never touched. Every proxied response carries
+`X-Hermes-Sampler-Applied: <profile>;<mode>` (`none;<reason>` when the request passed through).
+In external mode the same policy applies only when the external model name matches a catalog
+model (`sampler_match`); otherwise requests pass through and `status.sampler.note` says so.
+Design, table and how a game adds a profile: `docs/SAMPLERS.md`.
+
 ### Setup page
 
 `GET /` serves an embedded single-page setup UI (plain HTML/JS, no CDN, works offline): the
 hardware, the recommended model with a one-click **Install**, the other models with fit
 verdicts, a progress bar with speed and ETA, the live phase and shape, the Local/External
-switch with a **Test** button and a green/amber/red light, and the three log tails.
+switch with a **Test** button and a green/amber/red light, the sampler policy (selectable) with the
+profiles in force (read-only), and the three log tails.
 
 ## 8. Game profile
 
@@ -315,6 +351,7 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
   "slots": 3, "min_slots": 1,
   "ctx_per_slot": {"max": 65536, "floor": 8192},
   "game_reserve_mib": 1500,
+  "samplers": {"cold": {"temperature": 0.2, "top_k": 20}},
   "agent": {
     "id": "hermesvoice-agent",
     "wheel": "/path/inside/mod/Engine/agent/hermesvoice_agent-0.1.0-py3-none-any.whl",

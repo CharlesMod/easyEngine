@@ -21,14 +21,19 @@ type State struct {
 	External External `json:"external"`
 	LingerS  int      `json:"linger_s"`
 	KVType   string   `json:"kv_type"`
-	Model    string   `json:"model"`
-	Backend  string   `json:"backend"`
-	Book     fit.Book `json:"book"`
+	// SamplerPolicy is enforce (default) | fill | off (docs/SAMPLERS.md).
+	SamplerPolicy string   `json:"sampler_policy,omitempty"`
+	Model         string   `json:"model"`
+	Backend       string   `json:"backend"`
+	Book          fit.Book `json:"book"`
 }
 
 func (s *State) defaults() {
 	if s.Mode != "external" {
 		s.Mode = "local"
+	}
+	if !ValidPolicy(s.SamplerPolicy) {
+		s.SamplerPolicy = PolicyEnforce
 	}
 	if s.KVType == "" {
 		s.KVType = "q4_0"

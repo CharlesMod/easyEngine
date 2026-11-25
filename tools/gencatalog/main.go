@@ -480,6 +480,9 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 	if un := applyMeasured(cat.Models, measured); len(un) > 0 {
 		c.log("WARNING: measured.json has footprints for models not in the catalog: %v", un)
 	}
+	if un := applySamplers(cat.Models); len(un) > 0 {
+		return fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
+	}
 	if err := writeCatalog(out, &cat); err != nil {
 		return err
 	}
@@ -512,6 +515,9 @@ func refreshMeasured(out string, version int) error {
 	}
 	if un := applyMeasured(cat.Models, measured); len(un) > 0 {
 		return fmt.Errorf("measured.json has footprints for models not in %s: %v", out, un)
+	}
+	if un := applySamplers(cat.Models); len(un) > 0 {
+		return fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
 	}
 	cat.Version = version
 	return writeCatalog(out, cat)

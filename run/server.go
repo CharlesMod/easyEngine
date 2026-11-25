@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"hermesengine/catalog"
 	"hermesengine/fit"
 	"hermesengine/lifecycle"
 	"hermesengine/probe"
@@ -181,7 +182,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		}
 	}
 	alias := lc.in.model.ID
-	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, knownFlags(lc.in.bin, s.cfg.ExtraEnv))
+	var official *catalog.SamplerProfile
+	if p, ok := lc.in.model.Sampler[catalog.ProfileOfficial]; ok {
+		official = &p
+	}
+	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, knownFlags(lc.in.bin, s.cfg.ExtraEnv), official)
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
 	}

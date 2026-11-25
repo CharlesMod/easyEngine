@@ -28,6 +28,9 @@ type Profile struct {
 	} `json:"ctx_per_slot"`
 	GameReserveMiB int        `json:"game_reserve_mib"`
 	Agent          *AgentSpec `json:"agent,omitempty"`
+	// Samplers are the game's own named sampler profiles. A request names one with the
+	// X-Hermes-Sampler header; a name here also replaces the model's profile of that name.
+	Samplers map[string]catalog.SamplerProfile `json:"samplers,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.

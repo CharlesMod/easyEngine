@@ -53,6 +53,15 @@ type Model struct {
 	// header gives the same numbers (docs/FOOTPRINTS.md). Generated, never typed: tools/fitcheck
 	// fits it from the sweep CSV into tools/gencatalog/measured.json.
 	Footprint *Footprint `json:"footprint,omitempty"`
+	// Sampler holds the named sampler profiles (official, rp, structured, ...). official is the
+	// vendor's own values and is also what llama-server starts with as its defaults. Generated
+	// from tools/gencatalog's spec; see docs/SAMPLERS.md.
+	Sampler map[string]SamplerProfile `json:"sampler,omitempty"`
+	// SamplerSource says where the official values came from (URL and commit).
+	SamplerSource string `json:"sampler_source,omitempty"`
+	// SamplerMatch lists name fragments by which an external endpoint's model name is
+	// recognised as this model (see ModelByName).
+	SamplerMatch []string `json:"sampler_match,omitempty"`
 }
 
 // TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU.

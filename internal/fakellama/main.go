@@ -13,12 +13,14 @@
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
+//	(every completion request body is saved to <ctl>/lastbody.json)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU")
 package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +34,9 @@ var withValue = map[string]bool{
 	"-m": true, "-ngl": true, "--n-cpu-moe": true, "-np": true, "-c": true, "-ctk": true, "-ctv": true,
 	"-fa": true, "--cache-reuse": true, "--host": true, "--port": true, "-a": true, "--reasoning": true,
 	"--alias": true,
+	"--temp":  true, "--top-k": true, "--top-p": true, "--min-p": true, "--repeat-penalty": true, "--dry-multiplier": true,
+	"--typical": true, "--repeat-last-n": true, "--presence-penalty": true, "--frequency-penalty": true,
+	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 
@@ -60,6 +65,19 @@ func helpText(hidden map[string]bool) string {
 		"--host HOST                    ip address to listen",
 		"--port PORT                    port to listen",
 		"-a,    --alias STRING          set alias for model name",
+		"--temp, --temperature N        temperature (default: 0.8)",
+		"--top-k N                      top-k sampling (default: 40)",
+		"--top-p N                      top-p sampling (default: 0.95)",
+		"--min-p N                      min-p sampling (default: 0.05)",
+		"--typical, --typical-p N       locally typical sampling",
+		"--repeat-last-n N              last n tokens to consider for penalize",
+		"--repeat-penalty N             penalize repeat sequence of tokens",
+		"--presence-penalty N           repeat alpha presence penalty",
+		"--frequency-penalty N          repeat alpha frequency penalty",
+		"--dry-multiplier N             set DRY sampling multiplier",
+		"--dry-base N                   set DRY sampling base value",
+		"--dry-allowed-length N         set allowed length for DRY sampling",
+		"--dry-penalty-last-n N         set DRY penalty for the last n tokens",
 	}
 	for _, l := range lines {
 		skip := false
@@ -76,6 +94,14 @@ func helpText(hidden map[string]bool) string {
 }
 
 var inflight int32
+
+// recordBody writes the last completion request body to <ctl>/lastbody.json so tests can see
+// what the engine's proxy forwarded.
+func recordBody(raw []byte) {
+	if ctl := os.Getenv("FAKELLAMA_CTL"); ctl != "" {
+		os.WriteFile(filepath.Join(ctl, "lastbody.json"), raw, 0o644)
+	}
+}
 
 func main() {
 	hidden := map[string]bool{}
@@ -235,7 +261,9 @@ func main() {
 		var body struct {
 			Stream bool `json:"stream"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := io.ReadAll(r.Body)
+		recordBody(raw)
+		json.Unmarshal(raw, &body)
 		if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl := w.(http.Flusher)
@@ -264,6 +292,8 @@ func main() {
 		}
 		atomic.AddInt32(&inflight, 1)
 		defer atomic.AddInt32(&inflight, -1)
+		raw, _ := io.ReadAll(r.Body)
+		recordBody(raw)
 		js(w, map[string]any{"content": "ready", "stop": true})
 	})
 	addr := vals["--host"] + ":" + vals["--port"]

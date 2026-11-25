@@ -345,15 +345,15 @@ type hfEntry struct {
 }
 
 type modelSpec struct {
-	id, name, repo, file, chat, notes string
-	moe, useMain                      bool // useMain: url says resolve/main (the keeper's own repo)
-	quality                           int
+	id, name, repo, file, chat, notes, fallbackNote string
+	moe, useMain, fallback                          bool // useMain: url says resolve/main (the keeper's own repo)
+	quality                                         int
 }
 
 var modelSpecs = []modelSpec{
-	{id: "ling3-tiny-q4km", name: "Ling 3.0 tiny (Q4_K_M)", repo: "inclusionAI/Ling-3.0-tiny-GGUF", file: "Ling-3.0-tiny-Q4_K_M.gguf", moe: true, quality: 70, chat: "ling", notes: "MIT license; bailingmoe3 (MLA + linear attention)"},
 	{id: "gemma4-e4b-q4km", name: "Gemma 4 E4B (Q4_K_M)", repo: "unsloth/gemma-4-E4B-it-GGUF", file: "gemma-4-E4B-it-Q4_K_M.gguf", quality: 60, chat: "gemma4"},
-	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4"},
+	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
+		fallback: true, fallbackNote: "Smallest model: expect repeated lines and weaker understanding of what was said."},
 }
 
 func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
@@ -390,6 +390,7 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 			ID: sp.id, Name: sp.name, File: sp.file,
 			URL:    "https://huggingface.co/" + sp.repo + "/resolve/" + rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size, MoE: sp.moe, Quality: sp.quality, Chat: sp.chat, Notes: sp.notes,
+			Fallback: sp.fallback, FallbackNote: sp.fallbackNote,
 		}, nil
 	}
 	return catalog.Model{}, fmt.Errorf("%s: file %s not in the repo", sp.repo, sp.file)

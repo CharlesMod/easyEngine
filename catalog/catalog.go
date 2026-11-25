@@ -44,6 +44,10 @@ type Model struct {
 	Quality int    `json:"quality"`
 	Chat    string `json:"chat,omitempty"`
 	Notes   string `json:"notes,omitempty"`
+	// Fallback marks a model that is only there so a small machine has something to run. A
+	// front end should warn when it is in use; FallbackNote says why in a sentence.
+	Fallback     bool   `json:"fallback,omitempty"`
+	FallbackNote string `json:"fallback_note,omitempty"`
 	// Footprint is what a real llama-server took for this file on a reference machine. The
 	// planner uses it for a model that is not downloaded yet; once the file is on disk the GGUF
 	// header gives the same numbers (docs/FOOTPRINTS.md). Generated, never typed: tools/fitcheck

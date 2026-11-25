@@ -1,12 +1,14 @@
 package fit
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"hermesengine/catalog"
@@ -454,15 +456,14 @@ func TestPlanTable(t *testing.T) {
 		GPUs: []probe.GPU{{Vendor: "apple", Name: "Apple M2", VRAMTotalMiB: 11468, UnifiedMemory: true, Source: "sysctl"}}}
 	cases := []pc{
 		{"16GB, reference installed with header", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), allInstalled, refInfoFn,
-			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes", "ling3-tiny-q4km": "yes"}},
+			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
 		{"16GB, 2800 others: a few expert layers in RAM keep the long ctx", func() probe.Hardware { h := hwNvidia(16303, 2800, 24000, "NVIDIA GeForce RTX 5080"); return h }(), allInstalled, refInfoFn,
 			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes"}},
 		{"16GB, nothing installed: reference is downloadable now", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), noneInstalled, nil,
 			"gemma4-rp-maxxed-q3kxl", nil},
 		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
-		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "ling3-tiny-q4km", map[string]string{"ling3-tiny-q4km": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
+		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "gemma4-e4b-q4km", map[string]string{"gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
 		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "gemma4-e2b-q4km", map[string]string{"gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
-		{"6GB, Ling installed with header", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), allInstalled, func(m catalog.Model) (gguf.Info, bool) { return lingInfo(), m.ID == "ling3-tiny-q4km" }, "", map[string]string{"ling3-tiny-q4km": "tight"}},
 		{"4GB: too little card, CPU-only and tight", hwNvidia(4096, 500, 24000, "NVIDIA GeForce GTX 1650"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "tight"}},
 		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "tight"}},
 		{"no GPU 8GB RAM", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 8000, RAMAvailMiB: 5000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
@@ -562,5 +563,21 @@ func TestJSONTags(t *testing.T) {
 				t.Errorf("%s.%s has no json tag", rt.Name(), rt.Field(i).Name)
 			}
 		}
+	}
+}
+
+func TestPlanCarriesFallback(t *testing.T) {
+	c := &catalog.Catalog{Models: []catalog.Model{
+		{ID: "big", Size: 6 << 30, Quality: 60, URL: "https://x"},
+		{ID: "tiny", Size: 2 << 30, Quality: 40, URL: "https://x", Fallback: true, FallbackNote: "smallest"},
+	}}
+	p := Plan(c, hwNvidia(12288, 600, 24000, "NVIDIA GeForce RTX 4070"), game, 1500, nil)
+	v := verdicts(p)
+	if v["big"].Fallback || v["big"].FallbackNote != "" || !v["tiny"].Fallback || v["tiny"].FallbackNote != "smallest" {
+		t.Errorf("%+v", v)
+	}
+	b, _ := json.Marshal(p)
+	if !strings.Contains(string(b), `"fallback":true`) || !strings.Contains(string(b), `"fallback_note":"smallest"`) {
+		t.Errorf("json %s", b)
 	}
 }

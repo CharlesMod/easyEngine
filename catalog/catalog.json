@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "llamacpp": {
     "tag": "b12680",
     "assets": [
@@ -248,76 +248,6 @@
       }
     },
     {
-      "id": "ling3-tiny-q4km",
-      "name": "Ling 3.0 tiny (Q4_K_M)",
-      "file": "Ling-3.0-tiny-Q4_K_M.gguf",
-      "url": "https://huggingface.co/inclusionAI/Ling-3.0-tiny-GGUF/resolve/01b850e29ed5b44e2b810160ff980a9bb353296f/Ling-3.0-tiny-Q4_K_M.gguf",
-      "sha256": "246d67d45f5b0c7447ca0ce0bdb8b46b8a47b593c5068635dc16422c051d7be9",
-      "size": 4823894944,
-      "moe": true,
-      "quality": 70,
-      "chat": "ling",
-      "notes": "MIT license; bailingmoe3 (MLA + linear attention)",
-      "footprint": {
-        "fixed_mib": 4869,
-        "mib_per_1k_ctx": {
-          "f16": 6.965,
-          "q4_0": 3.45,
-          "q8_0": 5.042
-        },
-        "state_mib_per_slot": {
-          "f16": 14.3,
-          "q4_0": 5.2,
-          "q8_0": 8.4
-        },
-        "scratch_mib": 57,
-        "expert_mib_per_layer": 172.1,
-        "expert_ram_mib_per_layer": 178.7,
-        "expert_layers": 23,
-        "moe_sched_mib": 215,
-        "decode_tps": {
-          "1": 337,
-          "2": 268.7,
-          "3": 201.2
-        },
-        "prompt_tps": {
-          "1": 8716.3,
-          "2": 5368.9,
-          "3": 3704.9
-        },
-        "tps_by_n_cpu_moe": [
-          {
-            "n_cpu_moe": 0,
-            "tps": 201.2
-          },
-          {
-            "n_cpu_moe": 5,
-            "tps": 101.7
-          },
-          {
-            "n_cpu_moe": 11,
-            "tps": 59
-          },
-          {
-            "n_cpu_moe": 17,
-            "tps": 38.1
-          },
-          {
-            "n_cpu_moe": 23,
-            "tps": 30.8
-          }
-        ],
-        "measured_on": {
-          "gpu": "NVIDIA GeForce RTX 5080",
-          "vram_mib": 16303,
-          "backend": "cuda-linux-x64",
-          "llamacpp": "b12680",
-          "date": "2026-11-25",
-          "flags": "-ngl 999 -fa on --no-kv-unified -ub 512 --cache-reuse 256"
-        }
-      }
-    },
-    {
       "id": "gemma4-e4b-q4km",
       "name": "Gemma 4 E4B (Q4_K_M)",
       "file": "gemma-4-E4B-it-Q4_K_M.gguf",
@@ -371,6 +301,8 @@
       "moe": false,
       "quality": 40,
       "chat": "gemma4",
+      "fallback": true,
+      "fallback_note": "Smallest model: expect repeated lines and weaker understanding of what was said.",
       "footprint": {
         "fixed_mib": 1803,
         "mib_per_1k_ctx": {

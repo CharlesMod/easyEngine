@@ -80,20 +80,25 @@ wins when its `version` is higher.
      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
      "sha256": "595eddca...", "size": 10001779136,
      "moe": true, "quality": 100, "chat": "gemma4", "notes": "reference model"},
-    {"id": "ling3-tiny-q4km", "file": "Ling-3.0-tiny-Q4_K_M.gguf", "url": "https://huggingface.co/inclusionAI/Ling-3.0-tiny-GGUF/resolve/<commit>/...",
-     "moe": true, "quality": 70, "chat": "ling", "notes": "MIT; bailingmoe3: MLA + linear attention"},
     {"id": "gemma4-e4b-q4km", "file": "...", "url": "https://huggingface.co/...", "moe": false, "quality": 60},
-    {"id": "gemma4-e2b-q4km", ..., "quality": 40}
+    {"id": "gemma4-e2b-q4km", ..., "quality": 40,
+     "fallback": true, "fallback_note": "Smallest model: expect repeated lines and weaker understanding of what was said."}
   ]
 }
 ```
 
+- **Fallback.** `fallback: true` marks a model kept only as a last resort (today gemma4-e2b-q4km);
+  `fallback_note` is a one-sentence, game-agnostic description of what to expect. The ladder is
+  gemma4-rp-maxxed-q3kxl, gemma4-e4b-q4km, then the fallback. The flag is carried into the plan
+  (`models[].fallback`, `fallback_note`) and, when the selected local model is a fallback, into
+  `GET status` as `model_fallback` and `model_note`. Front ends show it as a warning; the setup page
+  does. `tools/gencatalog` sets it from the model spec.
 - A model with an empty `url` is **import-only** (`hermes-engine import <path>` copies or
   hard-links a local file after checking its sha256). The mechanism stays for future models
   that are not public. gemma4-rp-maxxed is public on Hugging Face (`cmod/gemma4-rp-maxxed-GGUF`)
   and downloads like any other entry; `fit.Verdict.import_only` is true only for entries
   without a `url`.
-- The KV cost follows the architecture: MLA models (Ling) cache one latent per token
+- The KV cost follows the architecture: MLA models (bailingmoe3) cache one latent per token
   (`kv_lora_rank + rope dims`, no V) on their full-attention layers; linear-attention/SSM layers
   hold a fixed f32 state per slot that does not grow with ctx; sliding-window layers are capped
   at the window. An architecture the reader does not know gets a conservative estimate (every
@@ -266,9 +271,9 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[]}` |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note}` |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed}], backend}` |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, fallback, fallback_note}], backend}` |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |

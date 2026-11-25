@@ -37,6 +37,8 @@ label{display:block;font-size:.85rem;color:var(--mut);margin:10px 0 3px}
 .mname{font-weight:600;overflow-wrap:anywhere}
 .chip{font-size:.75rem;padding:2px 8px;border-radius:99px;font-weight:600}
 .chip.yes{background:var(--gbg);color:var(--g)}.chip.tight{background:var(--abg);color:var(--a)}.chip.no{background:var(--rbg);color:var(--r)}
+.warn{background:var(--abg);color:var(--a);border:1px solid var(--a);border-radius:8px;padding:8px 12px;margin-top:8px;overflow-wrap:anywhere;font-weight:600}
+.warn:empty{display:none}
 .chip.info{background:var(--bd);color:var(--fg)}
 .bar{height:10px;border-radius:5px;background:var(--bd);overflow:hidden;margin:8px 0 4px}
 .bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .4s}
@@ -53,6 +55,7 @@ pre{margin:8px 0 0;max-height:260px;overflow:auto;background:var(--bg);border:1p
 <main>
 <header><span id="light" class="light"></span><div class="hmsg"><div class="phase" id="phase">Connecting</div><div class="mut" id="msg"></div></div></header>
 <div id="errs" class="errs"></div>
+<div id="fbwarn" class="warn" role="status"></div>
 
 <section class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Hardware</h2><button id="hwref">Refresh</button></div><div id="hw" class="hw" style="margin-top:10px"></div></section>
 
@@ -157,6 +160,7 @@ function modelCard(m,isRec,busy){
   if(m.installed)h.appendChild(el('span','chip info','installed'));
   if(m.size)h.appendChild(el('span','mut',m.size));
   c.appendChild(h);
+  if(m.fallback)c.appendChild(el('div','warn','Warning: fallback model. '+(m.fallback_note||'This is the smallest model; expect weaker results.')));
   if(m.why)c.appendChild(el('div','mut',m.why));
   var est=[];
   if(m.est_vram_mib)est.push('VRAM ~'+fmtMiB(m.est_vram_mib));
@@ -201,6 +205,7 @@ function render(){
   setLight($('light'),phaseColor(st.phase));
   var errs=(st.errors||[]).slice();if(toast)errs.push(toast);
   errs.forEach(function(e,i){if(i)eb.appendChild(document.createElement('br'));eb.appendChild(document.createTextNode(e))});
+  $('fbwarn').textContent=st.model_fallback?'Warning: the model in use is a fallback. '+(st.model_note||'Expect weaker results.')+' Pick a larger model below if your hardware allows.':'';
   var ext=st.mode==='external';
   $('mLocal').className=ext?'':'on';$('mExt').className=ext?'on':'';
   $('local').classList.toggle('hide',ext);$('ext').classList.toggle('hide',!ext);

@@ -16,11 +16,12 @@ import (
 
 // Layer describes one transformer block's KV cache cost.
 type Layer struct {
-	HasKV    bool // false for recurrent/linear-attention blocks (no KV cache)
-	SWA      bool // sliding-window attention: cache capped at the window per slot
-	KVHeads  int
-	HeadDimK int
-	HeadDimV int
+	HasKV     bool // false for recurrent/linear-attention blocks (no KV cache)
+	Recurrent bool // linear-attention/SSM block: a fixed state per slot instead of a KV cache
+	SWA       bool // sliding-window attention: cache capped at the window per slot
+	KVHeads   int
+	HeadDimK  int
+	HeadDimV  int
 }
 
 // Info is what the planner needs from a model file. The scalar KV fields describe the
@@ -45,6 +46,18 @@ type Info struct {
 	HeadDimKSWA  int
 	HeadDimVSWA  int
 	NTensors     int
+
+	// KVLoraRank > 0 marks MLA attention: the cache holds the compressed latent plus the rope
+	// part per token (HeadDimK = kv_lora_rank + rope dims, one head) and no separate V (HeadDimV 0).
+	KVLoraRank int
+	// StateBytesPerSlot is the recurrent state (f32) of every linear-attention/SSM layer for one
+	// slot. It does not grow with context.
+	StateBytesPerSlot int64
+	// Estimated is set when the header lacked what the KV cost needs (unknown architecture):
+	// the numbers are a conservative guess (every layer full multi-head attention), and Note says
+	// what was assumed.
+	Estimated bool
+	Note      string
 }
 
 // Tensor is one tensor-table entry.
@@ -365,8 +378,20 @@ func (f *File) Info() (Info, error) {
 	geti := func(s string) int { n, _ := f.num(key(s)); return int(n) }
 
 	in.NLayer = geti("block_count")
+	var notes []string
 	if in.NLayer <= 0 {
-		return in, fmt.Errorf("gguf: %s.block_count missing", a)
+		for _, t := range f.Tensors {
+			if i, ok := blockIndex(t.Name); ok && i+1 > in.NLayer {
+				in.NLayer = i + 1
+			}
+		}
+		if in.NLayer <= 0 {
+			in.NLayer = 32
+			notes = append(notes, "layer count unknown, assumed 32")
+		} else {
+			notes = append(notes, "block_count missing, layer count taken from the tensor names")
+		}
+		in.Estimated = true
 	}
 	in.NExpert = geti("expert_count")
 	in.NExpertUsed = geti("expert_used_count")
@@ -395,6 +420,20 @@ func (f *File) Info() (Info, error) {
 	}
 	if arr, ok := f.arr(key("attention.head_count")); ok && heads == 0 && len(arr) > 0 {
 		heads = int(arr[0])
+	}
+
+	kvLora := geti("attention.kv_lora_rank")
+	if kvLora > 0 { // MLA: one latent "head" per token
+		for i := range kvHeads {
+			if kvHeads[i] > 0 {
+				kvHeads[i] = 1
+			}
+		}
+		in.KVLoraRank = kvLora
+	}
+	recur := make([]bool, in.NLayer)
+	for i := range kvHeads {
+		recur[i] = kvHeads[i] == 0
 	}
 
 	// Layer kinds. Gemma 4: bool pattern (true = sliding window). Gemma 3: an integer period
@@ -433,6 +472,7 @@ func (f *File) Info() (Info, error) {
 	if n, ok := f.num(key("full_attention_interval")); ok && n > 1 {
 		for i := range hasKV {
 			hasKV[i] = (i+1)%int(n) == 0
+			recur[i] = !hasKV[i]
 		}
 	}
 
@@ -450,6 +490,13 @@ func (f *File) Info() (Info, error) {
 	if dv == 0 {
 		dv = dk
 	}
+	if kvLora > 0 {
+		lat := kvLora + geti("rope.dimension_count")
+		if dk < lat { // some converters write the uncompressed head size here
+			dk = lat
+		}
+		dv = 0 // llama.cpp keeps no V cache for MLA
+	}
 	dkS, dvS := geti("attention.key_length_swa"), geti("attention.value_length_swa")
 	if dkS == 0 {
 		dkS = dk
@@ -458,6 +505,73 @@ func (f *File) Info() (Info, error) {
 		dvS = dv
 	}
 	in.HeadDimKSWA, in.HeadDimVSWA = dkS, dvS
+
+	for i := range recur {
+		if recur[i] && !sharedKV(in.NLayer, geti("attention.shared_kv_layers"), i) {
+			hasKV[i] = false
+		} else {
+			recur[i] = false
+		}
+	}
+	anyKV := false
+	for i := range hasKV {
+		if hasKV[i] && kvHeads[i] > 0 {
+			anyKV = true
+		}
+	}
+	nRecur := 0
+	for i := range recur {
+		if recur[i] {
+			nRecur++
+		}
+	}
+	if dk == 0 || (!anyKV && nRecur == 0) {
+		// An architecture this reader does not know: assume every layer is full multi-head
+		// attention at 128 dims. Over-estimates, never zero.
+		if heads == 0 {
+			heads = 32
+		}
+		if emb > 0 && emb/heads > 0 {
+			dk = emb / heads
+		} else {
+			dk = 128
+		}
+		dv = dk
+		for i := range kvHeads {
+			kvHeads[i], hasKV[i], recur[i] = heads, true, false
+			swa[i] = false
+		}
+		in.SWALayers, in.Estimated = 0, true
+		notes = append(notes, fmt.Sprintf("attention layout of %q unknown, assumed %d full layers with %d heads of %d dims", a, in.NLayer, heads, dk))
+		nRecur = 0
+	}
+
+	// Recurrent state per slot: linear attention (Kimi delta attention), SSM, or a guess.
+	var perLayer int64
+	if nRecur > 0 {
+		conv := geti("ssm.conv_kernel")
+		if conv <= 0 {
+			conv = 4
+		}
+		switch {
+		case geti("kda.head_dim") > 0 && heads > 0:
+			hd := int64(geti("kda.head_dim"))
+			nh := int64(heads)
+			perLayer = (3*int64(conv-1)*nh*hd + hd*hd*nh) * 4
+		case geti("ssm.state_size") > 0 && geti("ssm.inner_size") > 0:
+			d, inner, grp := int64(geti("ssm.state_size")), int64(geti("ssm.inner_size")), int64(geti("ssm.group_count"))
+			perLayer = (int64(conv-1)*(inner+2*grp*d) + d*inner) * 4
+		default:
+			if heads > 0 && emb > 0 {
+				perLayer = int64(emb) * int64(emb) / int64(heads) * 4
+			} else {
+				perLayer = 16 << 20
+			}
+			in.Estimated = true
+			notes = append(notes, "recurrent layers with an unknown state layout, state size guessed")
+		}
+		in.StateBytesPerSlot = perLayer * int64(nRecur)
+	}
 
 	first := 0
 	for i := range swa {
@@ -474,7 +588,8 @@ func (f *File) Info() (Info, error) {
 	in.NKVHead, in.HeadDimK, in.HeadDimV = kvHeads[first], dk, dv
 	in.Layers = make([]Layer, in.NLayer)
 	for i := range in.Layers {
-		l := Layer{HasKV: hasKV[i], SWA: swa[i], KVHeads: kvHeads[i], HeadDimK: dk, HeadDimV: dv}
+		l := Layer{HasKV: hasKV[i], SWA: swa[i], KVHeads: kvHeads[i], HeadDimK: dk, HeadDimV: dv,
+			Recurrent: recur[i]}
 		if swa[i] {
 			l.HeadDimK, l.HeadDimV = dkS, dvS
 		}
@@ -496,6 +611,7 @@ func (f *File) Info() (Info, error) {
 		}
 	}
 	in.ExpertLayers = len(exLayers)
+	in.Note = strings.Join(notes, "; ")
 	return in, nil
 }
 
@@ -515,3 +631,6 @@ func blockIndex(name string) (int, bool) {
 	}
 	return n, digits > 0
 }
+
+// sharedKV reports whether layer i reuses an earlier layer's cache (the last n layers).
+func sharedKV(nLayer, n, i int) bool { return n > 0 && n < nLayer && i >= nLayer-n }

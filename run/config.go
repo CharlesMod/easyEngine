@@ -93,13 +93,14 @@ type Config struct {
 	Catalog *catalog.Catalog // nil: catalog.Load(DataDir)
 
 	// Injectable system access.
-	Probe   func(ctx context.Context) (probe.Hardware, error)
-	Others  func(ctx context.Context, gpu probe.GPU, ourPIDs []int) (int, error)
-	Measure func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
-	Seed    func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
-	Group   *lifecycle.Group
-	HTTP    *http.Client
-	Now     func() time.Time
+	Probe    func(ctx context.Context) (probe.Hardware, error)
+	Others   func(ctx context.Context, gpu probe.GPU, ourPIDs []int) (int, error)
+	Measure  func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
+	Seed     func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
+	Group    *lifecycle.Group
+	HTTP     *http.Client
+	Now      func() time.Time
+	DiskFree func(dir string) (int, error) // free MiB under dir; nil: the real filesystem
 
 	ExtraEnv    []string // appended to llama-server's environment (tests)
 	AgentEnv    []string // appended to the agent's environment (tests)
@@ -108,18 +109,21 @@ type Config struct {
 	Parents     func() []int
 
 	// Timing. Tests shrink these.
-	WatchEvery       time.Duration // default 5s: watchdog tick
-	HealthMisses     int           // default 6
-	IdleChecks       int           // default 2
-	GrowIdle         time.Duration // default 60s
-	GrowBackoff      time.Duration // default 10 min after a failed grow
-	HealthPoll       time.Duration // default 250ms while loading
-	LoadTimeout      time.Duration // default 15 min
-	StopGrace        time.Duration // default 5s
-	AgentBackoffBase time.Duration // default 1s
-	AgentBackoffMax  time.Duration // default 30s
-	AgentStable      time.Duration // default 60s of uptime resets the backoff
-	CmdTimeout       time.Duration // default 5 min for uv commands
+	WatchEvery        time.Duration // default 5s: watchdog tick
+	HealthMisses      int           // default 6
+	IdleChecks        int           // default 2
+	GrowIdle          time.Duration // default 60s
+	GrowBackoff       time.Duration // default 10 min after a failed grow
+	HealthPoll        time.Duration // default 250ms while loading
+	LoadTimeout       time.Duration // default 15 min
+	StopGrace         time.Duration // default 5s
+	AgentBackoffBase  time.Duration // default 1s
+	AgentBackoffMax   time.Duration // default 30s
+	AgentStable       time.Duration // default 60s of uptime resets the backoff
+	CmdTimeout        time.Duration // default 5 min for uv commands
+	UpgradeBackoff    time.Duration // default 30s: first wait before retrying the target download (doubles)
+	UpgradeBackoffMax time.Duration // default 15 min
+	SwapDrain         time.Duration // default 2 min: longest wait for requests in flight before a model swap
 }
 
 func (c *Config) defaults() {
@@ -162,6 +166,12 @@ func (c *Config) defaults() {
 	dur(&c.AgentBackoffMax, 30*time.Second)
 	dur(&c.AgentStable, 60*time.Second)
 	dur(&c.CmdTimeout, 5*time.Minute)
+	dur(&c.UpgradeBackoff, 30*time.Second)
+	dur(&c.UpgradeBackoffMax, 15*time.Minute)
+	dur(&c.SwapDrain, 2*time.Minute)
+	if c.DiskFree == nil {
+		c.DiskFree = diskFree
+	}
 	if c.HealthMisses <= 0 {
 		c.HealthMisses = 6
 	}

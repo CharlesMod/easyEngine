@@ -42,7 +42,7 @@ set it to a temp dir; **tests never touch the real data dir and only remove what
 
 ```
 <data>/
-  state.json            chosen mode, model id, backend id, external endpoint, calibration book
+  state.json            chosen mode, model id, backend id, pending target (first-run upgrade), external endpoint, calibration book
   backends/<backend-id>/      unpacked llama.cpp release (llama-server[.exe] + libs)
   models/<file>.gguf
   runtime/uv[.exe]            pinned uv binary
@@ -283,7 +283,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, sampler}`; `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, sampler}`; `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
 | `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, fallback, fallback_note}], backend}` |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs |
@@ -300,6 +300,53 @@ cannot send the custom header cross-origin without a preflight that the engine r
 `ready`, `resizing`, `sleeping`, `external`, `error`. `progress` is `{done_bytes, total_bytes,
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
 n_cpu_moe, kv_type, vram_mib}`.
+
+### 7a. First run: a starter model, then the target
+
+Downloading the 10 GB reference model takes much longer than a player will wait for a first
+line, so a first install stages it:
+
+1. `POST install {model}` where `model` (the **target**) is not on disk: the engine also picks a
+   **starter**, the smallest installable catalog model that fits this machine (verdict not "no")
+   and is at most half the target's size (normally gemma4-e2b-q4km, 2-3 GB), with room on disk. It
+   downloads the starter first, starts serving it (`phase` goes `ready` as usual) and downloads
+   the target in the background (same resume and sha256 rules as any download).
+2. When the target is on disk and verified, the engine **swaps** at a safe moment: it waits until
+   no load or resize is under way, takes the operation lock (so the watchdog stays out), flips the
+   phase to `resizing` (message "Switching to the full model"), waits for requests in flight and
+   busy slots to finish (at most `SwapDrain`, default 2 min), stops the old server and starts the
+   target with a fresh fit (`fit.Choose` with the live room). Nothing is cut off mid-reply.
+3. **Clients during the swap get a short 503 with `Retry-After: 2`**, body message "Switching to
+   the full model", the same shape as "Loading model"; the proxy never queues. Reason: every
+   client already retries a 503, and nothing holds a connection through a model load (10-60 s).
+4. No starter when: the target is already on disk; the target is the smallest that fits (a
+   CPU-only machine picks the smallest) or less than twice the next smaller model; the starter
+   would not fit the disk; the install runs from the CLI (`hermes-engine install` exits with the
+   job and never stages). The starter file stays on disk after the swap.
+5. Failures never touch what serves. A failed or corrupt target download (sha256 mismatch drops
+   the `.part`) is retried with backoff (`UpgradeBackoff` 30 s doubling to 15 min); a partial
+   `.part` resumes with HTTP Range. If the free disk space (less the `.part` already held, plus
+   512 MiB headroom) cannot take the target, `upgrade.state` is `no_space`, the starter stays, and
+   the check repeats on the same backoff. If the target downloads but will not load, the starter
+   is started again and `upgrade.state` is `failed`.
+6. `state.json` keeps `target` while the upgrade is unfinished; the next engine start resumes it.
+   `POST cancel` stops the background download (the `.part` stays, state `cancelled`); an install
+   of the target again (or an engine restart) resumes. An install of any other model replaces the
+   upgrade; installing the same target while it runs answers 409.
+
+Status fields (all in `GET status`; `null` or `""` when nothing is staged):
+
+| Field | Values |
+|---|---|
+| `model_tier` | `"starter"`: the answering model is a stand-in, show "simpler speech while the full model downloads"; `"full"`: the chosen model; `""`: external mode or no model |
+| `model_stage` | `""` (no staging), `starter_downloading`, `target_downloading`, `target_retrying`, `target_no_space`, `swapping`, `starter_serving` (upgrade cancelled or the target would not load), `target_serving` (the swap finished this run) |
+| `upgrade` | `{target, target_name, state, progress, error, attempt, retry_in_s}`; `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
+| `model_fallback`, `model_note` | also set while `model_tier` is `starter` (the starter's own `fallback_note`, else a generic sentence), the same warning idea as for a fallback model |
+
+`status.progress` keeps showing the install job (the starter, or the model server); the target's
+download is `upgrade.progress`. `status.model` is the id of the model answering right now. A client
+shows its "simpler speech" notice when `model_tier == "starter"`, and a progress bar from
+`upgrade.progress` when `model_stage` is `target_downloading`.
 
 ### Proxy
 

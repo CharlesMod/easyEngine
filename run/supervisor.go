@@ -68,8 +68,12 @@ type Status struct {
 	Errors    []string     `json:"errors"`
 	External  ExternalInfo `json:"external"`
 	LingerS   int          `json:"linger_s"`
-	KVType    string       `json:"kv_type"`
-	Restarts  int          `json:"restarts"`
+	// First-run staging (docs/ENGINE.md section 7a).
+	ModelTier  string       `json:"model_tier"`
+	ModelStage string       `json:"model_stage"`
+	Upgrade    *UpgradeInfo `json:"upgrade"`
+	KVType     string       `json:"kv_type"`
+	Restarts   int          `json:"restarts"`
 	// ModelFallback is true when the selected model is a catalog fallback (the smallest one);
 	// ModelNote says what to expect from it. Front ends show it as a warning.
 	ModelFallback bool   `json:"model_fallback"`
@@ -150,6 +154,10 @@ type Supervisor struct {
 	tokS        float64
 
 	inflight int32
+
+	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
+	upgCancel context.CancelFunc
+	swapping  bool
 
 	opMu sync.Mutex
 	srv  *server
@@ -255,6 +263,7 @@ func (s *Supervisor) Status() Status {
 	if m, ok := s.selectedModelLocked(); ok && m.Fallback {
 		st.ModelFallback, st.ModelNote = true, m.FallbackNote
 	}
+	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
 	return st
 }
@@ -461,6 +470,10 @@ func (s *Supervisor) Route() Route {
 		return Route{Kind: "unavailable", Message: "Loading model"}
 	case "not_installed":
 		return Route{Kind: "unavailable", Message: "No model installed"}
+	case "resizing":
+		if s.swapping {
+			return Route{Kind: "unavailable", Message: "Switching to the full model"}
+		}
 	case "error":
 		return Route{Kind: "unavailable", Message: "Model server error: " + s.message}
 	}
@@ -490,6 +503,7 @@ func (s *Supervisor) Run() {
 		if local {
 			s.wg.Add(1)
 			go func() { defer s.wg.Done(); s.Start() }()
+			s.resumeUpgrade()
 		}
 	}
 	s.wg.Add(1)

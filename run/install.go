@@ -27,6 +27,9 @@ func (s *Supervisor) jobProgress(step string) func(fetch.Progress) {
 
 // Install starts the install job: backend, then model, then uv and the agent.
 func (s *Supervisor) Install(model, backend string) error {
+	if err := s.prepareInstall(model); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if s.jobRunning {
 		s.mu.Unlock()
@@ -47,6 +50,9 @@ func (s *Supervisor) Install(model, backend string) error {
 
 // InstallSync runs the install job and waits (the CLI uses it).
 func (s *Supervisor) InstallSync(ctx context.Context, model, backend string) error {
+	if err := s.prepareInstall(model); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if s.jobRunning {
 		s.mu.Unlock()
@@ -94,6 +100,7 @@ func (s *Supervisor) Cancel() {
 	if c != nil {
 		c()
 	}
+	s.cancelUpgrade()
 }
 
 func archiveExt(url string) string {
@@ -125,10 +132,28 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 	if err != nil {
 		return err
 	}
+	serve, target := m, ""
 	if m.URL != "" && !s.modelInstalled(m) {
-		s.setPhase("downloading", "Downloading "+m.Name)
-		if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID)); err != nil {
-			return err
+		if st := s.starterFor(ctx, cat, hw, m); st != nil {
+			// First run: a small model first so the first line comes in minutes; the target
+			// downloads in the background afterwards (starter.go).
+			serve, target = *st, m.ID
+			s.beginQueued(m)
+			defer s.dropQueued()
+			if !s.modelInstalled(serve) {
+				s.setPhase("downloading", "Downloading "+serve.Name+" first")
+				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID)); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := s.checkDisk(m); err != nil {
+				return err
+			}
+			s.setPhase("downloading", "Downloading "+m.Name)
+			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID)); err != nil {
+				return err
+			}
 		}
 	}
 	if s.cfg.Profile.Agent != nil && s.cfg.Profile.Agent.Wheel != "" {
@@ -137,9 +162,12 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 		}
 	}
 	s.mu.Lock()
-	s.st.Model, s.st.Backend = m.ID, be
+	s.st.Model, s.st.Backend, s.st.Target = serve.ID, be, target
 	s.mu.Unlock()
 	s.save()
+	if target != "" {
+		s.beginUpgrade(m)
+	}
 	return nil
 }
 

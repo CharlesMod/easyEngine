@@ -57,6 +57,9 @@ type Verdict struct {
 	Estimated  bool `json:"estimated"`
 	Installed  bool `json:"installed"`
 	ImportOnly bool `json:"import_only"` // the catalog has no url: only `import` can install it
+	// Fallback is true for a model kept only as a last resort; FallbackNote says what to expect.
+	Fallback     bool   `json:"fallback"`
+	FallbackNote string `json:"fallback_note,omitempty"`
 }
 
 type PlanResult struct {
@@ -114,7 +117,7 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 	}
 	bestYes, bestTight := -1, -1
 	for _, m := range c.Models {
-		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == ""}
+		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
 		if installed != nil {
 			v.Installed = installed(m)
 		}

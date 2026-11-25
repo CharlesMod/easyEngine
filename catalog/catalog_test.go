@@ -106,3 +106,21 @@ func TestLoadOverride(t *testing.T) {
 		t.Error("garbage override must be ignored")
 	}
 }
+
+// The ladder is all Gemma: the reference model on top, E4B, then E2B as the flagged fallback.
+func TestEmbeddedLadder(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"gemma4-rp-maxxed-q3kxl": false, "gemma4-e4b-q4km": false, "gemma4-e2b-q4km": true}
+	if len(c.Models) != len(want) {
+		t.Fatalf("%d models", len(c.Models))
+	}
+	for _, m := range c.Models {
+		fb, ok := want[m.ID]
+		if !ok || m.Fallback != fb || (fb && m.FallbackNote == "") || (!fb && m.FallbackNote != "") {
+			t.Errorf("model %s: fallback=%v note=%q", m.ID, m.Fallback, m.FallbackNote)
+		}
+	}
+}

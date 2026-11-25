@@ -21,7 +21,6 @@ from their rows, and any other KV type is interpolated by bytes per element.
 |---|---|---|---|---|---|
 | gemma4-e2b-q4km | 1.76 GB | 0.0040 / 0.0054 / 0.0062 | 0 / 1.4 / 3.9 MiB | 54 MiB | dense |
 | gemma4-e4b-q4km | 3.24 GB | 0.0087 / 0.0125 / 0.0157 | 0 / 11.9 / 34 MiB | 55 MiB | dense |
-| ling3-tiny-q4km | 4.76 GB | 0.0034 / 0.0049 / 0.0068 | 5.2 / 8.4 / 14 MiB | 57 MiB | 172 / 179 MiB (23 layers) |
 | gemma4-rp-maxxed-q3kxl | 9.73 GB | 0.0097 / 0.0146 / 0.0210 | 66 / 142 / 285 MiB | 60 MiB | 246 / 302 MiB (30 layers) |
 
 The e2b and e4b "fixed" excludes 1.5 and 1.8 GB of per-layer embeddings that stay in RAM (add them to
@@ -33,19 +32,14 @@ CPU-only RAM, not to VRAM). The f16 per-slot cost rests on one row each and is t
 |---|---|---|---|
 | gemma4-e2b-q4km | 199 / 22313 | 161 / 14398 | 136 / 9328 |
 | gemma4-e4b-q4km | 134 / 11168 | 107 / 6979 | 92 / 4746 |
-| ling3-tiny-q4km | 337 / 8716 | 269 / 5369 | 201 / 3705 |
 | gemma4-rp-maxxed-q3kxl | 143 / 5580 | 127 / 3349 | 105 / 2335 |
 
 Decode against `--n-cpu-moe` at 3 slots (the planner's curve). Time per token is linear in the CPU layer
-count (gemma 7.5 ms + 1.84 ms per layer, ling 4.3 ms + 1.23 ms per layer), so the planner interpolates 1/tps.
+count (gemma 7.5 ms + 1.84 ms per layer), so the planner interpolates 1/tps.
 
 | n_cpu_moe | 0 | 3 | 6 | 12 | 20 | 30 |
 |---|---|---|---|---|---|---|
 | gemma4-rp-maxxed-q3kxl | 105 | 71 | 54 | 36 | 25 | 15 |
-
-| n_cpu_moe | 0 | 5 | 11 | 17 | 23 |
-|---|---|---|---|---|---|
-| ling3-tiny-q4km | 201 | 102 | 59 | 38 | 31 |
 
 ## Predicted against measured
 
@@ -54,7 +48,6 @@ Header seeds (`fit.Seed` on the real GGUF header), predicted minus measured VRAM
 | model | rows | before: mean / max MiB | before: max % | after: mean / max MiB | after: max % |
 |---|---|---|---|---|---|
 | gemma4-rp-maxxed-q3kxl | 20 | 460 / 848 | 8.3 | 57 / 115 | 1.0 |
-| ling3-tiny-q4km | 19 | 911 / 1083 | 31.4 | 74 / 103 | 2.2 |
 | gemma4-e4b-q4km | 15 | 2482 / 2741 | 79.9 | 45 / 65 | 1.3 |
 | gemma4-e2b-q4km | 15 | 2343 / 2481 | 131.8 | 73 / 93 | 3.9 |
 
@@ -63,6 +56,14 @@ What changed in `fit.Seed`: Gemma E-series per-layer embeddings are host-residen
 vocab buffers scale with vocabulary size; a compute buffer grows with ctx (0.44 MiB per 1k ctx for the mask, plus a dequant buffer for quantised KV; the vocab buffer is 1.2 MiB per 1k vocabulary entries); SWA caches are capped at
 `window + ubatch`; MoE offload adds a fixed scheduling buffer; the old CUDA-context and scratch guesses were
 replaced by 135 MiB base overhead and 58 MiB runtime. All constants are global, none per model.
+
+## Measured but not shipped
+
+Ling 3.0-tiny (Q4_K_M, bailingmoe3: MLA plus linear attention, 4.76 GB, MoE with 23 expert layers) was
+swept alongside the others (19 rows, predicted within 2.2 % after the fit changes, about 200 tok/s per stream
+on the 5080 at 3 slots) and was dropped from the ladder on 2026-11-25 so every shipped model is Gemma. The
+reader still understands the bailingmoe3 header (`gguf`, `fit.Seed`), so adding it back is a catalog
+entry plus a `tools/gencatalog/measured.json` block.
 
 ## How to use these on another machine
 
@@ -86,11 +87,13 @@ Worked examples (desktop uses about 800 MiB; RAM 24 GB free):
   card, about 105 tok/s per stream. With a game holding 2800 MiB the plan drops to 3 x 35840, still no CPU layers.
 - **12 GB card.** Budget about 9.5 GB. 12.1 GB does not fit. Ten expert layers to RAM free 2455 MiB (125 back),
   and ctx drops to 54272 per slot: about 9.5 GB. Speed is about 41 tok/s on the 5080, so about 20 estimated
-  here, right at the floor. Ling (5.6 GB) fits whole at full ctx and about 200 tok/s on the reference card.
+  here, right at the floor. e4b (5.1 GB) fits whole at full ctx and is the better pick for a 12 GB card
+  that has other things open.
 - **8 GB card.** Budget about 5.6 GB. The reference model would need 28 of 30 layers in RAM (8.5 GB RAM) and
-  about 8 tok/s, under the floor, so it is shown "tight (slow)". Ling at 3 x 62464 is 5573 MiB and fits whole:
-  recommended. e4b (5.1 GB) and e2b (2.6 GB) fit at full ctx.
-- **6 GB or less.** Only e2b fits whole (2.6 GB); e4b and Ling are tight; the reference model is not usable.
+  about 8 tok/s, under the floor, so it is shown "tight (slow)". e4b (5.1 GB) fits whole at full ctx:
+  recommended. e2b (2.6 GB) fits too, but it is the flagged fallback and is never preferred over e4b.
+- **6 GB or less.** Only e2b fits whole (2.6 GB); e4b is tight (2 of 3 slots at 8192 ctx at 6 GB); the reference model is not usable. e2b is the catalog's
+  `fallback` model (see ENGINE.md §3): the plan and status carry a warning for it.
   With no GPU, the planner picks the smallest model whose RAM is at most 60 % of free RAM after a 2 GiB OS
   reserve (e2b) and marks the plan as an estimate: no CPU speed was measured, so expect it slow.
 

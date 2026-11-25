@@ -70,6 +70,10 @@ type Status struct {
 	LingerS   int          `json:"linger_s"`
 	KVType    string       `json:"kv_type"`
 	Restarts  int          `json:"restarts"`
+	// ModelFallback is true when the selected model is a catalog fallback (the smallest one);
+	// ModelNote says what to expect from it. Front ends show it as a warning.
+	ModelFallback bool   `json:"model_fallback"`
+	ModelNote     string `json:"model_note,omitempty"`
 }
 
 // Parent is a watched parent process.
@@ -244,7 +248,30 @@ func (s *Supervisor) Status() Status {
 		st.TokS = &v
 	}
 	st.Agent = s.agent.status()
+	if m, ok := s.selectedModelLocked(); ok && m.Fallback {
+		st.ModelFallback, st.ModelNote = true, m.FallbackNote
+	}
 	return st
+}
+
+// selectedModelLocked is the catalog entry of the selected model, if there is one. Caller holds
+// s.mu. In external mode the selected local model is not in use, so it reports none.
+func (s *Supervisor) selectedModelLocked() (catalog.Model, bool) {
+	if s.st.Model == "" || s.st.Mode == "external" {
+		return catalog.Model{}, false
+	}
+	c := s.cat
+	if c == nil {
+		c = s.cfg.Catalog
+	}
+	if c == nil {
+		var err error
+		if c, err = catalog.Load(s.dir); err != nil {
+			return catalog.Model{}, false
+		}
+		s.cat = c
+	}
+	return c.Model(s.st.Model)
 }
 
 func (s *Supervisor) save() {

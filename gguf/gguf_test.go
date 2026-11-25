@@ -386,42 +386,6 @@ func TestUnknownArchitectureIsEstimated(t *testing.T) {
 	}
 }
 
-// The real Ling 3.0-tiny header (first 8 MiB of the Q4_K_M file, fetched by Range request).
-// Skipped where it is not on disk.
-func TestLingRealHeader(t *testing.T) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".local/share", "rim"+"world-hermes-engine", "tmp/ling-head.bin")
-	fh, err := os.Open(p)
-	if err != nil {
-		t.Skip("Ling header not on this machine")
-	}
-	defer fh.Close()
-	f, err := Parse(fh, 4820000000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in, err := f.Info()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("%+v", in)
-	if in.Arch != "bailingmoe3" || in.NLayer != 24 || in.NExpert != 128 || in.NExpertUsed != 8 || in.KVLoraRank != 512 {
-		t.Errorf("%+v", in)
-	}
-	full := 0
-	for i, l := range in.Layers {
-		if l.HasKV {
-			full++
-			if i%4 != 3 || l.HeadDimK != 576 || l.KVHeads != 1 || l.HeadDimV != 0 {
-				t.Errorf("layer %d %+v", i, l)
-			}
-		}
-	}
-	if full != 6 || in.ExpertLayers != 23 || in.Estimated {
-		t.Errorf("full=%d %+v", full, in)
-	}
-}
-
 func TestHostBytesAndVocabSize(t *testing.T) {
 	kvs := []kv{
 		{"general.architecture", "gemma3n"},

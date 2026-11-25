@@ -15,8 +15,8 @@ A mod ships one small binary, `hermes-engine`. When the game starts, the mod lau
 
 A mod can instead point at any OpenAI-compatible endpoint; the engine then only proxies to it.
 
-Models in the catalog: `gemma4-rp-maxxed` (16 GB and 12 GB cards), `Ling 3.0-tiny` (8 GB and
-6 GB), `Gemma 4 E4B`, `Gemma 4 E2B`.
+Models in the catalog: `gemma4-rp-maxxed` (16 GB and 12 GB cards), `Gemma 4 E4B` (8 GB), and
+`Gemma 4 E2B`, a flagged fallback for small machines that front ends warn about.
 
 ## Build and test
 

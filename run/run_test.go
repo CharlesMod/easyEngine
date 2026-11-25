@@ -3,6 +3,7 @@
 package run_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -293,5 +294,23 @@ func TestStateSurvivesRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.Data, "state.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStatusReportsFallbackModel(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	s := ready(t, e)
+	if st := s.Status(); st.ModelFallback || st.ModelNote != "" {
+		t.Fatalf("a normal model must not be flagged: %+v", st)
+	}
+	e.Cat.Models[0].Fallback, e.Cat.Models[0].FallbackNote = true, "smallest model"
+	st := s.Status()
+	if !st.ModelFallback || st.ModelNote != "smallest model" {
+		t.Fatalf("fallback not reported: %+v", st)
+	}
+	b, _ := json.Marshal(st)
+	if !strings.Contains(string(b), `"model_fallback":true`) || !strings.Contains(string(b), `"model_note":"smallest model"`) {
+		t.Fatalf("json %s", b)
 	}
 }

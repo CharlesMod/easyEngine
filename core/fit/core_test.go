@@ -74,6 +74,10 @@ func TestCoreStaysPure(t *testing.T) {
 			if !coreImports[path] && !strings.HasPrefix(path, corePath+"/") {
 				t.Errorf("%s imports %q: the core may import only pure standard-library packages", p, path)
 			}
+			// A dot import would let a bare Now() or Sleep() past the selector check below.
+			if im.Name != nil && im.Name.Name == "." {
+				t.Errorf("%s dot-imports %q: the core names every package it calls", p, path)
+			}
 			if path == "time" {
 				timeName = "time"
 				if im.Name != nil {

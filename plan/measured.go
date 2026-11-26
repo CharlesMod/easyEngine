@@ -26,23 +26,30 @@ func SpeedScaleFor(gpuName string, m *catalog.Footprint) float64 {
 
 // interp reads a per-KV-type measured value at bytes-per-element b: exact for a measured type,
 // else linear between the nearest measured types (past the ends: the nearest segment's slope,
-// never below zero).
-func interp(byKV map[string]float64, kvType string) float64 {
+// never below zero). A cache type the core does not know, asked or measured, is its error.
+func interp(byKV map[string]float64, kvType string) (float64, error) {
+	b, err := fit.KVBytes(kvType)
+	if err != nil {
+		return 0, err
+	}
 	if v, ok := byKV[kvType]; ok {
-		return v
+		return v, nil
 	}
 	type pt struct{ b, v float64 }
 	var p []pt
 	for k, v := range byKV {
-		p = append(p, pt{fit.KVBytes(k), v})
+		bk, err := fit.KVBytes(k)
+		if err != nil {
+			return 0, err
+		}
+		p = append(p, pt{bk, v})
 	}
 	if len(p) == 0 {
-		return 0
+		return 0, nil
 	}
 	sort.Slice(p, func(i, j int) bool { return p[i].b < p[j].b })
-	b := fit.KVBytes(kvType)
 	if len(p) == 1 {
-		return p[0].v
+		return p[0].v, nil
 	}
 	i := sort.Search(len(p), func(i int) bool { return p[i].b >= b })
 	switch {
@@ -56,23 +63,33 @@ func interp(byKV map[string]float64, kvType string) float64 {
 	if v < 0 {
 		v = 0
 	}
-	return v
+	return v, nil
 }
 
 // FromMeasured turns a catalog footprint (measured with a real llama-server) into the planner's
 // Footprint for one KV type. The measured per-slot cost already contains the sliding-window cache
 // and recurrent state, and the per-ctx slope already contains the compute scratch, so only
-// those measured numbers are used.
-func FromMeasured(m *catalog.Footprint, kvType string) fit.Footprint {
+// those measured numbers are used. On this machine they are a prediction (fit.Predicted): they
+// were measured on another. A cache type the core does not know is a *fit.KVTypeError.
+func FromMeasured(m *catalog.Footprint, kvType string) (fit.Footprint, error) {
 	if kvType == "" {
 		kvType = "q4_0"
+	}
+	perK, err := interp(m.MiBPer1kCtx, kvType)
+	if err != nil {
+		return fit.Footprint{}, err
+	}
+	state, err := interp(m.StateMiBPerSlot, kvType)
+	if err != nil {
+		return fit.Footprint{}, err
 	}
 	fp := fit.Footprint{
 		FixedMiB:        m.FixedMiB,
 		HostMiB:         m.HostMiB,
-		PerTokenMiB:     interp(m.MiBPer1kCtx, kvType) / 1024,
-		StatePerSlotMiB: interp(m.StateMiBPerSlot, kvType),
+		PerTokenMiB:     perK / 1024,
+		StatePerSlotMiB: state,
 		ScratchMiB:      m.ScratchMiB,
+		Basis:           fit.Predicted,
 	}
 	if m.ExpertLayers > 0 && m.ExpertMiBPerLayer > 0 {
 		fp.MoE = true
@@ -84,5 +101,5 @@ func FromMeasured(m *catalog.Footprint, kvType string) fit.Footprint {
 	if len(m.TPSByNCpuMoe) > 0 {
 		fp.TPS = &fit.TPSCurve{Points: append([]fit.TPSPoint(nil), m.TPSByNCpuMoe...)}
 	}
-	return fp
+	return fp, nil
 }

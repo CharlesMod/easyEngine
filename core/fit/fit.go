@@ -47,6 +47,22 @@ type UnreadError struct{ Field string }
 
 func (e *UnreadError) Error() string { return "fit: room field " + e.Field + " was not read" }
 
+// KVTypeError means a cache type name the core has no price for. It is never priced as another
+// type; the empty name is not unknown, it means the default (q4_0).
+type KVTypeError struct{ Name string }
+
+func (e *KVTypeError) Error() string { return fmt.Sprintf("fit: unknown cache type %q", e.Name) }
+
+// Basis says where a memory figure came from. Predicted: worked out from the header's seed and
+// the constants above (or from the seed corrected where the book took a reading). Measured: read
+// from a load of this model, card and backend that came up. "" is not said: a figure built by hand.
+type Basis string
+
+const (
+	Predicted Basis = "predicted"
+	Measured  Basis = "measured"
+)
+
 const (
 	alignTokens = 1024
 	// The constants below were measured on an RTX 5080 with llama.cpp b12680 at -ub 512, -fa on,
@@ -113,7 +129,7 @@ type Room struct {
 	// largest allocation (Footprint.Largest) must fit inside it. 0: not known, not bounded.
 	LargestBlock int `json:"largest_block"`
 	// Unread names the fields (by their json names) the caller could not read: none is taken as
-	// zero, and Choose, MissRetry and StepDown answer *UnreadError naming the first.
+	// zero, and every entry that reads a room answers *UnreadError naming the first (settle).
 	Unread []string `json:"unread,omitempty"`
 	// SpeedScale is how fast this machine decodes compared with the machine the speed curve was
 	// measured on (1 = the same card). 0 means 1. The caller sets it per model (the engine's
@@ -143,6 +159,11 @@ type Footprint struct {
 
 	StatePerSlotMiB float64 `json:"state_per_slot_mib"` // recurrent (linear-attention/SSM) state per slot; fixed, not per token
 	Estimated       bool    `json:"estimated"`          // built from a conservative guess, not a known architecture
+	// Basis is of FixedMiB, the one term a reading corrects: Measured where the book took a
+	// reading for this model, card and backend (Book.Footprint), Predicted from Seed and
+	// SeedFromBytes. The per-token terms are always predicted. A reading passed over leaves it
+	// as it was.
+	Basis Basis `json:"basis,omitempty"`
 
 	SWAPerTokenMiB float64 `json:"swa_per_token_mib"` // sliding-window KV per cached token
 	SWAWindow      int     `json:"swa_window"`        // tokens kept per slot by those layers
@@ -171,6 +192,10 @@ type Shape struct {
 	// EstTPS is the expected decode speed per stream (tokens/s) on this machine, 0 when no
 	// measured curve exists for the model.
 	EstTPS float64 `json:"est_decode_tps"`
+	// VRAMBasis is of VRAMMiB: Predicted from the planner; Measured from Book.Mark, where the book
+	// holds a reading of this very shape and VRAMMiB is that reading. RAMMiB is always predicted:
+	// no reading of host memory is taken.
+	VRAMBasis Basis `json:"vram_basis,omitempty"`
 }
 
 // CtxTotal is the -c value.
@@ -217,29 +242,54 @@ func alignDown(n int) int {
 	return n / alignTokens * alignTokens
 }
 
-// kvBytes is bytes per KV element for a llama.cpp cache type.
-func kvBytes(t string) float64 {
+// kvBytes is bytes per KV element for a llama.cpp cache type, and false for a name it does not
+// know; "" is not a name here (the callers put the default in first).
+func kvBytes(t string) (float64, bool) {
 	switch t {
 	case "f32":
-		return 4
+		return 4, true
 	case "f16", "bf16":
-		return 2
+		return 2, true
 	case "q8_0":
-		return 8.5 / 8
+		return 8.5 / 8, true
 	case "q5_1":
-		return 6.0 / 8
+		return 6.0 / 8, true
 	case "q5_0":
-		return 5.5 / 8
+		return 5.5 / 8, true
 	case "q4_1":
-		return 5.0 / 8
+		return 5.0 / 8, true
 	case "q4_0", "iq4_nl":
-		return 4.5 / 8
+		return 4.5 / 8, true
 	}
-	return 2 // unknown: assume f16
+	return 0, false
 }
 
-// KVBytes is the bytes per element of a llama.cpp KV cache type (unknown types count as f16).
-func KVBytes(t string) float64 { return kvBytes(t) }
+// q4Bytes is kvBytes("q4_0"), the default type the size guesses are stated at.
+const q4Bytes = 4.5 / 8
+
+// knownKV is nil where every name given is a known cache type or empty, else a *KVTypeError
+// naming the first that is not.
+func knownKV(names ...string) error {
+	for _, t := range names {
+		if _, ok := kvBytes(t); t != "" && !ok {
+			return &KVTypeError{Name: t}
+		}
+	}
+	return nil
+}
+
+// KVBytes is the bytes per element of a llama.cpp KV cache type; "" is the default (q4_0), and a
+// name the core does not know is a *KVTypeError.
+func KVBytes(t string) (float64, error) {
+	if t == "" {
+		t = "q4_0"
+	}
+	b, ok := kvBytes(t)
+	if !ok {
+		return 0, &KVTypeError{Name: t}
+	}
+	return b, nil
+}
 
 // DefaultMargin is max(512 MiB, 4 % of the card).
 func DefaultMargin(vramTotal int) int {
@@ -252,13 +302,17 @@ func DefaultMargin(vramTotal int) int {
 
 const mib = 1 << 20
 
-// Seed builds a footprint from a GGUF header. notes says what it had to guess (an architecture
-// not fully understood, no KV dimensions in the header), one line each, for the caller to log.
-func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
+// Seed builds a footprint from a GGUF header, priced at cache type kvType ("" is q4_0; a name
+// the core does not know is a *KVTypeError). notes says what it had to guess (an architecture not
+// fully understood, no KV dimensions in the header), one line each, for the caller to log.
+func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err error) {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
-	b := kvBytes(kvType)
+	b, ok := kvBytes(kvType)
+	if !ok {
+		return Footprint{}, nil, &KVTypeError{Name: kvType}
+	}
 	layers := info.Layers
 	if len(layers) != info.NLayer || len(layers) == 0 {
 		layers = nil
@@ -302,6 +356,7 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		ComputePerTokenMiB: compute,
 		StatePerSlotMiB:    float64(info.StateBytesPerSlot) / mib,
 		Estimated:          info.Estimated,
+		Basis:              Predicted,
 
 		KVType:             kvType,
 		DequantPerTokenMiB: dequant,
@@ -318,7 +373,7 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		if gib < 1 {
 			gib = 1
 		}
-		fp.PerTokenMiB = 0.0006 * gib * 1.25 * b / kvBytes("q4_0")
+		fp.PerTokenMiB = 0.0006 * gib * 1.25 * b / q4Bytes
 		fp.Estimated = true
 		notes = append(notes, fmt.Sprintf("fit: %s: header gave no KV dimensions; guessing %.4f MiB per token from the weight size", info.Arch, fp.PerTokenMiB))
 	}
@@ -329,23 +384,29 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
 		fp.MoESchedMiB = moeSchedMiB
 	}
-	return fp, notes
+	return fp, notes, nil
 }
 
 // SeedFromBytes is the footprint of a model known only by its file size: about 0.0006 MiB per
 // token per GiB of weights at q4_0 with a 25 % safety factor, 30 expert layers for a MoE. It is
-// marked Estimated; the header gives the real footprint once the file is on disk.
-func SeedFromBytes(size int64, moe bool, kvType string) Footprint {
+// marked Estimated; the header gives the real footprint once the file is on disk. kvType is as
+// for Seed.
+func SeedFromBytes(size int64, moe bool, kvType string) (Footprint, error) {
 	if kvType == "" {
 		kvType = "q4_0"
+	}
+	b, ok := kvBytes(kvType)
+	if !ok {
+		return Footprint{}, &KVTypeError{Name: kvType}
 	}
 	sizeMiB := float64(size) / mib
 	gib := sizeMiB / 1024
 	fp := Footprint{
 		FixedMiB:    sizeMiB + baseOverheadMiB + 200*vocabMiBPer1k, // a typical 200k vocabulary
-		PerTokenMiB: 0.0006 * gib * 1.25 * kvBytes(kvType) / kvBytes("q4_0"),
+		PerTokenMiB: 0.0006 * gib * 1.25 * b / q4Bytes,
 		ScratchMiB:  runtimeMiB,
 		Estimated:   true,
+		Basis:       Predicted,
 		KVType:      kvType,
 		WeightsMiB:  sizeMiB,
 	}
@@ -357,36 +418,161 @@ func SeedFromBytes(size int64, moe bool, kvType string) Footprint {
 		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
 		fp.MoESchedMiB = moeSchedMiB
 	}
-	return fp
+	return fp, nil
 }
 
 // quantised reports whether a cache type is expanded to f16 for the widest layer.
 func quantised(t string) bool { return t != "f16" && t != "bf16" && t != "f32" }
 
-// atType is fp priced at cache type t: the per-token cache scales with the bytes per element and
+// ---- the one checked place ----
+//
+// A Footprint, a Room and a Wants as a caller hands them are never priced or read for a budget
+// directly: every exported entry that prices memory or reads a room first passes them to settle,
+// and takes every number from what it answers. The raw prices are methods of fig and the budgets
+// fields of roomFig, and only settle (and price, which settle and fig.at call) builds either.
+
+// fig is a footprint's figures priced at one known cache type (its KVType; "" where the figures
+// were measured and are taken as given). Every memory figure the package answers is read from one.
+type fig struct {
+	Footprint
+	src Footprint // the footprint as the entry was given it, which at prices another type from
+}
+
+// roomFig is a room every field of which was read, with its budgets in MiB.
+type roomFig struct {
+	Room
+	budget float64 // card a shape may take: VRAMTotal less Others, GameReserve and the margin
+	ram    float64 // host RAM a CPU-only run or the moved expert layers may take: RAMAvail less the reserve
+}
+
+// settled is what one entry prices from: the footprint priced at the type its numbers are taken
+// at, the room read whole, the wants resolved and the type the shape runs at. A part the entry did
+// not give is zero.
+type settled struct {
+	fp   fig
+	room roomFig
+	w    Wants
+	kv   string // the cache type the shape runs at (runKV); "" with no shape
+}
+
+// runKV is the cache type a shape is run at: its own, or for "" the default q4_0. Args renders it
+// and settle prices it, so a shape naming no type has that one meaning everywhere.
+func runKV(s Shape) string {
+	if s.KVType == "" {
+		return "q4_0"
+	}
+	return s.KVType
+}
+
+// settle is the one checked place. Each argument is nil where the entry takes none (with wants,
+// a footprint is always given). In this order it refuses: a room with a field marked unread
+// (*UnreadError naming the first: never taken as zero); with wants, a largest block the
+// footprint cannot be held to (ErrNoWeights); wants it cannot resolve (ErrNoCtxTrain,
+// ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
+// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError).
+//
+// The figures are priced at the type the shape runs at where a shape is given (runKV: a shape's
+// "" is the default q4_0, with or without wants, as Args renders it), else at the wants' (the
+// first of KVTypes), else at the footprint's own: never at the seed's in place of the shape's. A
+// footprint that names no type (measured numbers) is taken as given, except with a list of types,
+// which it cannot be priced at (ErrNoKVType). The resolved wants are never rewritten from a shape:
+// the type the shape runs at is answered beside them (settled.kv).
+func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
+	var st settled
+	if room != nil {
+		if len(room.Unread) > 0 {
+			return st, &UnreadError{Field: room.Unread[0]}
+		}
+		if w != nil && room.LargestBlock > 0 && !room.NoGPU && fp.WeightsMiB <= 0 {
+			return st, ErrNoWeights
+		}
+		m := room.Margin
+		if m == 0 {
+			m = DefaultMargin(room.VRAMTotal)
+		}
+		r := room.Reserve
+		if r == 0 {
+			r = OSReserveMiB
+		}
+		st.room = roomFig{Room: *room,
+			budget: float64(room.VRAMTotal - room.Others - room.GameReserve - max(m, 0)),
+			ram:    float64(room.RAMAvail - max(r, 0))}
+	}
+	if w != nil {
+		rw, err := resolve(*fp, *w)
+		if err != nil {
+			return st, err
+		}
+		st.w = rw
+	}
+	if s != nil {
+		if err := knownKV(s.KVType); err != nil {
+			return st, err
+		}
+	}
+	if fp == nil {
+		return st, nil
+	}
+	t := fp.KVType
+	switch {
+	case s != nil:
+		st.kv = runKV(*s)
+		t = st.kv
+	case w != nil:
+		t = st.w.KVType
+	}
+	if fp.KVType == "" && len(st.w.KVTypes) == 0 {
+		t = "" // measured figures: taken as given
+	}
+	f, err := price(*fp, t)
+	if err != nil {
+		return st, err
+	}
+	st.fp = f
+	return st, nil
+}
+
+// price is fp priced at cache type t: the per-token cache scales with the bytes per element and
 // the f16 expansion comes or goes with quantisation. Worked out from the footprint, never tried.
-func (fp Footprint) atType(t string) (Footprint, error) {
-	if t == fp.KVType {
-		return fp, nil
+// Only settle and fig.at call it.
+func price(fp Footprint, t string) (fig, error) {
+	src := fp
+	if err := knownKV(t, fp.KVType); err != nil {
+		return fig{}, err
 	}
-	if fp.KVType == "" {
-		return Footprint{}, ErrNoKVType
+	if t != fp.KVType {
+		if fp.KVType == "" {
+			return fig{}, ErrNoKVType
+		}
+		bt, _ := kvBytes(t)
+		bf, _ := kvBytes(fp.KVType)
+		r := bt / bf
+		fp.PerTokenMiB *= r
+		fp.SWAPerTokenMiB *= r
+		if quantised(fp.KVType) {
+			fp.ComputePerTokenMiB -= fp.DequantPerTokenMiB
+		}
+		if quantised(t) {
+			fp.ComputePerTokenMiB += fp.DequantPerTokenMiB
+		}
+		fp.KVType = t
 	}
-	r := kvBytes(t) / kvBytes(fp.KVType)
-	fp.PerTokenMiB *= r
-	fp.SWAPerTokenMiB *= r
-	if quantised(fp.KVType) {
-		fp.ComputePerTokenMiB -= fp.DequantPerTokenMiB
+	return fig{Footprint: fp, src: src}, nil
+}
+
+// at is the same footprint priced at another type of a list.
+func (fp fig) at(t string) (fig, error) { return price(fp.src, t) }
+
+// capRoom is the room a cap is measured against: the card's budget, or host RAM with no GPU.
+func (room roomFig) capRoom() int {
+	if room.NoGPU {
+		return int(room.ram)
 	}
-	if quantised(t) {
-		fp.ComputePerTokenMiB += fp.DequantPerTokenMiB
-	}
-	fp.KVType = t
-	return fp, nil
+	return int(room.budget)
 }
 
 // kvAt returns the KV cache MiB for a layout.
-func (fp Footprint) kvAt(slots, ctxPerSlot int) float64 {
+func (fp fig) kvAt(slots, ctxPerSlot int) float64 {
 	kv := (fp.PerTokenMiB+fp.ComputePerTokenMiB)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
@@ -399,7 +585,7 @@ func (fp Footprint) kvAt(slots, ctxPerSlot int) float64 {
 }
 
 // vram is the GPU use of a layout with nCpuMoe expert layers moved to RAM.
-func (fp Footprint) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
+func (fp fig) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
 	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
 	if nCpuMoe > 0 {
 		v += fp.MoESchedMiB
@@ -411,24 +597,15 @@ func (fp Footprint) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
 // allocation: the weights left on the card, the cache (full-attention, sliding-window and
 // recurrent state together) and the compute buffers (the fixed load beyond the weights plus the
 // scratch that grows with ctx). It needs WeightsMiB.
-func (fp Footprint) largest(slots, ctxPerSlot, nCpuMoe int) float64 {
+func (fp fig) largest(slots, ctxPerSlot, nCpuMoe int) float64 {
 	weights := fp.WeightsMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
 	cache := fp.kvAt(slots, ctxPerSlot) - fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
 	compute := math.Max(fp.FixedMiB-fp.WeightsMiB, 0) + fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
 	return math.Max(weights, math.Max(cache, compute))
 }
 
-// Largest is the predicted largest single allocation in MiB of a layout on the card (see
-// Room.LargestBlock), or ErrNoWeights where the footprint does not know its weights.
-func (fp Footprint) Largest(slots, ctxPerSlot, nCpuMoe int) (float64, error) {
-	if fp.WeightsMiB <= 0 {
-		return 0, ErrNoWeights
-	}
-	return fp.largest(slots, ctxPerSlot, nCpuMoe), nil
-}
-
 // expertRAM is the host RAM taken by nCpuMoe expert layers.
-func (fp Footprint) expertRAM(nCpuMoe int) float64 {
+func (fp fig) expertRAM(nCpuMoe int) float64 {
 	per := fp.ExpertRAMPerLayer
 	if per <= 0 {
 		per = fp.ExpertMiBPerLayer
@@ -436,26 +613,44 @@ func (fp Footprint) expertRAM(nCpuMoe int) float64 {
 	return per * float64(nCpuMoe)
 }
 
-// VRAM is the predicted GPU use in MiB of a layout with nCpuMoe expert layers moved to RAM.
-func (fp Footprint) VRAM(slots, ctxPerSlot, nCpuMoe int) float64 {
-	return fp.vram(slots, ctxPerSlot, nCpuMoe)
-}
-
-// ExpertRAM is the predicted extra host RAM in MiB of moving nCpuMoe expert layers off the card.
-func (fp Footprint) ExpertRAM(nCpuMoe int) float64 { return fp.expertRAM(nCpuMoe) }
-
 // allHost is the RAM use of a CPU-only run.
-func (fp Footprint) allHost(slots, ctxPerSlot int) float64 {
+func (fp fig) allHost(slots, ctxPerSlot int) float64 {
 	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
 }
 
-// HostRAM is the predicted RAM use in MiB of a CPU-only run of the layout.
-func (fp Footprint) HostRAM(slots, ctxPerSlot int) float64 { return fp.allHost(slots, ctxPerSlot) }
+// Need is the predicted memory in MiB of shape s, priced at its own cache type: card memory and
+// the host memory of the expert layers it moves, or for a CPU-only shape no card and the whole
+// run's host memory. It refuses as settle does (an unknown type, a type the footprint cannot be
+// priced at).
+func (fp Footprint) Need(s Shape) (vram, ram float64, err error) {
+	st, err := settle(&fp, &s, nil, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	if s.CPUOnly {
+		return 0, st.fp.allHost(s.Slots, s.CtxPerSlot), nil
+	}
+	return st.fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe), st.fp.expertRAM(s.NCpuMoe), nil
+}
+
+// Largest is the predicted largest single allocation in MiB of shape s on the card (see
+// Room.LargestBlock), priced at its own cache type; ErrNoWeights where the footprint does not
+// know its weights, and settle's refusals.
+func (fp Footprint) Largest(s Shape) (float64, error) {
+	st, err := settle(&fp, &s, nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	if fp.WeightsMiB <= 0 {
+		return 0, ErrNoWeights
+	}
+	return st.fp.largest(s.Slots, s.CtxPerSlot, s.NCpuMoe), nil
+}
 
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }
 
-func (fp Footprint) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
-	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly}
+func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
+	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted}
 	if cpuOnly {
 		s.NCpuMoe = 0
 		s.RAMMiB = ceilMiB(fp.allHost(slots, ctx))
@@ -467,7 +662,7 @@ func (fp Footprint) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 }
 
 // ctxCeiling is the largest 1024-aligned ctx per slot allowed by wants and the book's cap.
-func (fp Footprint) ctxCeiling(w Wants, slots int) int {
+func (fp fig) ctxCeiling(w Wants, slots int) int {
 	c := w.CtxMax
 	if fp.CapCtxTotal > 0 {
 		if cc := alignDown(fp.CapCtxTotal / slots); cc < c {
@@ -495,41 +690,16 @@ func maxCtx(floor, ceiling int, ok func(ctx int) bool) (int, bool) {
 	return lo * alignTokens, true
 }
 
-// Budget is the VRAM in MiB a shape may take: the card less others, the game's reserve and the
-// margin (Room.Margin, or DefaultMargin where it is 0).
-func (room Room) Budget() float64 {
-	m := room.Margin
-	if m == 0 {
-		m = DefaultMargin(room.VRAMTotal)
+// Budget is the card and host memory in MiB a shape may take in this room: the card less
+// others, the game's reserve and the margin (Room.Margin, or DefaultMargin where it is 0); RAMAvail
+// less the reserve (Room.Reserve, or OSReserveMiB where it is 0). A field marked unread is
+// *UnreadError, never taken as zero.
+func (room Room) Budget() (vram, ram float64, err error) {
+	st, err := settle(nil, nil, &room, nil)
+	if err != nil {
+		return 0, 0, err
 	}
-	if m < 0 {
-		m = 0
-	}
-	return float64(room.VRAMTotal - room.Others - room.GameReserve - m)
-}
-
-// RAMBudget is the host RAM in MiB a CPU-only run or the moved expert layers may take: RAMAvail
-// less the reserve (Room.Reserve, or OSReserveMiB where it is 0).
-func (room Room) RAMBudget() float64 {
-	r := room.Reserve
-	if r == 0 {
-		r = OSReserveMiB
-	}
-	if r < 0 {
-		r = 0
-	}
-	return float64(room.RAMAvail - r)
-}
-
-// check refuses a room with a field not read, or a largest block the footprint cannot be held to.
-func (room Room) check(fp Footprint) error {
-	if len(room.Unread) > 0 {
-		return &UnreadError{Field: room.Unread[0]}
-	}
-	if room.LargestBlock > 0 && !room.NoGPU && fp.WeightsMiB <= 0 {
-		return ErrNoWeights
-	}
-	return nil
+	return st.room.budget, st.room.ram, nil
 }
 
 // kvTypes is a list of cache types taken once: each type at its first place, repeats and empty
@@ -546,15 +716,16 @@ func kvTypes(list []string) []string {
 
 // need is the predicted memory a shape is sized against: card memory, or host memory for a
 // CPU-only shape. fp must be priced at s's cache type.
-func (fp Footprint) need(s Shape) float64 {
+func (fp fig) need(s Shape) float64 {
 	if s.CPUOnly {
 		return fp.allHost(s.Slots, s.CtxPerSlot)
 	}
 	return fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe)
 }
 
-// resolve fills the wants from the footprint (the trained context) and then every default.
-func (fp Footprint) resolve(w Wants) (Wants, error) {
+// resolve fills the wants from the footprint (the trained context) and then every default. Only
+// settle calls it.
+func resolve(fp Footprint, w Wants) (Wants, error) {
 	if w.CtxFromModel {
 		if fp.CtxTrain <= 0 {
 			return w, ErrNoCtxTrain
@@ -572,7 +743,10 @@ func (fp Footprint) resolve(w Wants) (Wants, error) {
 	if len(w.KVTypes) > 0 {
 		w.KVType = w.KVTypes[0]
 	}
-	return w, nil
+	if err := knownKV(w.KVType); err != nil {
+		return w, err
+	}
+	return w, knownKV(w.KVTypes...)
 }
 
 // Choose picks the shape, in the order of ENGINE.md section 5: all on GPU at the largest ctx;
@@ -584,24 +758,22 @@ func (fp Footprint) resolve(w Wants) (Wants, error) {
 // costs ctx; if nothing reaches the floor the best shape is returned, with EstTPS under it.
 // With Wants.KVTypes it does all this at each type in turn (see there).
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
-	if err := room.check(fp); err != nil {
-		return Shape{}, err
-	}
-	w, err := fp.resolve(w)
+	st, err := settle(&fp, nil, &room, &w)
 	if err != nil {
 		return Shape{}, err
 	}
+	w, rm := st.w, st.room
 	if len(w.KVTypes) == 0 {
-		return chooseAt(fp, room, w, room.Budget(), room.RAMBudget())
+		return chooseAt(st.fp, rm, w, rm.budget, rm.ram)
 	}
-	at := func(t string) (Footprint, Shape, error) {
-		ft, err := fp.atType(t)
+	at := func(t string) (fig, Shape, error) {
+		ft, err := st.fp.at(t)
 		if err != nil {
 			return ft, Shape{}, err
 		}
 		wt := w
 		wt.KVType = t
-		s, err := chooseAt(ft, room, wt, room.Budget(), room.RAMBudget())
+		s, err := chooseAt(ft, rm, wt, rm.budget, rm.ram)
 		return ft, s, err
 	}
 	last := len(w.KVTypes) - 1
@@ -620,7 +792,7 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 
 // chooseAt is Choose at the one type w.KVType, with fp priced at it, within budget MiB of card
 // and ram MiB of host memory (the room's own, or less on the walk down: StepDown).
-func chooseAt(fp Footprint, room Room, w Wants, budget, ram float64) (Shape, error) {
+func chooseAt(fp fig, room roomFig, w Wants, budget, ram float64) (Shape, error) {
 	s, err := choose(fp, room, w, budget, ram, true)
 	if errors.Is(err, ErrTooBig) && fp.TPS != nil && w.MinTPS > 0 && !room.NoGPU {
 		// Nothing fits above the speed floor. A slow shape still runs, so offer it (the verdict
@@ -634,7 +806,7 @@ func chooseAt(fp Footprint, room Room, w Wants, budget, ram float64) (Shape, err
 }
 
 // estTPS is the measured speed with n layers on the CPU, scaled for this machine; 0 if unknown.
-func (fp Footprint) estTPS(n int, scale float64) float64 {
+func (fp fig) estTPS(n int, scale float64) float64 {
 	t, ok := fp.TPS.At(n)
 	if !ok {
 		return 0
@@ -645,7 +817,7 @@ func (fp Footprint) estTPS(n int, scale float64) float64 {
 	return math.Round(t*scale*10) / 10
 }
 
-func choose(fp Footprint, room Room, w Wants, budget, ram float64, enforceSpeed bool) (Shape, error) {
+func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed bool) (Shape, error) {
 	block := float64(room.LargestBlock)
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
 		ceil := fp.ctxCeiling(w, slots)
@@ -724,18 +896,13 @@ func better(a, b Shape) bool {
 // With Wants.KVTypes (taken once, each type at its first place) it re-plans at cur's type, and
 // at that type's floor StepDown moves on to the next type, never to a shape larger than cur.
 func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (Shape, error) {
-	if err := room.check(fp); err != nil {
-		return Shape{}, err
-	}
-	w, err := fp.resolve(w)
+	st, err := settle(&fp, &cur, &room, &w)
 	if err != nil {
 		return Shape{}, err
 	}
-	if fp, err = fp.typed(w, cur); err != nil {
-		return Shape{}, err
-	}
+	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
-	if perTok := fp.PerTokenMiB + fp.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
+	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
 		drop := int(math.Ceil((float64(failedBufMiB) + runtimeMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}
@@ -749,27 +916,31 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	}
 	w2 := w
 	w2.CtxFromModel = false // w is resolved: CtxMax already holds the trained context, and the cap must stand
+	w2.KVType = st.kv       // the re-plan keeps the type cur runs at
 	if len(w2.KVTypes) > 0 {
-		w2.KVTypes = []string{fp.KVType} // fp is priced at cur's type
+		w2.KVTypes = []string{st.kv}
 	}
 	if cap < w2.CtxMax {
 		w2.CtxMax = cap
 	}
-	if s, err := Choose(fp, room, w2); err == nil && better(cur, s) {
+	if s, err := Choose(f.Footprint, room, w2); err == nil && better(cur, s) {
 		return s, nil
 	}
-	return StepDown(fp, cur, room, w)
+	return StepDown(f.Footprint, cur, room, w)
 }
 
 // StepDown makes the shape one notch smaller: ctx per slot down by 1/16 (at least 1024) toward
 // the floor, then one more expert layer to RAM (MoE, not with Wants.Whole), then one slot fewer
-// at the floor ctx. It keeps cur's cache type; with Whole no step has an expert off the card.
+// at the floor ctx. It keeps the cache type cur runs at (runKV: a shape naming no type runs at the
+// default q4_0, whatever type the wants name); with Whole no step has an expert off the card.
 // With Wants.KVTypes (taken once, each type at its first place and repeats dropped), at the floor
 // with MinSlots at a type that is not the last, it moves to the next type in the list with the
 // largest shape there that needs no more memory than cur (predicted at cur's type) and is never
 // better than it (no more slots, no more ctx per slot); where none fits, on to the type after;
-// ErrTooBig comes only at the last type's floor. It never plans the room afresh (Choose alone
-// does): the load that failed disproved that plan.
+// ErrTooBig comes only at the last type's floor. A shape at a type the wants do not list (with no
+// list, any type; so a shape naming no type under wants at f16 walks down at q4_0) keeps that type
+// to its floor and ends at ErrTooBig there, never moving to a type it was not running. It never
+// plans the room afresh (Choose alone does): the load that failed disproved that plan.
 //
 // The walk is monotone: each step strictly lowers the pair (types left after the shape's in the
 // list, then the predicted memory the shape is sized against, Footprint.need), compared in that
@@ -777,17 +948,12 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 // One step does not lower it: the first expert layer moved to RAM where a layer weighs less than
 // Footprint.MoESchedMiB; those moves are bounded by ExpertLayers, so the walk still ends.
 func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
-	if err := room.check(fp); err != nil {
-		return Shape{}, err
-	}
-	w, err := fp.resolve(w)
+	st, err := settle(&fp, &cur, &room, &w)
 	if err != nil {
 		return Shape{}, err
 	}
-	if fp, err = fp.typed(w, cur); err != nil {
-		return Shape{}, err
-	}
-	w.KVType = firstNonEmpty(cur.KVType, w.KVType)
+	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
+	w.KVType = st.kv    // every step keeps that type until the move to the next type of the list
 	if w.Whole {
 		cur.NCpuMoe = 0
 	}
@@ -800,17 +966,17 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 		if ctx < w.CtxFloor {
 			ctx = w.CtxFloor
 		}
-		return fp.shape(w, cur.Slots, ctx, cur.NCpuMoe, cur.CPUOnly), nil
+		return f.shape(w, cur.Slots, ctx, cur.NCpuMoe, cur.CPUOnly), nil
 	}
-	ram := room.RAMBudget()
-	if !cur.CPUOnly && fp.MoE && !room.Unified && !w.Whole && cur.NCpuMoe < fp.ExpertLayers &&
-		fp.expertRAM(cur.NCpuMoe+1) <= ram {
-		return fp.shape(w, cur.Slots, cur.CtxPerSlot, cur.NCpuMoe+1, false), nil
+	ram := st.room.ram
+	if !cur.CPUOnly && f.MoE && !st.room.Unified && !w.Whole && cur.NCpuMoe < f.ExpertLayers &&
+		f.expertRAM(cur.NCpuMoe+1) <= ram {
+		return f.shape(w, cur.Slots, cur.CtxPerSlot, cur.NCpuMoe+1, false), nil
 	}
 	if cur.Slots > w.MinSlots {
-		return fp.shape(w, cur.Slots-1, w.CtxFloor, cur.NCpuMoe, cur.CPUOnly), nil
+		return f.shape(w, cur.Slots-1, w.CtxFloor, cur.NCpuMoe, cur.CPUOnly), nil
 	}
-	i := slices.Index(w.KVTypes, fp.KVType) // w.KVTypes holds each type once (resolve)
+	i := slices.Index(w.KVTypes, st.kv) // w.KVTypes holds each type once (resolve)
 	if i < 0 {
 		return Shape{}, ErrTooBig
 	}
@@ -818,19 +984,19 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	w.Slots = min(w.Slots, cur.Slots)
 	w.MinSlots = min(w.MinSlots, w.Slots)
 	w.CtxMax = min(w.CtxMax, alignDown(cur.CtxPerSlot))
-	budget, hostRAM := room.Budget(), ram
+	budget, hostRAM := st.room.budget, ram
 	if cur.CPUOnly {
-		hostRAM = min(hostRAM, fp.need(cur))
+		hostRAM = min(hostRAM, f.need(cur))
 	} else {
-		budget = min(budget, fp.need(cur))
+		budget = min(budget, f.need(cur))
 	}
 	for _, t := range w.KVTypes[i+1:] {
-		ft, err := fp.atType(t)
+		ft, err := f.at(t)
 		if err != nil {
 			return Shape{}, err
 		}
 		w.KVType = t
-		s, err := chooseAt(ft, room, w, budget, hostRAM)
+		s, err := chooseAt(ft, st.room, w, budget, hostRAM)
 		if !errors.Is(err, ErrTooBig) {
 			return s, err
 		}
@@ -838,31 +1004,23 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	return Shape{}, ErrTooBig
 }
 
-// typed is fp priced at cur's cache type where the wants give a list of types; as given otherwise.
-func (fp Footprint) typed(w Wants, cur Shape) (Footprint, error) {
-	if len(w.KVTypes) == 0 {
-		return fp, nil
-	}
-	return fp.atType(firstNonEmpty(cur.KVType, w.KVTypes[0]))
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
 // Grow returns the planner's best shape for the current room and true when it is larger than
 // cur (more slots, fewer CPU-MoE layers or more ctx). The caller restarts at it when idle and
-// falls back to cur if the bigger load fails. Where Choose answers an error, cur and false. A
-// better cache type alone is not larger.
-func Grow(fp Footprint, cur Shape, room Room, w Wants) (Shape, bool) {
-	s, err := Choose(fp, room, w)
-	if err != nil || !better(s, cur) {
-		return cur, false
+// falls back to cur if the bigger load fails. Where cur, the room or the wants are refused
+// (settle) or Choose answers an error, cur, false and that error. A better cache type alone is
+// not larger.
+func Grow(fp Footprint, cur Shape, room Room, w Wants) (Shape, bool, error) {
+	if _, err := settle(&fp, &cur, &room, &w); err != nil {
+		return cur, false, err
 	}
-	return s, true
+	s, err := Choose(fp, room, w)
+	if err != nil {
+		return cur, false, err
+	}
+	if !better(s, cur) {
+		return cur, false, nil
+	}
+	return s, true, nil
 }
 
 // Args renders the shape-dependent llama-server flags: -ngl, -np, -c, --n-cpu-moe, -ctk, -ctv.
@@ -875,10 +1033,7 @@ func Args(s Shape) []string {
 	if s.NCpuMoe > 0 && !s.CPUOnly {
 		a = append(a, "--n-cpu-moe", strconv.Itoa(s.NCpuMoe))
 	}
-	kv := s.KVType
-	if kv == "" {
-		kv = "q4_0"
-	}
+	kv := runKV(s)
 	return append(a, "-ctk", kv, "-ctv", kv)
 }
 
@@ -891,12 +1046,60 @@ func (s Shape) String() string {
 
 // ---- calibration book ----
 
-// Calib is what one healthy load taught us about a (model, GPU, backend).
+// Calib is what the loads of one (model, GPU, backend) taught us. The four first fields are the
+// book as older builds wrote it, kept with their names and meaning so either build reads the
+// other's state; an older build drops the rest when it writes.
 type Calib struct {
-	FixedMiB    float64   `json:"fixed_mib"`
+	FixedMiB    float64   `json:"fixed_mib"` // the fixed part from the last reading taken; 0: none taken
 	CapCtxTotal int       `json:"cap_ctx_total"`
-	Loads       int       `json:"loads"`
+	Loads       int       `json:"loads"` // readings taken
 	Updated     time.Time `json:"updated"`
+	// Lift is what lets CapCtxTotal go (Book.LetGo). Every cap this build lowers carries one; a
+	// cap an older build lowered has none until the first LetGo records it.
+	Lift *CapLift `json:"cap_lift,omitempty"`
+	// Under is the caps this one was lowered beneath, latest last, each with its own lift: where
+	// LetGo lets CapCtxTotal go it falls back to the latest of these that still stands.
+	Under []HeldCap `json:"cap_under,omitempty"`
+	// Readings is the card memory each shape that came up held, one per shape, whether or not
+	// its reading was taken for the fixed part (Book.Mark).
+	Readings []Reading `json:"readings,omitempty"`
+}
+
+// CapLift is what a cap was measured under: the room (Room.Budget, or Room.RAMBudget for a run
+// with no GPU), how much less the cap's shape was predicted to need than the shape that ran out
+// of memory (0 where that cannot be told), and the engine build. A room larger than RoomMiB by
+// more than MissMiB (with a miss of 0: any larger room), or another build, lets the cap go.
+type CapLift struct {
+	RoomMiB int    `json:"room_mib"`
+	MissMiB int    `json:"miss_mib"`
+	NoGPU   bool   `json:"no_gpu,omitempty"`
+	Build   string `json:"build"`
+}
+
+// HeldCap is an earlier cap kept beneath a lower one, with the lift it was measured under.
+type HeldCap struct {
+	CapCtxTotal int     `json:"cap_ctx_total"`
+	Lift        CapLift `json:"cap_lift"`
+}
+
+// lifted reports whether room and build, as they stand now, let a cap measured under l go.
+func (l CapLift) lifted(room roomFig, build string) bool {
+	return l.Build != build || (l.NoGPU == room.NoGPU && room.capRoom() > l.RoomMiB+l.MissMiB)
+}
+
+// Reading is the card memory one shape held when its load came up, read by its process.
+type Reading struct {
+	Slots      int    `json:"slots"`
+	CtxPerSlot int    `json:"ctx_per_slot"`
+	NCpuMoe    int    `json:"n_cpu_moe"`
+	KVType     string `json:"kv_type"`
+	VRAMMiB    int    `json:"vram_mib"`
+}
+
+// of is whether the reading was taken from this shape. A cache type is compared as the type it
+// runs at (runKV), so a shape that names none and one that names the default are one shape.
+func (r Reading) of(s Shape) bool {
+	return !s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot && r.NCpuMoe == s.NCpuMoe && runKV(Shape{KVType: r.KVType}) == runKV(s)
 }
 
 // Book is the calibration book kept in state.json.
@@ -909,7 +1112,8 @@ func BookKey(modelSHA, gpuName, backendID string) string {
 	return modelSHA + "|" + gpuName + "|" + backendID
 }
 
-// Footprint overlays what the book knows (calibrated fixed load, runtime-OOM cap) on a seed.
+// Footprint overlays what the book knows (the fixed load from a reading taken, marked Measured;
+// the runtime-OOM cap) on a seed.
 func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if b == nil {
 		return seed
@@ -917,45 +1121,214 @@ func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if e, ok := b.Entries[key]; ok {
 		if e.FixedMiB > 0 {
 			seed.FixedMiB = e.FixedMiB
+			seed.Basis = Measured
 		}
 		seed.CapCtxTotal = e.CapCtxTotal
 	}
 	return seed
 }
 
-// Calibrate records the fixed load implied by a healthy load that held measuredMiB of VRAM at
-// shape s. Like the hive's calibrate() it accepts the reading only within +-15 % of the seed's
-// fixed load (a wild reading means others changed during the load) and reports whether it did.
-// now is the stamp the entry is given.
-func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) bool {
-	if s.CPUOnly || measuredMiB <= 0 || seed.FixedMiB <= 0 {
-		return false
+// Mark is s with what the book holds of it: where key has a reading of this very shape, VRAMMiB
+// is that reading and VRAMBasis Measured. Otherwise s as given.
+func (b *Book) Mark(key string, s Shape) Shape {
+	if b == nil {
+		return s
 	}
-	implied := float64(measuredMiB) - (seed.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - seed.FixedMiB)
-	if math.Abs(implied-seed.FixedMiB) > 0.15*seed.FixedMiB {
-		return false
+	for _, r := range b.Entries[key].Readings {
+		if r.of(s) {
+			s.VRAMMiB, s.VRAMBasis = r.VRAMMiB, Measured
+		}
+	}
+	return s
+}
+
+// CalibVerdict is what Calibrate did with a reading.
+type CalibVerdict string
+
+const (
+	// Taken: within 15 % of the seed's fixed part, so the book's fixed part is now the implied one.
+	Taken CalibVerdict = "taken"
+	// OutsideGate: more than 15 % off the seed's fixed part (others may have changed during the
+	// load, or the seed is wrong for this model); the fixed part stays predicted.
+	OutsideGate CalibVerdict = "outside_gate"
+	// NoSeed: the seed has no fixed part to hold the reading to.
+	NoSeed CalibVerdict = "no_seed"
+	// NoReading: no reading was given (0 MiB or less).
+	NoReading CalibVerdict = "no_reading"
+	// CPUOnly: a CPU-only shape's card use says nothing of the fixed part on the card.
+	CPUOnly CalibVerdict = "cpu_only"
+	// NotSeed: the footprint offered is the book's overlay (Basis Measured), not the header's
+	// seed, so there is no seed to hold the reading to; the fixed part does not move.
+	NotSeed CalibVerdict = "not_seed"
+)
+
+// Calibration is what Calibrate did: its verdict, the fixed part the reading implies (0 where
+// there was no card reading) and the header seed's fixed part it was held to (0 for NotSeed).
+type Calibration struct {
+	Verdict         CalibVerdict `json:"verdict"`
+	ImpliedFixedMiB float64      `json:"implied_fixed_mib"`
+	SeedFixedMiB    float64      `json:"seed_fixed_mib"`
+}
+
+// Taken reports whether the reading became the book's fixed part.
+func (c Calibration) Taken() bool { return c.Verdict == Taken }
+
+// OffMiB is how far the seed's fixed part is from what the reading implies (implied less seed).
+func (c Calibration) OffMiB() float64 { return c.ImpliedFixedMiB - c.SeedFixedMiB }
+
+func (c Calibration) String() string {
+	if c.Verdict == NoReading || c.Verdict == CPUOnly {
+		return string(c.Verdict)
+	}
+	if c.Verdict == NotSeed {
+		return fmt.Sprintf("%s (implied fixed %.0f MiB; the book's figure was offered, not the header's seed)", c.Verdict, c.ImpliedFixedMiB)
+	}
+	return fmt.Sprintf("%s (implied fixed %.0f MiB, seed %.0f MiB, off %+.0f MiB)", c.Verdict, c.ImpliedFixedMiB, c.SeedFixedMiB, c.OffMiB())
+}
+
+// Calibrate records a healthy load that held measuredMiB of VRAM at shape s, and says what it did.
+// seed is the header's seed (Basis Predicted), never the book's overlay: every reading is held to
+// it, so a run of readings each near the last cannot walk the fixed part away from the seed. The
+// overlay offered is NotSeed and moves nothing. The reading is kept for its shape (Book.Mark)
+// whatever the gate says. Like the hive's calibrate() it becomes the book's fixed part only
+// within +-15 % of the seed's (a wild reading means others changed during the load, or the seed
+// is wrong here: the caller sees by how much). now is the stamp the entry is given. The shape is
+// priced at its own cache type (settle), and a shape or seed settle refuses is that error, with
+// nothing recorded.
+func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) (Calibration, error) {
+	st, err := settle(&seed, &s, nil, nil)
+	if err != nil {
+		return Calibration{}, err
+	}
+	c := Calibration{SeedFixedMiB: seed.FixedMiB}
+	switch {
+	case s.CPUOnly:
+		c.Verdict = CPUOnly
+		return c, nil
+	case measuredMiB <= 0:
+		c.Verdict = NoReading
+		return c, nil
+	}
+	c.ImpliedFixedMiB = float64(measuredMiB) - (st.fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - st.fp.FixedMiB)
+	switch {
+	case seed.Basis == Measured:
+		c.Verdict, c.SeedFixedMiB = NotSeed, 0
+	case seed.FixedMiB <= 0:
+		c.Verdict = NoSeed
+	case math.Abs(c.ImpliedFixedMiB-seed.FixedMiB) > 0.15*seed.FixedMiB:
+		c.Verdict = OutsideGate
+	default:
+		c.Verdict = Taken
 	}
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}
 	e := b.Entries[key]
-	e.FixedMiB = implied
-	e.Loads++
+	// A new slice every time: a copy of the book handed to a writer may still hold the old one.
+	rs := make([]Reading, 0, len(e.Readings)+1)
+	for _, r := range e.Readings {
+		if !r.of(s) {
+			rs = append(rs, r)
+		}
+	}
+	e.Readings = append(rs, Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB})
+	if c.Taken() {
+		e.FixedMiB = c.ImpliedFixedMiB
+		e.Loads++
+	}
 	e.Updated = now
 	b.Entries[key] = e
-	return true
+	return c, nil
 }
 
-// LowerCap records a runtime OOM: the next start must use less total ctx than ctxTotal. now is
-// the stamp the entry is given.
-func (b *Book) LowerCap(key string, ctxTotal int, now time.Time) {
+// LowerCap records an out-of-memory of shape failed in room with engine build build: the next
+// start must use less total ctx than ctxTotal. Where the cap moves it carries what lifts it
+// (CapLift): the room, the miss (the memory fp predicts failed needs above the same slots at
+// ctxTotal) and the build. Where the miss cannot be told (no slots, a type fp cannot be priced
+// at, or nothing between them, as when the walk kept the ctx and moved experts) the miss is 0 and
+// any larger room lifts it. A standing cap that carries no lift (an older book's) is given this
+// room and build. now is the stamp the entry is given. The failed shape is priced at its own cache
+// type (settle); a room, shape or footprint settle refuses is that error, and nothing is recorded.
+func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, room Room, build string, now time.Time) error {
+	st, err := settle(&fp, &failed, &room, nil)
+	if err != nil {
+		return err
+	}
+	rm, f := st.room, st.fp
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}
 	e := b.Entries[key]
 	if ctxTotal > 0 && (e.CapCtxTotal == 0 || ctxTotal < e.CapCtxTotal) {
+		if e.CapCtxTotal > 0 {
+			// The cap moved from keeps its own lift beneath; a new slice, as a copy of the book
+			// handed to a writer may still hold the old one.
+			l := CapLift{RoomMiB: rm.capRoom(), NoGPU: rm.NoGPU, Build: build}
+			if e.Lift != nil {
+				l = *e.Lift
+			}
+			e.Under = append(append(make([]HeldCap, 0, len(e.Under)+1), e.Under...), HeldCap{e.CapCtxTotal, l})
+		}
 		e.CapCtxTotal = ctxTotal
+		miss := 0
+		if failed.Slots > 0 {
+			miss = max(0, ceilMiB(f.kvAt(failed.Slots, failed.CtxPerSlot)-f.kvAt(failed.Slots, ctxTotal/failed.Slots)))
+		}
+		e.Lift = &CapLift{RoomMiB: rm.capRoom(), MissMiB: miss, NoGPU: rm.NoGPU, Build: build}
+	}
+	if e.CapCtxTotal > 0 && e.Lift == nil {
+		e.Lift = &CapLift{RoomMiB: rm.capRoom(), NoGPU: rm.NoGPU, Build: build}
 	}
 	e.Updated = now
 	b.Entries[key] = e
+	return nil
+}
+
+// LetGo lets the cap of key go where room, as it stands now, is larger than the room it was
+// measured under by more than its miss (the same kind of room: card, or host with no GPU), or
+// build is another than the one it was measured with. It answers whether a cap still stands and,
+// where one does, what would lift it, never nothing. A cap an older book holds recorded nothing it
+// was measured under: the first LetGo records room and build as they stand then (miss 0), so from
+// there any larger room or another build lifts it, and until then it stands as it always did.
+// A cap let go takes its lift with it and the latest earlier cap (Calib.Under) that still stands
+// takes its place, with its own lift, so a shape that ran out of memory in a room never comes back
+// in that room; those lifted go too. With no cap left: false, nil. The fixed part and the readings
+// stay. A room with a field marked unread is *UnreadError (settle), and nothing is let go or
+// recorded.
+func (b *Book) LetGo(key string, room Room, build string) (stands bool, lift *CapLift, err error) {
+	st, err := settle(nil, nil, &room, nil)
+	if err != nil {
+		return false, nil, err
+	}
+	rm := st.room
+	if b == nil {
+		return false, nil, nil
+	}
+	e, ok := b.Entries[key]
+	if !ok || e.CapCtxTotal <= 0 {
+		return false, nil, nil
+	}
+	l := e.Lift
+	if l == nil {
+		l = &CapLift{RoomMiB: rm.capRoom(), NoGPU: rm.NoGPU, Build: build}
+		e.Lift = l
+		b.Entries[key] = e
+	}
+	if !l.lifted(rm, build) {
+		c := *l
+		return true, &c, nil
+	}
+	e.CapCtxTotal, e.Lift = 0, nil
+	for i := len(e.Under) - 1; i >= 0; i-- {
+		if h := e.Under[i]; !h.Lift.lifted(rm, build) {
+			c := h.Lift
+			e.CapCtxTotal, e.Lift = h.CapCtxTotal, &c
+			e.Under = e.Under[:i:i] // capped: a later LowerCap never writes into a slice a copy holds
+			b.Entries[key] = e
+			return true, &h.Lift, nil
+		}
+	}
+	e.Under = nil
+	b.Entries[key] = e
+	return false, nil, nil
 }

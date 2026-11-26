@@ -136,7 +136,7 @@ func TestWholeNeverSplits(t *testing.T) {
 			split("Choose", cur)
 			small, err := Choose(fp, room(vram, 600+vram/3, 64000), w)
 			if err == nil {
-				g, _ := Grow(fp, small, r, w)
+				g, _, _ := Grow(fp, small, r, w)
 				split("Grow", g)
 			}
 			if s, err := MissRetry(fp, cur, 900, room(vram, 1600, 64000), w); err == nil {

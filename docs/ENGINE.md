@@ -168,7 +168,11 @@ A source that is missing degrades the picture and never fails it (`Picture.Sourc
 `plan.MeasureReserve(picture, hardware, host, estimate)` turns a picture into the reserve the
 room is built from. The engine runs on one adapter **E**: the discrete one with the most
 dedicated memory (of equal cards the emptier); an integrated one only when there is no discrete
-adapter. A discrete card's capacity is the probe's total where the probe lists it (nvidia-smi on
+adapter. Once the engine has started its model server it keeps that card for the session
+(`MeasureReserveOn`): the card its server holds memory on, and between a stop and the next start
+(a resize, a crash) the card it last started on, unless a larger one appears. Another app filling
+the engine's card makes it shrink there; it never moves to an equal card that may belong to
+someone else. A discrete card's capacity is the probe's total where the probe lists it (nvidia-smi on
 NVIDIA: the figure the footprints and thresholds were set against; DXGI reports 3965 MiB for a
 4096 MiB laptop 3050), else the sensed dedicated memory.
 

@@ -162,6 +162,14 @@ func capacity(a gpusense.Adapter, hw probe.Hardware) int {
 // with the card's used memory standing for the whole card, as before the engine sensed.
 // engineGPU is E's index in hw.GPUs, -1 when E is not one of them or there is no E (CPU).
 func MeasureReserve(pic gpusense.Picture, hw probe.Hardware, host HostInfo, estimateMiB int) (gpusense.GPUSummary, int) {
+	return MeasureReserveOn(pic, hw, host, estimateMiB, -1)
+}
+
+// MeasureReserveOn is MeasureReserve for an engine that has a card already: keep is the adapter
+// index its model server last ran on (-1: none). The engine stays on the card its server holds
+// memory on, else on keep when keep is as large as the card it would pick; it never moves to an
+// equal card because another app filled its own (the pin follows this choice, plan/device.go).
+func MeasureReserveOn(pic gpusense.Picture, hw probe.Hardware, host HostInfo, estimateMiB int, keep int) (gpusense.GPUSummary, int) {
 	estimateMiB = max(estimateMiB, 0)
 	as := pic.Adapters
 	if len(as) == 0 {
@@ -179,6 +187,8 @@ func MeasureReserve(pic gpusense.Picture, hw probe.Hardware, host HostInfo, esti
 		// the engine's server already runs there: that card stays the engine's, however full
 		// another app makes it (of equal cards the emptier would flip to the other one)
 		e = oa
+	} else if k, has := adapterByIndex(as, keep); keep >= 0 && has && !pooled(k) && k.DedicatedMiB >= e.DedicatedMiB {
+		e = k // between a stop and the next start (a resize, a crash) the server holds nothing
 	}
 	sum.EngineAdapter = e.Index
 	total := capacity(e, hw)

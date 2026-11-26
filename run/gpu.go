@@ -28,6 +28,9 @@ type gpuState struct {
 	sum         *gpusense.GPUSummary // the last reading of the watchdog, a plan or a room
 	rep         *gpusense.GPUReport  // GET /engine/v1/gpu's cache
 	repAt       time.Time
+	// keep is the adapter the model server last started on, +1 (0: none yet): the engine stays
+	// on that card for the session (plan.MeasureReserveOn).
+	keep int
 }
 
 // ourPID is the running llama-server's pid (0: none), readable without the op lock.
@@ -120,7 +123,10 @@ type sensed struct {
 func (s *Supervisor) measure(ctx context.Context, hw probe.Hardware, ours []int) sensed {
 	host, est := s.hostInfo()
 	pic := s.cfg.Sense(ctx, ours, host.PID)
-	sum, gi := plan.MeasureReserve(pic, hw, host, est)
+	s.mu.Lock()
+	keep := s.gpu.keep - 1
+	s.mu.Unlock()
+	sum, gi := plan.MeasureReserveOn(pic, hw, host, est, keep)
 	if len(pic.Adapters) == 0 && gi >= 0 {
 		g := hw.GPUs[gi]
 		if a := sum.Adapters[sum.EngineAdapter]; !a.Unified && !a.Integrated {

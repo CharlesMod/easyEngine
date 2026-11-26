@@ -244,6 +244,9 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	env := append(append([]string{}, s.cfg.ExtraEnv...), pin.Env...)
 	s.mu.Lock()
 	s.device = &pin
+	if pin.Adapter >= 0 {
+		s.gpu.keep = pin.Adapter + 1
+	}
 	s.mu.Unlock()
 	s.logf("device: %s", pin.Note)
 	s.logf("start: %s%s %s", strings.Join(append(pin.Env, ""), " "), lc.in.bin, strings.Join(args, " "))

@@ -50,6 +50,16 @@ func TestMeasureReserveStaysOnOursCard(t *testing.T) {
 	if sum, _ := MeasureReserve(pic, probe.Hardware{OS: "linux"}, HostInfo{}, 1500); sum.EngineAdapter != 1 {
 		t.Fatalf("engine adapter %d with no server of ours, want 1", sum.EngineAdapter)
 	}
+	// between a stop and the next start the server holds nothing: the card it ran on is kept
+	if sum, _ := MeasureReserveOn(pic, probe.Hardware{OS: "linux"}, HostInfo{}, 1500, 0); sum.EngineAdapter != 0 {
+		t.Fatalf("engine adapter %d with keep 0, want 0", sum.EngineAdapter)
+	}
+	// a kept card smaller than the best is not kept
+	small := pic
+	small.Adapters = []gpusense.Adapter{{Index: 0, Vendor: "nvidia", DedicatedMiB: 8192, UsedMiB: 100}, pic.Adapters[1]}
+	if sum, _ := MeasureReserveOn(small, probe.Hardware{OS: "linux"}, HostInfo{}, 1500, 0); sum.EngineAdapter != 1 {
+		t.Fatalf("engine adapter %d with a smaller kept card, want 1", sum.EngineAdapter)
+	}
 }
 
 func TestMeasureReserve(t *testing.T) {

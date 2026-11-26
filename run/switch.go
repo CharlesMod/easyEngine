@@ -49,10 +49,8 @@ func (s *Supervisor) trySwitch(model, backend string) (handled bool, err error) 
 		return true, fmt.Errorf("%s is import-only: run `hermes-engine import <path>` (or POST /engine/v1/import)", m.Name)
 	}
 	if !s.modelInstalled(m) {
-		if free, derr := s.cfg.DiskFree(s.dir); derr == nil {
-			if need := s.diskNeed(m); free < need {
-				return true, fmt.Errorf("not enough disk space for %s: needs %.1f GB, %.1f GB free", m.Name, gb(need), gb(free))
-			}
+		if err := s.checkDisk(m); err != nil {
+			return true, err
 		}
 	}
 	if err := s.prepareInstall(model); err != nil {
@@ -138,7 +136,8 @@ func (s *Supervisor) fillDisk(res *plan.PlanResult, cat *catalog.Catalog) {
 			continue
 		}
 		if m, ok := cat.Model(v.ID); ok {
-			v.DiskNeedBytes = int64(s.diskNeed(m)) << 20
+			n := s.diskNeed(m)
+			v.DiskNeedBytes, v.DiskNeed = n.Total, &n
 		}
 	}
 }

@@ -65,9 +65,10 @@ type Verdict struct {
 	// EstDecodeTPS is the expected decode speed per stream in tokens/s on this machine (0 = no
 	// measured curve for this model).
 	EstDecodeTPS float64 `json:"est_decode_tps"`
-	// DiskNeedBytes is the free disk the model still needs: 0 when installed, else its size minus a
-	// partial download plus the headroom the engine keeps (filled by the supervisor).
-	DiskNeedBytes int64 `json:"disk_need_bytes"`
+	// DiskNeedBytes is the free disk setting up the model still needs from the current state: 0
+	// when installed, else DiskNeed.Total (filled by the supervisor). DiskNeed says what needs it.
+	DiskNeedBytes int64     `json:"disk_need_bytes"`
+	DiskNeed      *DiskNeed `json:"disk_need,omitempty"`
 	// Estimated is true when the numbers rest on a guess rather than a measurement: a CPU-only
 	// run (no CPU runs were ever measured) or a model with no measured footprint.
 	Estimated  bool `json:"estimated"`
@@ -134,6 +135,13 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, gameReserve in
 
 // PlanSensedWith is PlanWith over a measured reserve.
 func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpusense.GPUSummary, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool)) PlanResult {
+	return PlanSensedDisk(c, hw, w, sum, installed, info, nil)
+}
+
+// PlanSensedDisk is PlanSensedWith with the disk the whole setup of each model needs from the
+// current state (the installer's own count, run.Supervisor.setupNeed); nil counts the model's
+// download alone. hw.DiskFreeMiB is the free disk (0 = unknown: no disk verdict).
+func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpusense.GPUSummary, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool), disk func(catalog.Model) DiskNeed) PlanResult {
 	w = w.Norm()
 	var res PlanResult
 	if bs := c.Backends(hw); len(bs) > 0 {
@@ -166,13 +174,20 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 		rm.SpeedScale = SpeedScaleFor(room.GPUName, m.Footprint)
 		sh, err := fit.Choose(fp, rm, w)
 		v.Estimated = room.NoGPU || (m.Footprint == nil && fp.Estimated)
+		var need DiskNeed
+		switch {
+		case disk != nil:
+			need = disk(m)
+		case !v.Installed:
+			need = ModelOnlyNeed(m)
+		}
 		switch {
 		case err != nil:
 			v.Fits = "no"
 			v.Limit, v.Why = whyNot(fp, room, w, err)
-		case !v.Installed && hw.DiskFreeMiB > 0 && int(m.Size/mib)+DiskHeadroomMiB > hw.DiskFreeMiB:
+		case need.Downloads() && hw.DiskFreeMiB > 0 && need.Short(int64(hw.DiskFreeMiB)<<20):
 			v.Fits, v.Shape, v.Limit = "no", sh, LimitDisk
-			v.Why = fmt.Sprintf("needs %d MiB of free disk for the download, %d MiB available", m.Size/mib+DiskHeadroomMiB, hw.DiskFreeMiB)
+			v.Why = fmt.Sprintf("not enough free disk: %s, %s free", need.Explain(), GB(int64(hw.DiskFreeMiB)<<20))
 		default:
 			v.Shape, v.EstVRAMMiB, v.EstRAMMiB, v.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 			v.Fits, v.Why = verdictFor(fp, sh, w)
@@ -201,10 +216,6 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 
 // cpuComfort is the share of free RAM (after the OS reserve) a CPU-only model may take and still
 // count as comfortable: the rest is for the game and the OS caches.
-// DiskHeadroomMiB stays free after a download: the plan's disk verdict and the installer's
-// space check (run.diskNeed) use this one figure.
-const DiskHeadroomMiB = 512
-
 const cpuComfort = 0.6
 
 // cpuOnlyPick is the recommendation without a usable GPU. Nothing was ever measured on a CPU, so

@@ -12,7 +12,11 @@ import (
 // Import puts the local file src at dest after checking its sha256 (skipped when sha256 is
 // empty). It hard-links when the filesystem allows, else copies through a temp file and renames.
 // A dest that already holds the same content is left in place.
-func Import(src, dest, sha256hex string) error {
+func Import(src, dest, sha256hex string) error { return ImportCheck(src, dest, sha256hex, nil) }
+
+// ImportCheck is Import with a space check: when a hard link is not possible, beforeCopy is
+// asked about the copy's size first and its error stops the import before a byte is written.
+func ImportCheck(src, dest, sha256hex string, beforeCopy func(bytes int64) error) error {
 	sha256hex = strings.ToLower(strings.TrimSpace(sha256hex))
 	st, err := os.Stat(src)
 	if err != nil {
@@ -46,6 +50,11 @@ func Import(src, dest, sha256hex string) error {
 	tmp := dest + ".import"
 	os.Remove(tmp)
 	if err := os.Link(src, tmp); err != nil {
+		if beforeCopy != nil {
+			if err := beforeCopy(st.Size()); err != nil {
+				return err
+			}
+		}
 		in, err := os.Open(src)
 		if err != nil {
 			return err

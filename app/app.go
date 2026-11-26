@@ -35,7 +35,7 @@ type Options struct {
 	Linger      time.Duration
 	LingerSet   bool // Linger given on the command line; else the saved setting applies
 	Version     string
-	DetachStdio bool // serve mode: stdio goes to engine.log, never to the inherited pipes
+	DetachStdio bool // serve mode: stdio goes to logs/engine-stdio.log (capped), never to the inherited pipes
 	Configure   func(*run.Config)
 	// Started is called once the engine listens (not when it attached to another).
 	Started func(port int)
@@ -174,7 +174,11 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		// The game reads our stdio through pipes and closes them when it exits;
 		// a write to a closed pipe would kill us with SIGPIPE before we clean up.
 		os.MkdirAll(filepath.Join(dir, "logs"), 0o755)
-		detachStdio(filepath.Join(dir, "logs", "engine.log"))
+		// Only a crash trace or a last exit line bypasses engine.log's sink; it goes to its own
+		// capped file (lifecycle.StdioLogName), counted in the setup's disk need.
+		stdio := filepath.Join(dir, "logs", lifecycle.StdioLogName)
+		lifecycle.RotateStdioLog(stdio)
+		detachStdio(stdio)
 		log.SetOutput(io.Discard)
 	}
 

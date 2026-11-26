@@ -36,6 +36,9 @@ func stepLabel(step string, p fetch.Progress) string {
 
 // Install starts the install job: backend, then model, then uv and the agent.
 func (s *Supervisor) Install(model, backend string) error {
+	if handled, err := s.trySwitch(model, backend); handled {
+		return err
+	}
 	if err := s.prepareInstall(model); err != nil {
 		return err
 	}
@@ -110,6 +113,7 @@ func (s *Supervisor) Cancel() {
 		c()
 	}
 	s.cancelUpgrade()
+	s.forgetSwitch()
 }
 
 func archiveExt(url string) string {

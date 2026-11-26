@@ -245,4 +245,3 @@ func (s *Supervisor) reloadSelected() {
 		s.logf("custom: start failed: %v", err)
 	}
 }
-

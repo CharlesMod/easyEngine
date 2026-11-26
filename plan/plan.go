@@ -61,6 +61,9 @@ type Verdict struct {
 	// EstDecodeTPS is the expected decode speed per stream in tokens/s on this machine (0 = no
 	// measured curve for this model).
 	EstDecodeTPS float64 `json:"est_decode_tps"`
+	// DiskNeedBytes is the free disk the model still needs: 0 when installed, else its size minus a
+	// partial download plus the headroom the engine keeps (filled by the supervisor).
+	DiskNeedBytes int64 `json:"disk_need_bytes"`
 	// Estimated is true when the numbers rest on a guess rather than a measurement: a CPU-only
 	// run (no CPU runs were ever measured) or a model with no measured footprint.
 	Estimated  bool `json:"estimated"`
@@ -77,6 +80,8 @@ type PlanResult struct {
 	Models      []Verdict `json:"models"`
 	// Custom is the verdict on the user's own GGUF file, or nil when none is set.
 	Custom *CustomCheck `json:"custom"`
+	// DiskFreeBytes is the free space at the data dir; -1 when unknown (filled by the supervisor).
+	DiskFreeBytes int64 `json:"disk_free_bytes"`
 }
 
 // RoomFor derives the planning room from the probed hardware: the GPU with the most memory,

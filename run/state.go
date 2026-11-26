@@ -36,6 +36,8 @@ type State struct {
 	// CustomPrev is the catalog model that was selected before the custom file, for custom/clear.
 	CustomPrev string   `json:"custom_prev,omitempty"`
 	Book       fit.Book `json:"book"`
+	// Previous is the catalog id of the model a switch replaced (its file is kept; run/switch.go).
+	Previous string `json:"previous,omitempty"`
 }
 
 func (s *State) defaults() {

@@ -88,6 +88,8 @@ type Status struct {
 	// (nil when none is set). While it serves, Model is "custom:<name>".
 	ModelName string      `json:"model_name"`
 	Custom    *CustomInfo `json:"custom"`
+	// Previous is the model the last switch replaced; its file is still on disk (run/switch.go).
+	Previous *PreviousInfo `json:"previous"`
 }
 
 // Parent is a watched parent process.
@@ -167,6 +169,8 @@ type Supervisor struct {
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
 	swapping  bool
+	removing  bool          // remove-downloads job running (storage.go)
+	stoCache  *storageCache // last complete storage walk
 
 	opMu sync.Mutex
 	srv  *server
@@ -275,6 +279,7 @@ func (s *Supervisor) Status() Status {
 	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
 	s.customStatusLocked(&st)
+	st.Previous = s.previousLocked()
 	return st
 }
 
@@ -397,6 +402,7 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	}
 	res := plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
 	s.planCustom(&res, cat, hw)
+	s.fillDisk(&res, cat)
 	return res, nil
 }
 

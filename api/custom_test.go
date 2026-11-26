@@ -146,7 +146,10 @@ func TestCustomUseMissingRecoversWithNewPath(t *testing.T) {
 	dir := t.TempDir()
 	p := testkit.WriteGGUF(t, dir, "a.gguf", true)
 	post(t, srv.URL, "custom/use", jsonPath(p))
-	testkit.WaitFor(t, 15*time.Second, "custom serving", func() bool { st := s.Status(); return st.Phase == "ready" && strings.HasSuffix(strings.Join(e.Starts(), "\n"), "-a custom:a") })
+	testkit.WaitFor(t, 15*time.Second, "custom serving", func() bool {
+		st := s.Status()
+		return st.Phase == "ready" && strings.HasSuffix(strings.Join(e.Starts(), "\n"), "-a custom:a")
+	})
 	os.Remove(p)
 	s.Stop()
 	s.Start()
@@ -157,7 +160,10 @@ func TestCustomUseMissingRecoversWithNewPath(t *testing.T) {
 	if code, _ := post(t, srv.URL, "custom/use", jsonPath(p2)); code != 202 {
 		t.Fatal(code)
 	}
-	testkit.WaitFor(t, 15*time.Second, "custom serving", func() bool { st := s.Status(); return st.Phase == "ready" && strings.HasSuffix(strings.Join(e.Starts(), "\n"), "-a custom:b") })
+	testkit.WaitFor(t, 15*time.Second, "custom serving", func() bool {
+		st := s.Status()
+		return st.Phase == "ready" && strings.HasSuffix(strings.Join(e.Starts(), "\n"), "-a custom:b")
+	})
 }
 
 func TestStateWithoutCustomLoads(t *testing.T) {

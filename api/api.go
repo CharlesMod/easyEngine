@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -170,6 +171,45 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, 202, map[string]string{"status": "started"})
 			case run.ErrBusy:
 				fail(w, 409, err.Error())
+			default:
+				fail(w, 400, err.Error())
+			}
+		}
+	case "storage":
+		if need("GET") {
+			writeJSON(w, 200, a.S.Storage(r.URL.Query().Get("refresh") == "1"))
+		}
+	case "remove-downloads":
+		if need("POST") {
+			var in struct{ Confirm bool }
+			if err := decode(r, &in); err != nil || !in.Confirm {
+				fail(w, 400, "body must be {\"confirm\": true}")
+				return
+			}
+			switch err := a.S.RemoveDownloads(); err {
+			case nil:
+				writeJSON(w, 202, map[string]any{"started": true})
+			case run.ErrBusy:
+				fail(w, 409, err.Error())
+			default:
+				fail(w, 400, err.Error())
+			}
+		}
+	case "delete-model":
+		if need("POST") {
+			var in struct{ ID, File string }
+			if err := decode(r, &in); err != nil || in.ID == "" && in.File == "" {
+				fail(w, 400, "body must be {\"id\": catalog id} or {\"file\": name}")
+				return
+			}
+			freed, err := a.S.DeleteModel(in.ID, in.File)
+			switch {
+			case err == nil:
+				writeJSON(w, 200, map[string]any{"freed_bytes": freed})
+			case errors.Is(err, run.ErrInUse):
+				fail(w, 409, err.Error())
+			case errors.Is(err, run.ErrNoModel):
+				fail(w, 404, err.Error())
 			default:
 				fail(w, 400, err.Error())
 			}

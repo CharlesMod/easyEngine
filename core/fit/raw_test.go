@@ -3,7 +3,12 @@ package fit
 // The raw prices, for a test to state what an entry should answer. They are declared in a test
 // file on purpose: the package's own code cannot call them, and prices only through settle.
 
-func raw(fp Footprint) fig { return fig{Footprint: fp, src: fp} }
+// raw takes the footprint's own set of constants; where it lacks one the constants are zero, and
+// the entry under test is the one that must refuse it.
+func raw(fp Footprint) fig {
+	c, _ := readConsts(fp.Consts)
+	return fig{Footprint: fp, src: fp, c: c}
+}
 
 func (fp Footprint) kvAt(slots, ctx int) float64       { return raw(fp).kvAt(slots, ctx) }
 func (fp Footprint) vram(slots, ctx, n int) float64    { return raw(fp).vram(slots, ctx, n) }

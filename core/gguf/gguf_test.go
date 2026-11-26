@@ -60,8 +60,41 @@ func writeKV(b *w, e kv) {
 		for _, x := range v {
 			b.str(x)
 		}
+	case num:
+		b.u32(uint32(v.t))
+		b.scalar(v.t, v.v)
+	case arr:
+		b.u32(uint32(kArr))
+		b.u32(uint32(v.et))
+		b.u64(uint64(len(v.v)))
+		for _, x := range v.v {
+			b.scalar(v.et, x)
+		}
 	default:
 		panic("unsupported")
+	}
+}
+
+// num is a scalar of any type, its bits as written; arr an array of them.
+type num struct {
+	t kind
+	v uint64
+}
+type arr struct {
+	et kind
+	v  []uint64
+}
+
+func (b *w) scalar(t kind, v uint64) {
+	switch kindSize[t] {
+	case 1:
+		b.WriteByte(byte(v))
+	case 2:
+		binary.Write(b, binary.LittleEndian, uint16(v))
+	case 4:
+		b.u32(uint32(v))
+	case 8:
+		b.u64(v)
 	}
 }
 

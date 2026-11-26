@@ -12,6 +12,7 @@ package fit
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -64,19 +65,83 @@ const (
 )
 
 const (
-	alignTokens = 1024
-	// The constants below were measured on an RTX 5080 with llama.cpp b12680 at -ub 512, -fa on,
-	// --no-kv-unified (docs/FOOTPRINTS.md; tools/fitcheck reproduces them from the sweep CSV).
-	// They are the same for every model: nothing here is a per-model fudge.
-	baseOverheadMiB = 135  // CUDA context and the compute buffers that do not depend on the vocabulary
-	vocabMiBPer1k   = 1.2  // output (logits) buffers: MiB per 1000 vocabulary entries at -ub 512
-	runtimeMiB      = 58   // what the first requests take beyond what load allocates (measured 52-62)
-	ubatchTokens    = 512  // -ub; a sliding-window layer caches window+ub tokens per slot
-	maskMiBPer1k    = 0.44 // attention-mask / flash-attention scratch per 1000 tokens of total ctx
-	dequantBytes    = 2.0  // quantised KV is expanded to f16 for the biggest layer: bytes per element per token
-	moeSchedMiB     = 180  // GPU cost of the expert-offload copy buffers once any layer is in RAM (measured 90-230)
-	expertRAMFactor = 1.25 // host RAM gained per expert layer moved off the card, vs the tensor bytes (measured 1.02-1.23)
+	alignTokens  = 1024
+	ubatchTokens = 512 // -ub; a sliding-window layer caches window+ub tokens per slot
 )
+
+// ConstName names one of the measured constants a footprint is built from. They are the same for
+// every model: none is a per-model fudge. What was read on one engine build and one kind of card
+// may differ on another, so they come as a set (Consts) a caller may give.
+type ConstName string
+
+const (
+	// BaseOverheadMiB: the card context and the compute buffers that do not depend on the
+	// vocabulary, taken before any buffer of the model's.
+	BaseOverheadMiB ConstName = "base_overhead_mib"
+	// VocabMiBPer1k: output (logits) buffers, MiB per 1000 vocabulary entries at -ub 512.
+	VocabMiBPer1k ConstName = "vocab_mib_per_1k"
+	// RuntimeMiB: what the first requests take beyond what load allocates.
+	RuntimeMiB ConstName = "runtime_mib"
+	// MaskMiBPer1k: attention-mask and flash-attention scratch, MiB per 1000 tokens of total ctx.
+	MaskMiBPer1k ConstName = "mask_mib_per_1k"
+	// DequantBytes: a quantised cache is expanded to f16 for the widest layer, bytes per element
+	// per token.
+	DequantBytes ConstName = "dequant_bytes"
+	// OffloadMiB: card memory of the expert-offload copy buffers once any expert layer is in RAM.
+	OffloadMiB ConstName = "offload_mib"
+	// ExpertRAMFactor: host RAM taken per expert layer moved off the card, against its tensor bytes.
+	ExpertRAMFactor ConstName = "expert_ram_factor"
+)
+
+// constNames is every constant a set must hold, in the order a lacking one is named.
+var constNames = []ConstName{BaseOverheadMiB, VocabMiBPer1k, RuntimeMiB, MaskMiBPer1k, DequantBytes, OffloadMiB, ExpertRAMFactor}
+
+// Const is one measured constant and a word of where its reading came from.
+type Const struct {
+	Value float64 `json:"value"`
+	From  string  `json:"from"`
+}
+
+// Consts is a set of the measured constants, read with one engine build on one kind of card. A
+// figure built with a set read on another build or card than the one it runs on is a prediction.
+type Consts struct {
+	// Backend is the engine build the set was read with, as the caller names its builds (its
+	// backend id and release).
+	Backend string `json:"backend"`
+	// Card is the kind of card the set was read on.
+	Card string              `json:"card"`
+	Of   map[ConstName]Const `json:"of"`
+}
+
+// DefaultConsts is the set written into the core: read on an RTX 5080 (16303 MiB) with llama.cpp
+// b12680 at -ub 512, -fa on, --no-kv-unified (docs/FOOTPRINTS.md; tools/fitcheck reproduces them
+// from the sweep CSV). It is the set wherever a caller gives none. Each call answers a new map.
+func DefaultConsts() Consts {
+	const sweep = "RTX 5080 at b12680, fitted over the sweep's 69 rows (docs/FOOTPRINTS.md)"
+	return Consts{Backend: "cuda@b12680", Card: "RTX 5080, 16303 MiB", Of: map[ConstName]Const{
+		BaseOverheadMiB: {135, sweep},
+		VocabMiBPer1k:   {1.2, sweep},
+		RuntimeMiB:      {58, "RTX 5080 at b12680: read as 52 to 62 MiB over the first requests"},
+		MaskMiBPer1k:    {0.44, sweep},
+		DequantBytes:    {2.0, "the f16 width; the sweep's quantised-cache rows agree"},
+		OffloadMiB:      {180, "RTX 5080 at b12680: read as 90 to 230 MiB once any expert layer was in RAM"},
+		ExpertRAMFactor: {1.25, "RTX 5080 at b12680: read as 1.02 to 1.23, taken above the highest"},
+	}}
+}
+
+// ConstError means a set of constants lacks one (Name), or its word of where it was read
+// (NoFrom), or names no backend or card (Name "backend", "card"). It is never priced as zero.
+type ConstError struct {
+	Name   ConstName
+	NoFrom bool
+}
+
+func (e *ConstError) Error() string {
+	if e.NoFrom {
+		return fmt.Sprintf("fit: the set of constants gives %s no word of where it was read", e.Name)
+	}
+	return fmt.Sprintf("fit: the set of constants lacks %s", e.Name)
+}
 
 // DefaultMinTPS is the decode floor (tokens/s per stream) used when the game names none: below
 // about 20 tok/s a spoken line of 60 tokens takes more than 3 s to generate.
@@ -178,6 +243,13 @@ type Footprint struct {
 	WeightsMiB float64 `json:"weights_mib"`
 	// CtxTrain is the model's trained context from its header; 0 = unknown.
 	CtxTrain int `json:"ctx_train"`
+	// Consts is the set of measured constants the figures above were built with: Seed's is
+	// DefaultConsts, SeedWith's the one given. nil (a footprint built by hand, or by an older
+	// build) is the default set. Every entry prices the figures alone, never a constant read
+	// beside them, so a price never takes one constant from each of two sets; the set is the
+	// figures' word of where they came from (Shape.ConstsBackend, Shape.ConstsCard) and keys the
+	// book's fixed part (Book.Footprint). A set lacking a constant is *ConstError from every entry.
+	Consts *Consts `json:"consts,omitempty"`
 }
 
 // Shape is a concrete llama-server configuration.
@@ -196,6 +268,11 @@ type Shape struct {
 	// holds a reading of this very shape and VRAMMiB is that reading. RAMMiB is always predicted:
 	// no reading of host memory is taken.
 	VRAMBasis Basis `json:"vram_basis,omitempty"`
+	// ConstsBackend and ConstsCard name the set of constants the predicted figures were built
+	// with (Consts.Backend, Consts.Card); where they are not the build and card it runs on, the
+	// figures were measured elsewhere.
+	ConstsBackend string `json:"consts_backend,omitempty"`
+	ConstsCard    string `json:"consts_card,omitempty"`
 }
 
 // CtxTotal is the -c value.
@@ -303,16 +380,26 @@ func DefaultMargin(vramTotal int) int {
 const mib = 1 << 20
 
 // Seed builds a footprint from a GGUF header, priced at cache type kvType ("" is q4_0; a name
-// the core does not know is a *KVTypeError). notes says what it had to guess (an architecture not
-// fully understood, no KV dimensions in the header), one line each, for the caller to log.
+// the core does not know is a *KVTypeError), with the default set of constants (DefaultConsts).
+// notes says what it had to guess (an architecture not fully understood, no KV dimensions in the
+// header), one line each, for the caller to log.
 func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err error) {
+	return SeedWith(info, kvType, DefaultConsts())
+}
+
+// SeedWith is Seed with the set of constants c, read on the caller's own build and card; a set
+// lacking a constant is *ConstError. The footprint carries the set (Footprint.Consts).
+func SeedWith(info gguf.Info, kvType string, c Consts) (fp Footprint, notes []string, err error) {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
-	b, ok := kvBytes(kvType)
-	if !ok {
-		return Footprint{}, nil, &KVTypeError{Name: kvType}
+	c.Of = maps.Clone(c.Of)
+	st, err := settle(&Footprint{KVType: kvType, Consts: &c}, nil, nil, nil)
+	if err != nil {
+		return Footprint{}, nil, err
 	}
+	k := st.fp.c
+	b, _ := kvBytes(kvType)
 	layers := info.Layers
 	if len(layers) != info.NLayer || len(layers) == 0 {
 		layers = nil
@@ -340,18 +427,18 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err erro
 			maxFull = math.Max(maxFull, e)
 		}
 	}
-	dequant := dequantBytes * maxFull / mib
-	compute := maskMiBPer1k / 1024
+	dequant := k.dequant * maxFull / mib
+	compute := k.mask / 1024
 	if quantised(kvType) {
 		compute += dequant
 	}
 	fp = Footprint{
-		FixedMiB:       float64(info.DenseBytes+info.ExpertBytes-info.HostBytes)/mib + baseOverheadMiB + float64(info.VocabSize)/1000*vocabMiBPer1k,
+		FixedMiB:       float64(info.DenseBytes+info.ExpertBytes-info.HostBytes)/mib + k.base + float64(info.VocabSize)/1000*k.vocab,
 		HostMiB:        float64(info.HostBytes) / mib,
 		PerTokenMiB:    full * b / mib,
 		SWAPerTokenMiB: swa * b / mib,
 		SWAWindow:      info.SlidingWindow + ubatchTokens,
-		ScratchMiB:     runtimeMiB,
+		ScratchMiB:     k.runtime,
 
 		ComputePerTokenMiB: compute,
 		StatePerSlotMiB:    float64(info.StateBytesPerSlot) / mib,
@@ -362,6 +449,7 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err erro
 		DequantPerTokenMiB: dequant,
 		WeightsMiB:         float64(info.DenseBytes+info.ExpertBytes-info.HostBytes) / mib,
 		CtxTrain:           info.CtxTrain,
+		Consts:             &c,
 	}
 	if info.Estimated {
 		notes = append(notes, fmt.Sprintf("fit: %s: architecture not fully understood (%s); using a conservative KV estimate", info.Arch, info.Note))
@@ -381,8 +469,8 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err erro
 		fp.MoE = true
 		fp.ExpertLayers = info.ExpertLayers
 		fp.ExpertMiBPerLayer = float64(info.ExpertBytes) / mib / float64(info.ExpertLayers)
-		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
-		fp.MoESchedMiB = moeSchedMiB
+		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * k.expertRAM
+		fp.MoESchedMiB = k.offload
 	}
 	return fp, notes, nil
 }
@@ -390,33 +478,43 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err erro
 // SeedFromBytes is the footprint of a model known only by its file size: about 0.0006 MiB per
 // token per GiB of weights at q4_0 with a 25 % safety factor, 30 expert layers for a MoE. It is
 // marked Estimated; the header gives the real footprint once the file is on disk. kvType is as
-// for Seed.
+// for Seed, and the constants are the default set.
 func SeedFromBytes(size int64, moe bool, kvType string) (Footprint, error) {
+	return SeedFromBytesWith(size, moe, kvType, DefaultConsts())
+}
+
+// SeedFromBytesWith is SeedFromBytes with the set of constants c; a set lacking a constant is
+// *ConstError. The footprint carries the set.
+func SeedFromBytesWith(size int64, moe bool, kvType string, c Consts) (Footprint, error) {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
-	b, ok := kvBytes(kvType)
-	if !ok {
-		return Footprint{}, &KVTypeError{Name: kvType}
+	c.Of = maps.Clone(c.Of)
+	st, err := settle(&Footprint{KVType: kvType, Consts: &c}, nil, nil, nil)
+	if err != nil {
+		return Footprint{}, err
 	}
+	k := st.fp.c
+	b, _ := kvBytes(kvType)
 	sizeMiB := float64(size) / mib
 	gib := sizeMiB / 1024
 	fp := Footprint{
-		FixedMiB:    sizeMiB + baseOverheadMiB + 200*vocabMiBPer1k, // a typical 200k vocabulary
+		FixedMiB:    sizeMiB + k.base + 200*k.vocab, // a typical 200k vocabulary
 		PerTokenMiB: 0.0006 * gib * 1.25 * b / q4Bytes,
-		ScratchMiB:  runtimeMiB,
+		ScratchMiB:  k.runtime,
 		Estimated:   true,
 		Basis:       Predicted,
 		KVType:      kvType,
 		WeightsMiB:  sizeMiB,
+		Consts:      &c,
 	}
 	if moe {
 		const layers = 30 // typical; the header gives the real count after download
 		fp.MoE = true
 		fp.ExpertLayers = layers
 		fp.ExpertMiBPerLayer = 0.75 * sizeMiB / layers
-		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
-		fp.MoESchedMiB = moeSchedMiB
+		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * k.expertRAM
+		fp.MoESchedMiB = k.offload
 	}
 	return fp, nil
 }
@@ -436,6 +534,66 @@ func quantised(t string) bool { return t != "f16" && t != "bf16" && t != "f32" }
 type fig struct {
 	Footprint
 	src Footprint // the footprint as the entry was given it, which at prices another type from
+	c   constFig  // the footprint's own set of constants, read whole: the only constants a price takes
+}
+
+// constFig is a set of constants every one of which was given, by value.
+type constFig struct {
+	backend, card                                           string
+	base, vocab, runtime, mask, dequant, offload, expertRAM float64
+}
+
+// sameSet reports whether two sets hold the same build, card and constants (nil is the default
+// set); a word of where a reading came from does not change a price, so it is not compared.
+func sameSet(a, b *Consts) bool {
+	d := DefaultConsts()
+	if a == nil {
+		a = &d
+	}
+	if b == nil {
+		b = &d
+	}
+	return a.Backend == b.Backend && a.Card == b.Card &&
+		maps.EqualFunc(a.Of, b.Of, func(x, y Const) bool { return x.Value == y.Value })
+}
+
+// cloneSet is a copy of a set sharing no map with it: a book handed to a writer keeps its own.
+func cloneSet(c *Consts) *Consts {
+	if c == nil {
+		return nil
+	}
+	n := *c
+	n.Of = maps.Clone(c.Of)
+	return &n
+}
+
+// readConsts reads a set whole: nil is the default set, and a set lacking a constant (or its word
+// of where it was read, or its backend or card) is *ConstError naming it. Only settle calls it.
+func readConsts(set *Consts) (constFig, error) {
+	if set == nil {
+		d := DefaultConsts()
+		set = &d
+	}
+	switch {
+	case set.Backend == "":
+		return constFig{}, &ConstError{Name: "backend"}
+	case set.Card == "":
+		return constFig{}, &ConstError{Name: "card"}
+	}
+	v := make(map[ConstName]float64, len(constNames))
+	for _, n := range constNames {
+		c, ok := set.Of[n]
+		if !ok {
+			return constFig{}, &ConstError{Name: n}
+		}
+		if c.From == "" {
+			return constFig{}, &ConstError{Name: n, NoFrom: true}
+		}
+		v[n] = c.Value
+	}
+	return constFig{backend: set.Backend, card: set.Card,
+		base: v[BaseOverheadMiB], vocab: v[VocabMiBPer1k], runtime: v[RuntimeMiB], mask: v[MaskMiBPer1k],
+		dequant: v[DequantBytes], offload: v[OffloadMiB], expertRAM: v[ExpertRAMFactor]}, nil
 }
 
 // roomFig is a room every field of which was read, with its budgets in MiB.
@@ -469,7 +627,8 @@ func runKV(s Shape) string {
 // (*UnreadError naming the first: never taken as zero); with wants, a largest block the
 // footprint cannot be held to (ErrNoWeights); wants it cannot resolve (ErrNoCtxTrain,
 // ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
-// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError).
+// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError); a
+// footprint whose set of constants lacks one (*ConstError: nil is the default set).
 //
 // The figures are priced at the type the shape runs at where a shape is given (runKV: a shape's
 // "" is the default q4_0, with or without wants, as Args renders it), else at the wants' (the
@@ -528,6 +687,9 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	if err != nil {
 		return st, err
 	}
+	if f.c, err = readConsts(fp.Consts); err != nil {
+		return st, err
+	}
 	st.fp = f
 	return st, nil
 }
@@ -560,8 +722,12 @@ func price(fp Footprint, t string) (fig, error) {
 	return fig{Footprint: fp, src: src}, nil
 }
 
-// at is the same footprint priced at another type of a list.
-func (fp fig) at(t string) (fig, error) { return price(fp.src, t) }
+// at is the same footprint priced at another type of a list, with the same set of constants.
+func (fp fig) at(t string) (fig, error) {
+	f, err := price(fp.src, t)
+	f.c = fp.c
+	return f, err
+}
 
 // capRoom is the room a cap is measured against: the card's budget, or host RAM with no GPU.
 func (room roomFig) capRoom() int {
@@ -650,7 +816,8 @@ func (fp Footprint) Largest(s Shape) (float64, error) {
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }
 
 func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
-	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted}
+	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted,
+		ConstsBackend: fp.c.backend, ConstsCard: fp.c.card}
 	if cpuOnly {
 		s.NCpuMoe = 0
 		s.RAMMiB = ceilMiB(fp.allHost(slots, ctx))
@@ -903,7 +1070,7 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
 	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
-		drop := int(math.Ceil((float64(failedBufMiB) + runtimeMiB) / (perTok * float64(cur.Slots))))
+		drop := int(math.Ceil((float64(failedBufMiB) + f.ScratchMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}
 	cap := byBuf
@@ -1063,6 +1230,9 @@ type Calib struct {
 	// Readings is the card memory each shape that came up held, one per shape, whether or not
 	// its reading was taken for the fixed part (Book.Mark).
 	Readings []Reading `json:"readings,omitempty"`
+	// Consts is the set of constants of the seed FixedMiB was worked out against (the reading less
+	// that seed's other figures); nil, as an older build wrote it, is the default set.
+	Consts *Consts `json:"consts,omitempty"`
 }
 
 // CapLift is what a cap was measured under: the room (Room.Budget, or Room.RAMBudget for a run
@@ -1113,13 +1283,16 @@ func BookKey(modelSHA, gpuName, backendID string) string {
 }
 
 // Footprint overlays what the book knows (the fixed load from a reading taken, marked Measured;
-// the runtime-OOM cap) on a seed.
+// the runtime-OOM cap) on a seed. The fixed load is laid only on a seed of the set of constants it
+// was worked out under (Calib.Consts): on another set's seed it would join one set's fixed part to
+// the other's figures, and predict for the very shape read a figure the reading does not hold.
+// There the seed's fixed part stands, Predicted, until a reading is taken against it.
 func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if b == nil {
 		return seed
 	}
 	if e, ok := b.Entries[key]; ok {
-		if e.FixedMiB > 0 {
+		if e.FixedMiB > 0 && sameSet(e.Consts, seed.Consts) {
 			seed.FixedMiB = e.FixedMiB
 			seed.Basis = Measured
 		}
@@ -1234,6 +1407,7 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 	e.Readings = append(rs, Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB})
 	if c.Taken() {
 		e.FixedMiB = c.ImpliedFixedMiB
+		e.Consts = cloneSet(seed.Consts)
 		e.Loads++
 	}
 	e.Updated = now

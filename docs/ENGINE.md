@@ -553,8 +553,39 @@ Go module of their own, so another program can size a model exactly as the engin
 taking the engine's downloads, processes or server:
 
 - Module `github.com/CharlesMod/easyEngine/core` in `core/`, with its own `go 1.23` line and **no
-  `require` at all**. Packages: `core/fit` (Seed, SeedFromBytes, Choose, MissRetry, StepDown,
-  Grow, Args, the Book) and `core/gguf` (Parse and Info, with the trained context).
+  `require` at all**. Packages: `core/fit` (Seed, SeedFromBytes, SeedWith, SeedFromBytesWith,
+  Choose, MissRetry, StepDown, Grow, Args, the Book) and `core/gguf` (ReadHeader, Parse and Info,
+  with the trained context, and the chat template).
+- **Constants by engine build and kind of card.** The constants a footprint is built from that were
+  measured, not derived (the base overhead, the vocabulary's buffers, the runtime, the mask, the
+  f16 expansion, the offload buffers, the host RAM per expert layer), are one set, `fit.Consts`,
+  keyed by the backend (the engine build) and the kind of card it was read on, each constant with
+  a word of where its reading came from. `DefaultConsts` is the set read on the RTX 5080 at b12680
+  (docs/FOOTPRINTS.md) and is used wherever a caller gives none, so `Seed` and `SeedFromBytes` are
+  unchanged; `SeedWith` and `SeedFromBytesWith` take a caller's own set. The footprint carries its
+  set (`Footprint.Consts`; nil, as in a footprint built by hand, is the default) and every shape
+  priced from it names the set (`Shape.ConstsBackend`, `Shape.ConstsCard`), through JSON, so a
+  caller can tell a figure built with a set read elsewhere (a prediction) from one read on its
+  own build and card. The seed builds the figures from its set once; every entry then prices the
+  figures alone (the measured retry's runtime is the footprint's own `ScratchMiB`), never a
+  constant read beside them, so no price mixes two sets. The book keeps the set a fixed part was
+  worked out under (`Calib.Consts`; nil, as an older build wrote it, is the default) and
+  `Book.Footprint` lays that fixed part only on a seed of the same set: on another set's seed the
+  seed's own fixed part stands, Predicted, until a reading is taken against it. `settle` reads the
+  set whole; a set lacking a constant, or its word, is `*ConstError` naming it from every entry
+  that prices, never a zero.
+- **The header's facts.** `gguf.ReadHeader(r, size, tensors)` walks the header once and keeps every
+  metadata key whose value is an integer of any width (`Value.Int`, `Value.Uint`, its sign kept), a
+  bool, a string, or an array of integers or bools of at most `MaxIntArray` (65536) elements; it
+  counts what it walks past (floats, arrays of strings or floats, longer arrays) and, where asked,
+  reads every tensor's name, dimensions, type, offset and byte size. `Parse` is it with the tensor
+  table, and `Info` is derived from that one reading. `File.ChatTemplate` gives the chat template
+  exactly as the header holds it, or says there is none, and `File.ChatTemplates` the named ones.
+  A header cut short (`ErrCut`), with a wrong magic (`ErrMagic`), an unknown version
+  (`*VersionError`), a string, array or count past the size given or past `MaxString` (256 MiB)
+  (`ErrPastSize`), or a type the format does not have (`ErrMalformed`) is refused; a template is
+  read whole or not at all, and a long string is read as it arrives, so a header never makes the
+  reader allocate what it only claims.
 - **What another program may ask beyond a game.** Whole (no layer or expert off the card), the
   cache's types best first, the model's own trained context as the most, and the room as given
   (the host's reserve, the margin, the largest free block, a processor node as the pool, and a
@@ -594,7 +625,10 @@ taking the engine's downloads, processes or server:
   raised go line, and on a `require`.
 - **Checked at Go 1.23.** `./core-check.sh` (run first by `build.sh`) refuses a go line other
   than 1.23, runs the core's tests, and builds and vets it with `GOOS` set to `linux`, `windows`
-  and `darwin`. vet's `stdversion` check reports a standard-library call newer than the go line
+  and `darwin`. The root (which says `go 1.27`) is checked at 1.23 only in a scratch copy with its
+  go line lowered: it builds for the three systems and its packages pass there, except the tests
+  of package `run`, which use `t.Context` (Go 1.24) and do not compile at 1.23; `run` itself builds
+  and vets. vet's `stdversion` check reports a standard-library call newer than the go line
   even on a newer toolchain. It never fetches a toolchain (`GOTOOLCHAIN=local`).
 - **What left `fit` and `gguf`, and where it went.** The engine's package `plan` holds the
   planner of a whole catalog (`Plan`, `PlanWith`, `PlanResult`, `Verdict`, `RoomFor`, the

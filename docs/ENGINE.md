@@ -375,6 +375,24 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   at the measured smaller shape (`miss_retry()`); a second failure steps the shape down one
   notch and is recorded.
 - **Runtime OOM** lowers the stored cap for that (model, device) so the next start is smaller.
+  A crash whose last words carry a memory error restarts one step smaller at once.
+- **Crashes without a memory error** restart after a growing wait: 2 s, 5 s, 15 s, then every
+  30 s (`CrashBackoff`), through the normal choose path, which reads the room again. Failed
+  starts wait the same way. After 3 quick crashes in a row at one shape (each within 2 min of
+  its start, `CrashQuick`/`CrashSteps`) it is read as a memory problem, most often another app
+  taking the card: one step down, and the cap is lowered too when the sensed reserve grew past
+  64 MiB since the shape was chosen. A run that stays up 2 min clears the record. A shortfall
+  (the model does not fit, out of memory at every shape) is retried every 30 s while the host
+  app runs, never given up for good: the other app may close. The status `recovery` block has
+  the failures and crashes in a row, the last error, the seconds to the next try, whether the
+  crashes were read as memory, and the ctx of the shape the engine will not return to.
+- **A shape that failed is a ceiling:** a shape that ran out of memory, crashed into a step
+  down, or was shrunk away from is not chosen or grown back to for 10 min (`GrowBackoff`); a
+  grow may then try once more.
+- **Out-of-memory the server survives:** llama-server can fail a request on a CUDA OOM and keep
+  running. Its output is watched line by line (the memory patterns of `ParseOOM`, pinned host
+  memory fallbacks excepted); out-of-memory lines in two ticks within 60 s (`OOMHold`) step the
+  model down, record the cap, at idle or as below. One failed request alone is let go.
 - **Make room for the game:** every 5 s sense the adapters and measure the reserve (§4a; the
   status `gpu` is refreshed by this tick). If the model's memory (`Footprint.Need` of the running
   shape) no longer fits the budget the reserve leaves (the player loaded a heavy save), restart
@@ -383,6 +401,12 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   too, and read alone would shrink the model with nothing else on the card. A change reshapes
   the model only when **held**: two consecutive reads of the reserve (others plus host) agree
   within 64 MiB. Other programs are never touched. The game's room wins over ctx.
+  A held shortfall of 256 MiB or more (`DrainMinMiB`) does not wait for a pause: llama-server
+  holds its memory from load, so the reply in flight is safe to finish. New requests get
+  "Loading model" (phase `resizing`) while it does, and the model shrinks once the slots are
+  idle, or after 2 min (`DrainMax`) if a reply outlasts that. A smaller shortfall, or one read
+  once, waits for idle. If the smaller shape fails to load on an out-of-memory, the engine
+  records it and steps down from there, never back to the shape that no longer fit.
 - **Grow back when idle:** if measured room allows at least one more step (ctx or one fewer
   CPU-MoE layer), the reserve is held and the server has been idle for 60 s, restart at the
   bigger shape. If that fails, restart at the old shape.
@@ -421,7 +445,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, model_params, model_size_class}`; `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7b; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7b; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |

@@ -3,8 +3,10 @@
 package lifecycle
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -21,6 +23,16 @@ type LogSink struct {
 	f    *os.File
 	size int64
 	ring []byte
+	hook func(line string) // called with each complete line, under mu (keep it short)
+	part []byte            // the unfinished line the hook has not seen yet
+}
+
+// OnLine sets a function called with every complete line written from now on (without the
+// newline). It runs under the sink's lock, so it must be quick and must not call the sink.
+func (s *LogSink) OnLine(f func(line string)) {
+	s.mu.Lock()
+	s.hook, s.part = f, nil
+	s.mu.Unlock()
 }
 
 // OpenLog opens (appending) a rotating log file. A nil path keeps only the ring.
@@ -61,6 +73,9 @@ func (s *LogSink) open() error {
 func (s *LogSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.hook != nil {
+		s.lines(p)
+	}
 	s.ring = append(s.ring, p...)
 	if len(s.ring) > 2*ringSize {
 		s.ring = append([]byte(nil), s.ring[len(s.ring)-ringSize:]...)
@@ -76,6 +91,22 @@ func (s *LogSink) Write(p []byte) (int, error) {
 		s.size += int64(n)
 	}
 	return len(p), nil
+}
+
+func (s *LogSink) lines(p []byte) {
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			if len(s.part) < 4096 { // a line longer than this is not one the hook needs whole
+				s.part = append(s.part, p...)
+			}
+			return
+		}
+		line := append(s.part, p[:i]...)
+		s.part = nil
+		s.hook(strings.TrimRight(string(line), "\r"))
+		p = p[i+1:]
+	}
 }
 
 // Tail returns the most recent output kept in memory.

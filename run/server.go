@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -139,18 +138,38 @@ func (s *Supervisor) startLocked() error {
 		return s.failStart(err, true)
 	}
 	shape, err := fit.Choose(lc.fp, room, w)
-	if err != nil {
-		return s.failStart(fmt.Errorf("this model does not fit: %w", err), false)
+	if err != nil { // another app may be holding the card: look again slowly, never give up for good
+		return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
+	}
+	if shape, err = s.belowCeiling(lc, shape, room, w); err != nil {
+		return s.failSlow(err)
 	}
 	return s.runShape(ctx, lc, shape)
 }
 
+// failStart puts the engine in the error phase. With retry the watchdog tries again after the
+// backoff for the failures in a row (Config.CrashBackoff); without, only a user action does.
 func (s *Supervisor) failStart(err error, retry bool) error {
+	return s.fail(err, retry, false)
+}
+
+// failSlow is a retried failure that waits the longest backoff: a memory shortfall, which another
+// app letting go of the card ends, or nothing does.
+func (s *Supervisor) failSlow(err error) error {
+	return s.fail(err, true, true)
+}
+
+func (s *Supervisor) fail(err error, retry, slow bool) error {
 	s.addError("%v", err)
+	wait := s.noteFailure(err, slow)
 	s.mu.Lock()
-	s.setPhaseLocked("error", err.Error())
+	msg := err.Error()
+	if retry {
+		msg = fmt.Sprintf("%s (failure %d in a row; trying again in %s)", msg, s.rec.fails, wait.Round(100*time.Millisecond))
+	}
+	s.setPhaseLocked("error", msg)
 	s.retryable = retry
-	s.retryAt = s.cfg.Now().Add(6 * s.cfg.WatchEvery)
+	s.retryAt = s.rec.retryAt
 	s.mu.Unlock()
 	return err
 }
@@ -190,14 +209,15 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			next, err = fit.StepDown(lc.fp, shape, room, w)
 			if err == nil {
 				s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
+				s.setCeiling(lc.key, shape, "it ran out of memory while loading")
 			}
 		}
 		if err != nil {
-			return s.failStart(fmt.Errorf("model server out of memory at every shape: %w", err), false)
+			return s.failSlow(fmt.Errorf("model server out of memory at every shape: %w", err))
 		}
 		shape = next
 	}
-	return s.failStart(errors.New("model server kept running out of memory"), false)
+	return s.failSlow(errors.New("model server kept running out of memory"))
 }
 
 // launch starts llama-server at a shape and waits until it is healthy.
@@ -231,13 +251,19 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	if err != nil {
 		return launchResult{err: err}
 	}
+	oomw := &oomWatch{}
+	sink.OnLine(oomw.line)
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
 	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, env), Log: sink})
 	if err != nil {
 		sink.Close()
 		return launchResult{err: err}
 	}
-	defer sink.Close()
+	go func() { // the log stays on disk while the server runs, and is closed once it exits
+		<-proc.Done()
+		time.Sleep(50 * time.Millisecond)
+		sink.Close()
+	}()
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	s.setPhase("loading", fmt.Sprintf("Loading model (%d slots x %d ctx)", shape.Slots, shape.CtxPerSlot))
 	deadline := time.NewTimer(s.cfg.LoadTimeout)
@@ -259,7 +285,9 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-tick.C:
 			if s.healthy(url) {
-				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(), prevReserve: -1}
+				oomw.take() // what loading printed is not a run-time signal
+				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(), prevReserve: -1,
+					reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw}
 				srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowIdle)
 				s.calibrate(ctx, srv)
 				s.srv = srv
@@ -409,11 +437,16 @@ func (s *Supervisor) tick() {
 		}
 		return
 	}
+	ctx := s.root
+	base := fmt.Sprintf("http://127.0.0.1:%d", srv.port)
+	if srv.drain != nil && phase == "resizing" {
+		s.tickDrain(ctx, srv, base)
+		return
+	}
+	srv.drain = nil
 	if phase != "ready" {
 		return
 	}
-	ctx := s.root
-	base := fmt.Sprintf("http://127.0.0.1:%d", srv.port)
 	// 1. the process died on its own
 	if srv.proc.Exited() {
 		s.handleExit(ctx, srv)
@@ -432,6 +465,8 @@ func (s *Supervisor) tick() {
 		return
 	}
 	s.readTokS(base)
+	s.stable(srv)
+	oomHeld, oomLine := s.survivedOOM(srv)
 	// 3. idle tracking
 	if s.slotsIdle(base) {
 		srv.idleCount++
@@ -462,26 +497,55 @@ func (s *Supervisor) tick() {
 	if room.NoGPU || srv.shape.CPUOnly {
 		return
 	}
-	if vram, _, err := room.Budget(); err == nil {
-		if need, _, err := srv.fp.Need(srv.shape); err == nil && int(math.Ceil(need)) > int(vram) {
-			if !idle || !held {
-				return // never in the middle of a line, and not on a reading that is still moving
-			}
-			w := s.wantsFor(srv.key)
-			next, err := fit.StepDown(srv.fp, srv.shape, room, w)
-			if err != nil {
-				return
-			}
-			r := sn.sum.Reserve
-			s.logf("model needs %d MiB, the room leaves %d (others %d, host %d, margin %d): shrinking to %d x %d (moe %d)", int(math.Ceil(need)), int(vram), r.OthersMiB, r.HostMiB, r.MarginMiB, next.Slots, next.CtxPerSlot, next.NCpuMoe)
-			s.resize(ctx, srv, next, false)
+	// 4a. the server keeps failing requests for want of memory: it is out of room whatever the
+	// reading says. One step down, recorded; at idle now, else once the replies in flight end
+	// (they are failing anyway, so the wait is short).
+	if oomHeld {
+		w := s.wantsFor(srv.key)
+		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
+		if err != nil {
+			s.addError("llama-server is out of memory at the smallest shape (%s)", oomLine)
 			return
 		}
+		s.addError("llama-server keeps running out of memory at %d x %d (%s): shrinking", srv.shape.Slots, srv.shape.CtxPerSlot, oomLine)
+		if lc, room2, _, err := s.loadContext(ctx); err == nil {
+			s.lowerCap(lc, srv.shape, next.Slots*next.CtxPerSlot, room2)
+		}
+		s.setCeiling(srv.key, srv.shape, "it kept running out of memory while serving")
+		if idle {
+			s.resize(ctx, srv, next, false)
+		} else {
+			s.startDrain(srv, next, "out of memory while serving")
+		}
+		return
+	}
+	if short, need, vram, ok := needShort(srv, room); ok && short > 0 {
+		if !held {
+			return // not on a reading that is still moving
+		}
+		if !idle && short < s.cfg.DrainMinMiB {
+			return // a small shortfall waits for a pause between lines
+		}
+		w := s.wantsFor(srv.key)
+		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
+		if err != nil {
+			return
+		}
+		r := sn.sum.Reserve
+		s.logf("model needs %d MiB, the room leaves %d (others %d, host %d, margin %d): shrinking to %d x %d (moe %d)", need, vram, r.OthersMiB, r.HostMiB, r.MarginMiB, next.Slots, next.CtxPerSlot, next.NCpuMoe)
+		if idle {
+			s.resize(ctx, srv, next, false)
+		} else {
+			// mid-reply: llama-server holds its memory from load, so the reply in flight is
+			// safe to finish; new requests wait while it does, then the model shrinks
+			s.startDrain(srv, next, fmt.Sprintf("another app took memory (short %d MiB)", short))
+		}
+		return
 	}
 	// 5. grow back when idle for long enough, on a reserve that has held
 	if held && idle && !srv.idleSince.IsZero() && s.cfg.Now().Sub(srv.idleSince) >= s.cfg.GrowIdle && !s.cfg.Now().Before(srv.nextGrow) {
 		w := s.wantsFor(srv.key)
-		if next, ok, err := fit.Grow(srv.fp, srv.shape, room, w); err == nil && ok {
+		if next, ok, err := fit.Grow(srv.fp, srv.shape, room, w); err == nil && ok && !s.atCeiling(srv.key, srv.fp, next) {
 			s.logf("idle with room: growing to %d x %d (moe %d)", next.Slots, next.CtxPerSlot, next.NCpuMoe)
 			s.resize(ctx, srv, next, true)
 		}
@@ -513,12 +577,16 @@ func (s *Supervisor) restartSame(ctx context.Context, srv *server) {
 	s.startLocked()
 }
 
-// handleExit deals with a server that died on its own: an OOM lowers the stored
-// cap and restarts smaller, anything else restarts at the same shape.
+// handleExit deals with a server that died on its own. An OOM in its last words lowers the
+// stored cap and restarts one step smaller at once. Anything else restarts after the backoff for
+// the failures in a row, through the normal choose path (which reads the room again); after
+// CrashSteps quick crashes at one shape it is read as a memory problem and steps down once.
 func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	s.countRestart()
 	tail := srv.proc.Tail()
 	oom, _ := ParseOOM(tail)
+	quick := s.cfg.Now().Sub(srv.startedAt) < s.cfg.CrashQuick
+	why := lastLine(tail)
 	s.srv = nil
 	s.ours.set(0)
 	s.mu.Lock()
@@ -526,7 +594,12 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	s.llamaURL = ""
 	s.mu.Unlock()
 	s.setPhase("starting", "Restarting model server")
-	lc, room, w, err := s.loadContext(ctx)
+	cctx, cancel := context.WithCancel(s.root)
+	s.mu.Lock()
+	s.loadCancel = cancel
+	s.mu.Unlock()
+	defer func() { cancel(); s.mu.Lock(); s.loadCancel = nil; s.mu.Unlock() }()
+	lc, room, w, err := s.loadContext(cctx)
 	if err != nil {
 		s.failStart(err, true)
 		return
@@ -535,33 +608,69 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	if oom {
 		next, err := fit.StepDown(lc.fp, shape, room, w)
 		if err != nil {
-			s.failStart(fmt.Errorf("out of memory at the smallest shape: %w", err), false)
+			s.failSlow(fmt.Errorf("out of memory at the smallest shape: %w", err))
 			return
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
 		s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
-		shape = next
-	} else {
-		s.addError("llama-server exited (%s): restarting", lastLine(tail))
+		s.setCeiling(lc.key, shape, "it ran out of memory while serving")
+		s.noteFailure(fmt.Errorf("out of memory at %d x %d", shape.Slots, shape.CtxPerSlot), false)
+		if err := s.runShape(cctx, lc, next); err != nil {
+			s.logf("restart after the out-of-memory failed: %v", err)
+		}
+		return
 	}
-	cctx, cancel := context.WithCancel(s.root)
-	s.mu.Lock()
-	s.loadCancel = cancel
-	s.mu.Unlock()
-	defer func() { cancel(); s.mu.Lock(); s.loadCancel = nil; s.mu.Unlock() }()
-	s.runShape(cctx, lc, shape)
+	n := s.noteCrash(shape, quick, why)
+	if n >= s.cfg.CrashSteps {
+		// the same shape keeps dying soon after it starts, with no memory error in its last
+		// words: most often another app took the card's memory and the driver killed it. The
+		// sensed reserve now against the one the shape was chosen under says whether one was seen.
+		now := lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB
+		grew := now - srv.reserve0
+		next, err := fit.StepDown(lc.fp, shape, room, w)
+		if err == nil {
+			s.mu.Lock()
+			s.rec.suspect = true
+			s.rec.crashes = 0
+			s.mu.Unlock()
+			if grew > heldTolMiB {
+				s.addError("llama-server crashed %d times in a row at %d x %d (%s); other apps took %d MiB since it started: stepping down and lowering the cap", n, shape.Slots, shape.CtxPerSlot, why, grew)
+				s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
+			} else {
+				s.addError("llama-server crashed %d times in a row at %d x %d (%s); no other app was seen taking memory, stepping down once anyway", n, shape.Slots, shape.CtxPerSlot, why)
+			}
+			s.setCeiling(lc.key, shape, fmt.Sprintf("it crashed %d times in a row", n))
+			s.noteFailure(fmt.Errorf("crashed %d times at %d x %d: %s", n, shape.Slots, shape.CtxPerSlot, why), false)
+			if err := s.runShape(cctx, lc, next); err != nil {
+				s.logf("restart one step down failed: %v", err)
+			}
+			return
+		}
+		// the smallest shape crashes too: keep trying slowly
+		s.failSlow(fmt.Errorf("llama-server keeps crashing at the smallest shape (%s), crash %d in a row", why, n))
+		return
+	}
+	s.failStart(fmt.Errorf("llama-server exited (%s), crash %d in a row at %d x %d", why, n, shape.Slots, shape.CtxPerSlot), true)
 }
 
-// resize restarts at a new shape, only if nothing is being served. A failed grow
-// goes back to the old shape.
+// resize restarts at a new shape, only if nothing is being served. A failed grow goes back to
+// the old shape; a failed shrink steps down from the shape it tried (shrink).
 func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow bool) {
-	old := srv.shape
 	s.setPhase("resizing", fmt.Sprintf("Resizing to %d x %d", to.Slots, to.CtxPerSlot))
 	// New requests now get 503; make sure nothing slipped in before the switch.
 	if !s.slotsIdle(fmt.Sprintf("http://127.0.0.1:%d", srv.port)) {
 		s.setPhase("ready", "Ready")
 		return
 	}
+	if grow {
+		s.growTo(ctx, srv, to)
+		return
+	}
+	s.shrink(ctx, srv, to)
+}
+
+func (s *Supervisor) growTo(ctx context.Context, srv *server, to fit.Shape) {
+	old := srv.shape
 	s.countRestart()
 	s.stopServerLocked()
 	cctx, cancel := context.WithCancel(s.root)
@@ -574,21 +683,59 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 		s.failStart(err, true)
 		return
 	}
-	if grow {
-		res := s.launch(cctx, lc, to)
-		if res.ok {
-			return
-		}
-		s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
-		if res.oom {
-			s.lowerCap(lc, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room)
-		}
-		if s.runShape(cctx, lc, old) == nil && s.srv != nil {
-			s.srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowBackoff)
-		}
+	res := s.launch(cctx, lc, to)
+	if res.ok {
 		return
 	}
-	s.runShape(cctx, lc, to)
+	s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
+	if res.oom {
+		s.lowerCap(lc, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room)
+	}
+	s.setCeiling(lc.key, to, "growing to it failed")
+	if s.runShape(cctx, lc, old) == nil && s.srv != nil {
+		s.srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowBackoff)
+	}
+}
+
+// shrink restarts smaller because the running shape no longer fits. The old shape is a ceiling
+// from then on. If the smaller one fails to load on an out-of-memory it is recorded too and the
+// engine steps down from it (never back up); any other failure retries through the backoff,
+// below the ceiling.
+func (s *Supervisor) shrink(ctx context.Context, srv *server, to fit.Shape) {
+	old := srv.shape
+	s.setPhase("resizing", fmt.Sprintf("Resizing to %d x %d", to.Slots, to.CtxPerSlot))
+	s.countRestart()
+	s.stopServerLocked()
+	s.setCeiling(srv.key, old, "it no longer fit beside the other apps")
+	cctx, cancel := context.WithCancel(s.root)
+	s.mu.Lock()
+	s.loadCancel = cancel
+	s.mu.Unlock()
+	defer func() { cancel(); s.mu.Lock(); s.loadCancel = nil; s.mu.Unlock() }()
+	lc, room, w, err := s.loadContext(cctx)
+	if err != nil {
+		s.failStart(err, true)
+		return
+	}
+	res := s.launch(cctx, lc, to)
+	if res.ok || cctx.Err() != nil {
+		return
+	}
+	if !res.oom {
+		s.failStart(fmt.Errorf("shrink to %d x %d failed: %v", to.Slots, to.CtxPerSlot, res.err), true)
+		return
+	}
+	next, err := fit.StepDown(lc.fp, to, room, w)
+	if err != nil {
+		s.failSlow(fmt.Errorf("shrink to %d x %d ran out of memory and no smaller shape fits: %w", to.Slots, to.CtxPerSlot, err))
+		return
+	}
+	s.addError("shrink to %d x %d ran out of memory: stepping down to %d x %d", to.Slots, to.CtxPerSlot, next.Slots, next.CtxPerSlot)
+	s.lowerCap(lc, to, next.Slots*next.CtxPerSlot, room)
+	s.setCeiling(lc.key, to, "shrinking to it ran out of memory")
+	if err := s.runShape(cctx, lc, next); err != nil {
+		s.logf("step down after the failed shrink failed: %v", err)
+	}
 }
 
 func (s *Supervisor) inflightNow() int32 {

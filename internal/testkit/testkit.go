@@ -160,6 +160,7 @@ func (e *Env) Config() run.Config {
 		Seed: func(m catalog.Model, path, kv string) (fit.Footprint, error) {
 			return fit.Footprint{FixedMiB: 5000, PerTokenMiB: 0.05, ScratchMiB: 500}, nil
 		},
+		CrashBackoff: []time.Duration{40 * time.Millisecond, 80 * time.Millisecond, 120 * time.Millisecond, 160 * time.Millisecond},
 		WatchEvery: 40 * time.Millisecond, GrowIdle: 10 * time.Minute, HealthPoll: 20 * time.Millisecond,
 		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond, HealthMisses: 3, IdleChecks: 2,
 		AgentBackoffBase: 40 * time.Millisecond, AgentBackoffMax: 200 * time.Millisecond, AgentStable: time.Hour,

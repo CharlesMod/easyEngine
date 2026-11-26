@@ -143,6 +143,13 @@ type Config struct {
 	UpgradeBackoff    time.Duration // default 30s: first wait before retrying the target download (doubles)
 	UpgradeBackoffMax time.Duration // default 15 min
 	SwapDrain         time.Duration // default 2 min: longest wait for requests in flight before a model swap
+	// Crash recovery (run/recover.go).
+	CrashBackoff []time.Duration // default 2s, 5s, 15s, 30s: wait before try n after failures in a row (the last repeats)
+	CrashQuick   time.Duration   // default 2 min: a run shorter than this that crashes is a quick crash; one longer clears the record
+	CrashSteps   int             // default 3: quick crashes in a row at one shape before one step down
+	DrainMax     time.Duration   // default 2 min: longest wait for replies before a shrink that cannot wait for idle
+	DrainMinMiB  int             // default 256: a held shortfall this large shrinks without waiting for idle
+	OOMHold      time.Duration   // default 60s: out-of-memory lines in two ticks this close are a shrink signal
 }
 
 func (c *Config) defaults() {
@@ -193,6 +200,18 @@ func (c *Config) defaults() {
 	dur(&c.UpgradeBackoff, 30*time.Second)
 	dur(&c.UpgradeBackoffMax, 15*time.Minute)
 	dur(&c.SwapDrain, 2*time.Minute)
+	if len(c.CrashBackoff) == 0 {
+		c.CrashBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second}
+	}
+	dur(&c.CrashQuick, 2*time.Minute)
+	dur(&c.DrainMax, 2*time.Minute)
+	dur(&c.OOMHold, 60*time.Second)
+	if c.CrashSteps <= 0 {
+		c.CrashSteps = 3
+	}
+	if c.DrainMinMiB <= 0 {
+		c.DrainMinMiB = 256
+	}
 	if c.DiskFree == nil {
 		c.DiskFree = diskFree
 	}

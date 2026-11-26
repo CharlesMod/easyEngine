@@ -163,8 +163,13 @@ func TestShrinkWhenIdleNeverMidRequest(t *testing.T) {
 	if n := len(e.Starts()); n != 1 {
 		t.Fatalf("restarted while busy: %v", e.Starts())
 	}
-	if s.Phase() != "ready" {
-		t.Fatalf("phase %s", s.Phase())
+	// a held shortfall this large does not wait for a pause: new requests wait ("Loading
+	// model") while the line in flight finishes, then the model shrinks
+	if s.Phase() != "resizing" {
+		t.Fatalf("phase %s, want resizing (draining)", s.Phase())
+	}
+	if r := s.Route(); r.Kind != "unavailable" || r.Message != "Loading model" {
+		t.Fatalf("route while draining = %+v", r)
 	}
 	e.Remove("busy")
 	testkit.WaitFor(t, 10*time.Second, "shrink once idle", func() bool { return len(e.Starts()) >= 2 })

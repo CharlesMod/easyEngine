@@ -1,0 +1,16 @@
+0.00.050.175 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.052.695 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.057.378 I srv    load_model: loading model 'home/models/gemma-4-E4B-it-qat-rp-Q4_0.gguf'
+0.00.463.649 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.463.749 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.472.154 W load: '</s>' is a normal token here, removing it from EOG list
+0.03.071.214 W llama_context: n_ctx_seq (16000000) > n_ctx_train (131072) -- possible training context overflow
+ggml_vulkan: Device memory allocation of size 32768000000 failed.
+ggml_vulkan: Requested buffer size exceeds device buffer size limit: ErrorOutOfDeviceMemory
+0.03.746.547 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate Vulkan0 buffer of size 32768000000
+0.03.801.903 E llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache
+0.03.801.929 E cmn  common_init_: failed to create context with model 'home/models/gemma-4-E4B-it-qat-rp-Q4_0.gguf'
+0.03.801.934 E cmn  common_init_: failed to create context with model 'home/models/gemma-4-E4B-it-qat-rp-Q4_0.gguf'
+0.03.801.940 E srv    load_model: failed to create_context with model 'home/models/gemma-4-E4B-it-qat-rp-Q4_0.gguf'
+0.03.801.972 I srv    operator(): operator(): cleaning up before exit...
+0.03.803.846 E srv  server_run_i: exiting due to model loading error

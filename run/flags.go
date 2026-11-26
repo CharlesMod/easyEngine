@@ -155,6 +155,15 @@ var (
 // ParseOOM looks for a memory failure in llama-server's output. failedMiB is the
 // size of the last buffer it could not allocate, 0 when none was printed.
 func ParseOOM(text string) (oom bool, failedMiB int) {
+	if strings.Contains(text, "pinned memory") { // a pinned host buffer that fell back to pageable is not a failure
+		var keep []string
+		for _, l := range strings.Split(text, "\n") {
+			if !strings.Contains(l, "pinned memory") {
+				keep = append(keep, l)
+			}
+		}
+		text = strings.Join(keep, "\n")
+	}
 	if !reOOM.MatchString(text) {
 		return false, 0
 	}

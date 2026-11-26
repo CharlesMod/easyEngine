@@ -101,6 +101,9 @@ type Status struct {
 	// Device is what llama-server was given to hold it to the planned adapter (null before the
 	// first start): docs/ENGINE.md section 4a.
 	Device *plan.DevicePin `json:"device"`
+	// Recovery is the crash and failed-start record while the engine recovers (null when there
+	// is none): run/recover.go, docs/ENGINE.md section 5.
+	Recovery *RecoveryInfo `json:"recovery"`
 }
 
 // Parent is a watched parent process.
@@ -144,6 +147,10 @@ type server struct {
 	measured  int
 	// prevReserve is the last tick's reserve (others plus the host's share, MiB), -1 before one.
 	prevReserve int
+	reserve0    int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
+	oom         *oomWatch   // out-of-memory lines in its output since the last tick
+	oomTicks    []time.Time // ticks that saw them, within OOMHold
+	drain       *drain      // a shrink waiting for the replies in flight
 }
 
 // Supervisor owns the children and the state.
@@ -175,6 +182,7 @@ type Supervisor struct {
 	cat         *catalog.Catalog
 	retryAt     time.Time
 	retryable   bool
+	rec         recovery
 	reshape     bool
 	tokS        float64
 
@@ -304,6 +312,7 @@ func (s *Supervisor) Status() Status {
 		d := *s.device
 		st.Device = &d
 	}
+	st.Recovery = s.recoveryLocked()
 	return st
 }
 

@@ -18,6 +18,15 @@
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
 //	                           first listed device as CUDA0; "none" prints no device)
 //	(starts.log records CUDA_VISIBLE_DEVICES as cvd=)
+//	more control files in FAKELLAMA_CTL:
+//	  crash      one shot: print a non-memory fault and exit 1 (removed first)
+//	  crashloop  every start whose -c is above the number in the file (empty: every start) exits 1
+//	             with a non-memory fault shortly after it turns healthy; the file stays
+//	  oomlog     one shot: print CUDA out-of-memory lines and keep serving (a survived OOM)
+//	  oomreq     while present, completions fail with HTTP 500 and an out-of-memory body, and
+//	             print the CUDA out-of-memory lines (the server survives)
+//	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
+//	  loadfail   while present, every start fails while loading with a non-memory error
 package main
 
 import (
@@ -108,6 +117,13 @@ func recordBody(raw []byte) {
 	}
 }
 
+// printOOM prints what a CUDA llama-server prints when a compute allocation fails mid-run.
+func printOOM() {
+	fmt.Println("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 512.00 MiB on device 0: cudaMalloc failed: out of memory")
+	fmt.Println("ggml_gallocr_reserve_n: failed to allocate CUDA0 buffer of size 536870912")
+	fmt.Println("decode: failed to decode, ret = -3")
+}
+
 func main() {
 	hidden := map[string]bool{}
 	for _, h := range strings.Split(os.Getenv("FAKELLAMA_HIDE"), ",") {
@@ -184,7 +200,19 @@ func main() {
 		}
 	}
 	fmt.Println("fakellama: loading model", vals["-m"])
-	if above, _ := strconv.Atoi(os.Getenv("FAKELLAMA_OOM_ABOVE")); above > 0 && c > above {
+	if ctl != "" {
+		if _, err := os.Stat(filepath.Join(ctl, "loadfail")); err == nil {
+			fmt.Println("llama_model_load: error loading model: tensor 'blk.0.attn_q.weight' data is not within the file bounds")
+			os.Exit(1)
+		}
+	}
+	above, _ := strconv.Atoi(os.Getenv("FAKELLAMA_OOM_ABOVE"))
+	if ctl != "" {
+		if b, err := os.ReadFile(filepath.Join(ctl, "oom_above")); err == nil {
+			above, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		}
+	}
+	if above > 0 && c > above {
 		bpt, _ := strconv.Atoi(os.Getenv("FAKELLAMA_BYTES_PER_TOKEN"))
 		if bpt == 0 {
 			bpt = 52428
@@ -224,6 +252,21 @@ func main() {
 				fmt.Println("CUDA error: out of memory")
 				fmt.Println("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024.00 MiB on device 0: cudaMalloc failed: out of memory")
 				os.Exit(1)
+			}
+			if exists("crash") {
+				os.Remove(filepath.Join(ctl, "crash"))
+				fmt.Println("fakellama: Segmentation fault (core dumped)")
+				os.Exit(1)
+			}
+			if exists("oomlog") {
+				os.Remove(filepath.Join(ctl, "oomlog"))
+				printOOM()
+			}
+			if b, err := os.ReadFile(filepath.Join(ctl, "crashloop")); err == nil && time.Now().After(ready.Add(150*time.Millisecond)) {
+				if lim, _ := strconv.Atoi(strings.TrimSpace(string(b))); lim == 0 || c > lim {
+					fmt.Println("fakellama: GGML_ASSERT failed: illegal memory access")
+					os.Exit(1)
+				}
 			}
 		}
 	}()
@@ -278,6 +321,13 @@ func main() {
 		}
 		atomic.AddInt32(&inflight, 1)
 		defer atomic.AddInt32(&inflight, -1)
+		if exists("oomreq") {
+			printOOM()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			fmt.Fprint(w, `{"error":{"code":500,"message":"CUDA error: out of memory","type":"server_error"}}`)
+			return
+		}
 		var body struct {
 			Stream bool `json:"stream"`
 		}

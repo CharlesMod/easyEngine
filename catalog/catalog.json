@@ -447,5 +447,16 @@
         "gemma4e2b"
       ]
     }
+  ],
+  "agent_runtime": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "python": "3.12",
+      "peak_bytes": 126652416,
+      "keep_bytes": 126652416,
+      "measured_on": "2026-11-26 poe (Ubuntu 24.04, ext4): du -sB1 of a fresh runtime dir sampled every 0.2 s, 3 runs identical",
+      "measured_with": "uv 0.13.10, CPython 3.12.16, hermesvoice-agent 0.1.0 wheel (httpx, pydantic); python 109.4 MB, uv cache 16.8 MB, venv 11.3 MB hard-linked to the cache"
+    }
   ]
 }

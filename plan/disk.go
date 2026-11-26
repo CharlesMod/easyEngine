@@ -13,7 +13,7 @@ import (
 // count can see: the filesystem's own metadata for new files and directories. The plan's disk
 // verdict and every installer check use it through DiskNeed. Evidence for the figure is in
 // docs/ENGINE.md section 7a (measured on a fresh install).
-const DiskHeadroomMiB = 512
+const DiskHeadroomMiB = 125
 
 // diskBlock is the allocation unit the counts round each file up to (ext4 and NTFS default).
 const diskBlock = 4096

@@ -187,7 +187,8 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 			v.Limit, v.Why = whyNot(fp, room, w, err)
 		case need.Downloads() && hw.DiskFreeMiB > 0 && need.Short(int64(hw.DiskFreeMiB)<<20):
 			v.Fits, v.Shape, v.Limit = "no", sh, LimitDisk
-			v.Why = fmt.Sprintf("not enough free disk: %s, %s free", need.Explain(), GB(int64(hw.DiskFreeMiB)<<20))
+			free := int64(hw.DiskFreeMiB) << 20
+			v.Why = fmt.Sprintf("not enough free disk: %s, %s free (%s short)", need.Explain(), GB(free), GB(need.Total-free))
 		default:
 			v.Shape, v.EstVRAMMiB, v.EstRAMMiB, v.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 			v.Fits, v.Why = verdictFor(fp, sh, w)

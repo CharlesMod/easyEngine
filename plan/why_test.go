@@ -31,7 +31,7 @@ func TestPlanLimits(t *testing.T) {
 			"gemma4-e2b-q4km", LimitRAM, []string{"system RAM to run on the CPU", " 0 MiB available", "(no usable GPU)"}},
 		{"card too small, cpu ram", hwNvidia(4096, 300, 6000, "NVIDIA GeForce RTX 3050 Laptop GPU"), "gemma4-rp-maxxed-q3kxl", LimitRAM,
 			[]string{"system RAM to run on the CPU", "the card has under 2048 MiB left after the game's room"}},
-		{"disk", disk, "gemma4-rp-maxxed-q3kxl", LimitDisk, []string{"not enough free disk: needs 9.8 GB: model 9.3 GB, headroom ", "2.0 GB free"}},
+		{"disk", disk, "gemma4-rp-maxxed-q3kxl", LimitDisk, []string{"not enough free disk: needs ", "model 9.3 GB, headroom ", "2.0 GB free"}},
 	}
 	for _, tc := range cases {
 		v := verdicts(Plan(c, tc.hw, game, 2048, none))[tc.id]

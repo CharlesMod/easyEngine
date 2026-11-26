@@ -192,7 +192,7 @@ func (s *Supervisor) checkNeed(n plan.DiskNeed, what string) error {
 		return nil
 	}
 	if fb := int64(free) << 20; n.Short(fb) {
-		return fmt.Errorf("%w for %s: %s, %s free", ErrNoSpace, what, n.Explain(), plan.GB(fb))
+		return fmt.Errorf("%w for %s: %s, %s free (%s short)", ErrNoSpace, what, n.Explain(), plan.GB(fb), plan.GB(n.Total-fb))
 	}
 	return nil
 }

@@ -156,6 +156,7 @@ var entries = map[string]entry{
 	"UnreadError.Error":  {why: "an error's text"},
 	"KVTypeError.Error":  {why: "an error's text"},
 	"ConstError.Error":   {why: "an error's text"},
+	"FigureError.Error":  {why: "an error's text"},
 	"DefaultConsts":      {why: "the set written into the core; prices nothing"},
 }
 
@@ -201,6 +202,7 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 		unreadField string    // the *UnreadError expected
 		unknownType string    // the *KVTypeError expected
 		lackingSet  ConstName // the *ConstError expected
+		badFigure   string    // the *FigureError expected
 		priced      bool      // got must equal want
 		keepsBook   bool
 	}
@@ -215,6 +217,9 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 			delete(c.Of, MaskMiBPer1k)
 			f.fp.Consts = &c
 		}, lackingSet: MaskMiBPer1k, keepsBook: true},
+		{name: "an expansion above the compute that holds it", applies: func(e entry) bool { return e.fp && !e.name }, mod: func(f *feed) {
+			f.fp.DequantPerTokenMiB = f.fp.ComputePerTokenMiB + 0.01
+		}, badFigure: "DequantPerTokenMiB", keepsBook: true},
 		{name: "unknown type name", applies: func(e entry) bool { return e.name }, mod: func(f *feed) { f.kv = "q3_k" }, unknownType: "q3_k"},
 		{name: "a shape at a type not the seed's", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = f16; f.w.KVType = "f16" }, priced: true},
 		// A shape naming no type runs at the default (Args): every entry prices it there, with
@@ -240,7 +245,12 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 			var ue *UnreadError
 			var ke *KVTypeError
 			var ce *ConstError
+			var fe *FigureError
 			switch {
+			case c.badFigure != "":
+				if !errors.As(err, &fe) || fe.Name != c.badFigure {
+					t.Errorf("%s: %s answered %v, want %s refused", n, c.name, err, c.badFigure)
+				}
 			case c.unreadField != "":
 				if !errors.As(err, &ue) || ue.Field != c.unreadField {
 					t.Errorf("%s: %s answered %v, want the unread %s", n, c.name, err, c.unreadField)

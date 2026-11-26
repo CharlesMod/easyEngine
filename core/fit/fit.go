@@ -54,6 +54,13 @@ type KVTypeError struct{ Name string }
 
 func (e *KVTypeError) Error() string { return fmt.Sprintf("fit: unknown cache type %q", e.Name) }
 
+// FigureError means a footprint's per-token figure (Name) is one no footprint can hold (Rule): a
+// price from it would fall as ctx grows. It is never clamped and never priced; figures that hold
+// lift it.
+type FigureError struct{ Name, Rule string }
+
+func (e *FigureError) Error() string { return "fit: the footprint's " + e.Name + " " + e.Rule }
+
 // Basis says where a memory figure came from. Predicted: worked out from the header's seed and
 // the constants above (or from the seed corrected where the book took a reading). Measured: read
 // from a load of this model, card and backend that came up. "" is not said: a figure built by hand.
@@ -629,8 +636,9 @@ func runKV(s Shape) string {
 // (*UnreadError naming the first: never taken as zero); with wants, a largest block the
 // footprint cannot be held to (ErrNoWeights); wants it cannot resolve (ErrNoCtxTrain,
 // ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
-// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError); a
-// footprint whose set of constants lacks one (*ConstError: nil is the default set).
+// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError);
+// figures no footprint can hold (*FigureError, see coherent); a footprint whose set of constants
+// lacks one (*ConstError: nil is the default set).
 //
 // The figures are priced at the type the shape runs at where a shape is given (runKV: a shape's
 // "" is the default q4_0, with or without wants, as Args renders it), else at the wants' (the
@@ -689,11 +697,36 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	if err != nil {
 		return st, err
 	}
+	if err := coherent(*fp); err != nil {
+		return st, err
+	}
 	if f.c, err = readConsts(fp.Consts); err != nil {
 		return st, err
 	}
 	st.fp = f
 	return st, nil
+}
+
+// coherent refuses figures no footprint can hold. The invariant, which price keeps at every type:
+// the expansion is not below zero, and the compute less the expansion it holds (all of it at a
+// quantised type, none at another) is not below zero. Figures that name no type (measured
+// numbers) are taken as given: they are never priced at another type, nor the expansion read.
+// Only settle calls it.
+func coherent(fp Footprint) error {
+	if fp.KVType == "" {
+		return nil
+	}
+	compute := fp.ComputePerTokenMiB
+	if fp.DequantPerTokenMiB < 0 {
+		return &FigureError{Name: "DequantPerTokenMiB", Rule: "is below zero: the f16 expansion of a quantised cache is never negative"}
+	}
+	if quantised(fp.KVType) && fp.DequantPerTokenMiB > compute {
+		return &FigureError{Name: "DequantPerTokenMiB", Rule: "is above ComputePerTokenMiB: at a quantised type the compute holds the expansion"}
+	}
+	if compute < 0 {
+		return &FigureError{Name: "ComputePerTokenMiB", Rule: "is below zero: the compute that grows with ctx is never negative"}
+	}
+	return nil
 }
 
 // price is fp priced at cache type t: the per-token cache scales with the bytes per element and

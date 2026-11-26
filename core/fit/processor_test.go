@@ -1,6 +1,8 @@
 package fit
 
 import (
+	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -185,10 +187,11 @@ func TestLargestOfHostShapeIsNone(t *testing.T) {
 
 // The price of a token for a shape is said in one place, fig.perToken: the per-token terms that
 // differ between a card and a processor are read only there, by price (which prices the figures
-// at a type) and by the seeds that write them. A second spelling would price a shape apart from
+// at a type), by coherent (which refuses figures no footprint can hold) and by the seeds that
+// write them. A second spelling would price a shape apart from
 // Need. This reads the package's non-test source and fails on any other reading.
 func TestOnePriceOfAToken(t *testing.T) {
-	allowed := map[string]bool{"perToken": true, "price": true,
+	allowed := map[string]bool{"perToken": true, "price": true, "coherent": true,
 		"Seed": true, "SeedWith": true, "SeedFromBytes": true, "SeedFromBytesWith": true}
 	terms := map[string]bool{"ComputePerTokenMiB": true, "DequantPerTokenMiB": true}
 	paths, _ := filepath.Glob("*.go")
@@ -218,6 +221,72 @@ func TestOnePriceOfAToken(t *testing.T) {
 				}
 				return true
 			})
+		}
+	}
+}
+
+// The f16 expansion is part of the compute a token costs, so figures whose expansion is below zero
+// or above the compute that holds it cannot be true: a price from them would fall as ctx grows.
+// Every entry refuses them in settle, naming the figure, never priced.
+func TestIncoherentFiguresRefused(t *testing.T) {
+	fp := seed(denseInfo(), "q4_0")
+	fp.PerTokenMiB, fp.ComputePerTokenMiB, fp.DequantPerTokenMiB = 0.01, 0.01, 0.05
+	shapes := []Shape{
+		{Slots: 1, CtxPerSlot: 4096, KVType: "q4_0", CPUOnly: true},
+		{Slots: 1, CtxPerSlot: 131072, KVType: "q4_0", CPUOnly: true},
+		{Slots: 1, CtxPerSlot: 4096, KVType: "f16"},
+		{Slots: 1, CtxPerSlot: 131072, KVType: "f16"},
+	}
+	for _, s := range shapes {
+		v, r, err := fp.Need(s)
+		var fe *FigureError
+		if !errors.As(err, &fe) || fe.Name != "DequantPerTokenMiB" {
+			t.Errorf("%v at %s: priced %.1f card, %.1f host (%v), want the expansion refused", s, s.KVType, v, r, err)
+		}
+	}
+	f16 := seed(denseInfo(), "f16")
+	f16.DequantPerTokenMiB = -0.01
+	if _, _, err := f16.Need(shapes[0]); !errors.As(err, new(*FigureError)) {
+		t.Errorf("figures at f16 with the expansion below zero: %v, want refused", err)
+	}
+}
+
+// No producer makes figures settle refuses: every seed at every type, carried through JSON, the
+// book's overlay and a calibration's corrected fixed part, prices at every type, on a card and not.
+func TestProducersMakeCoherentFigures(t *testing.T) {
+	types := []string{"f16", "q8_0", "q4_0"}
+	var fps []Footprint
+	for _, in := range []gguf.Info{refInfo(), denseInfo(), hybridInfo()} {
+		for _, kv := range types {
+			fps = append(fps, seed(in, kv))
+		}
+	}
+	for _, kv := range types {
+		for _, moe := range []bool{false, true} {
+			fp, err := SeedFromBytes(10<<30, moe, kv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fps = append(fps, fp)
+		}
+	}
+	for i, fp := range fps {
+		b := &Book{}
+		s := Shape{Slots: 1, CtxPerSlot: 8192, KVType: fp.KVType}
+		if _, err := b.Calibrate("k", fp, s, int(fp.need(s))+300, stamp); err != nil {
+			t.Fatalf("%d: calibrate: %v", i, err)
+		}
+		raw, _ := json.Marshal(b.Footprint("k", fp))
+		var back Footprint
+		if err := json.Unmarshal(raw, &back); err != nil {
+			t.Fatal(err)
+		}
+		for _, kv := range types {
+			for _, cpu := range []bool{false, true} {
+				if _, _, err := back.Need(Shape{Slots: 1, CtxPerSlot: 65536, KVType: kv, CPUOnly: cpu}); err != nil {
+					t.Errorf("%d seeded at %s, at %s CPU-only %v: %v", i, fp.KVType, kv, cpu, err)
+				}
+			}
 		}
 	}
 }

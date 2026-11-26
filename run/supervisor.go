@@ -84,6 +84,8 @@ type Status struct {
 	ModelNote     string `json:"model_note,omitempty"`
 	// Sampler is the sampler policy mode and the profiles in force (docs/SAMPLERS.md).
 	Sampler SamplerInfo `json:"sampler"`
+	// Previous is the model the last switch replaced; its file is still on disk (run/switch.go).
+	Previous *PreviousInfo `json:"previous"`
 }
 
 // Parent is a watched parent process.
@@ -163,6 +165,8 @@ type Supervisor struct {
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
 	swapping  bool
+	removing  bool          // remove-downloads job running (storage.go)
+	stoCache  *storageCache // last complete storage walk
 
 	opMu sync.Mutex
 	srv  *server
@@ -270,6 +274,7 @@ func (s *Supervisor) Status() Status {
 	}
 	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
+	st.Previous = s.previousLocked()
 	return st
 }
 
@@ -390,7 +395,9 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	if err != nil {
 		return plan.PlanResult{}, err
 	}
-	return plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
+	res := plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
+	s.fillDisk(&res, cat)
+	return res, nil
 }
 
 func (s *Supervisor) modelPath(m catalog.Model) string { return filepath.Join(s.dir, "models", m.File) }

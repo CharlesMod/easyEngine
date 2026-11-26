@@ -31,6 +31,8 @@ type State struct {
 	// deleted once the target serves; a model that was already on disk is never deleted.
 	StarterOwned string   `json:"starter_owned,omitempty"`
 	Book         fit.Book `json:"book"`
+	// Previous is the catalog id of the model a switch replaced (its file is kept; run/switch.go).
+	Previous string `json:"previous,omitempty"`
 }
 
 func (s *State) defaults() {

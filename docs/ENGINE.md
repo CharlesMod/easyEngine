@@ -349,11 +349,15 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, sampler}`; `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler}`; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, fallback, fallback_note}], backend}` |
-| `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes}`; `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
+| `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
+| `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |
+| `GET storage[?refresh=1]` | what the engine keeps on disk (§7b): `{data_dir, total_bytes, free_bytes (-1 unknown), parts: [{name: "models"\|"backends"\|"runtime"\|"downloads"\|"logs", path, bytes}], models: [{file, id, bytes, in_use, partial}], approximate}` |
+| `POST remove-downloads {confirm: true}` | 202; job that deletes the downloaded files (§7b); 400 without `confirm: true`; 409 if one runs |
+| `POST delete-model {id\|file}` | deletes one file in `models/`: 200 `{freed_bytes}`, 404 no such file, 409 it is serving or downloading |
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
@@ -413,6 +417,35 @@ Status fields (all in `GET status`; `null` or `""` when nothing is staged):
 | `model_stage` | `""` (no staging), `starter_downloading`, `target_downloading`, `target_retrying`, `target_no_space`, `swapping`, `starter_serving` (upgrade cancelled or the target would not load), `target_serving` (the swap finished this run) |
 | `upgrade` | `{target, target_name, state, progress, error, attempt, retry_in_s}`; `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
 | `model_fallback`, `model_note` | also set while `model_tier` is `starter` (the starter's own `fallback_note`, else a generic sentence), the same warning idea as for a fallback model |
+
+### 7b. Storage, removing downloads, switching models
+
+Data dir layout: `state.json`, `models/` (`<file>.gguf`, partial `<file>.gguf.part`), `backends/`,
+`runtime/` (uv, venvs, python), `downloads/` (archives), `logs/`.
+
+- `GET storage` sizes each directory with a walk capped at 2 s (`approximate: true` when the cap
+  hit); complete results are cached 10 s, `?refresh=1` re-walks. `models[].in_use` is true for the
+  selected model, the target of a running download, and partial files while an install job runs.
+- `POST remove-downloads {confirm:true}` runs a job: cancels any install/upgrade, stops the agent
+  and llama-server, deletes the contents of `models/`, `backends/`, `runtime/`, `downloads/`
+  (symlinks and junctions are unlinked, never followed; nothing outside the data dir is touched;
+  `logs/` and `state.json` stay), clears `model`, `target`, `starter_owned`, `backend`, `previous`
+  and the fit book; mode, external, linger, kv_type and sampler_policy stay. Phase becomes
+  `not_installed` and `status.message` reads "Removed downloaded files (X GB freed)", plus the
+  paths that could not be deleted (a file still in use on Windows; each delete is retried for about a
+  second). `POST install` then works from scratch. Phase is `removing` while it runs and installs
+  answer 409.
+- `POST delete-model {id|file}` deletes one file in `models/` (and its `.part`). 409 when it is the
+  selected model or an active download. A plain file name only; no paths.
+- **Switching:** `POST install {model: B}` while A is ready and serving keeps A serving and
+  downloads B through the upgrade path (`status.upgrade` with `switch: true`, `model_stage`
+  `target_downloading`, ...), then swaps (A stopped, B started with a fresh fit). `model_tier`
+  stays `full` and no starter warning is set. If B is already on disk the swap is immediate. A is
+  never deleted; after the swap `status.previous` is `{id, name, file, bytes}` of A (null when A
+  was a first-run starter that was deleted, or after `delete-model` of it or the next switch).
+  `POST cancel` during the download keeps A serving and forgets B (`state.target` cleared). If there
+  is not enough disk the install answers 400 `not enough disk space for B: needs X GB, Y GB free`.
+  The CLI `install` command keeps the old, non-switching path.
 
 `status.progress` keeps showing the install job (the starter, or the model server); the target's
 download is `upgrade.progress`. `status.model` is the id of the model answering right now. A client

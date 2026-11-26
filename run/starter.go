@@ -119,7 +119,8 @@ func (s *Supervisor) stagingLocked(st *Status) {
 // machines that can run nothing else; its speech is too degraded to be anyone's first impression). nil: no starter (the target is already small, or it
 // is the smallest that fits, as on a CPU-only machine, or the starter would not fit the disk).
 func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, target catalog.Model) *catalog.Model {
-	res := plan.PlanSensed(cat, hw, s.wants(), s.measure(ctx, hw, s.ours.pids()).sum, s.modelInstalled)
+	need := func(m catalog.Model) plan.DiskNeed { return s.setupNeed(cat, hw, "", m) }
+	res := plan.PlanSensedDisk(cat, s.liveDisk(hw), s.wants(), s.measure(ctx, hw, s.ours.pids()).sum, s.modelInstalled, nil, need)
 	var best *catalog.Model
 	for _, v := range res.Models {
 		m, ok := cat.Model(v.ID)
@@ -137,36 +138,27 @@ func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw p
 	if best == nil {
 		return nil
 	}
-	if !s.modelInstalled(*best) {
-		if err := s.checkDisk(*best); err != nil {
-			s.logf("no starter: %v", err)
-			return nil
-		}
+	// The starter stays on disk while the target downloads: both must fit, with the rest.
+	if err := s.checkNeed(s.setupNeed(cat, hw, "", *best, target), best.Name+" first, then "+target.Name); err != nil {
+		s.logf("no starter: %v", err)
+		return nil
 	}
 	return best
 }
 
-// diskNeed is the free MiB a model still needs: its size minus what a partial download holds,
-// plus headroom.
-func (s *Supervisor) diskNeed(m catalog.Model) int {
-	left := m.Size
-	if st, err := os.Stat(s.modelPath(m) + ".part"); err == nil && st.Size() < left {
-		left -= st.Size()
+// diskNeed is what setting up m still needs from the current state (setupNeed with the
+// catalog and hardware at hand).
+func (s *Supervisor) diskNeed(m catalog.Model) plan.DiskNeed {
+	cat, err := s.catalog()
+	if err != nil {
+		return plan.NeedOf([]plan.DiskStep{plan.ModelStep(m.Name, m.Size, 0)}, s.logRoom(), s.hostFiles())
 	}
-	return int(left>>20) + plan.DiskHeadroomMiB
+	hw, _ := s.Hardware(s.root, false)
+	return s.setupNeed(cat, hw, "", m)
 }
 
-// checkDisk errors when the model does not fit in the free disk space.
-func (s *Supervisor) checkDisk(m catalog.Model) error {
-	free, err := s.cfg.DiskFree(s.dir)
-	if err != nil {
-		return nil // unknown: let the download find out
-	}
-	if need := s.diskNeed(m); free < need {
-		return fmt.Errorf("not enough disk space for %s: needs %d MiB free, %d MiB available", m.Name, need, free)
-	}
-	return nil
-}
+// checkDisk errors (ErrNoSpace) when setting up m does not fit in the free disk space.
+func (s *Supervisor) checkDisk(m catalog.Model) error { return s.checkNeed(s.diskNeed(m), m.Name) }
 
 // ---- upgrade bookkeeping ------------------------------------------------------------------
 

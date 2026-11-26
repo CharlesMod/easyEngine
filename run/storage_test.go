@@ -141,11 +141,17 @@ func TestPlanDiskFields(t *testing.T) {
 		}
 	}
 	// a partial download counts
+	var before int64
+	for _, v := range res.Models {
+		if v.ID == "target" {
+			before = v.DiskNeedBytes
+		}
+	}
 	os.WriteFile(filepath.Join(s.e.Data, "models", "target.gguf.part"), make([]byte, 100000), 0o644)
 	res, _ = sup.Plan(t.Context())
 	for _, v := range res.Models {
-		if v.ID == "target" && v.DiskNeedBytes >= int64(len(s.target))+512<<20 {
-			t.Errorf("partial not subtracted: %d", v.DiskNeedBytes)
+		if v.ID == "target" && before-v.DiskNeedBytes < 100000-4096 {
+			t.Errorf("partial not subtracted: %d before, %d after", before, v.DiskNeedBytes)
 		}
 	}
 }

@@ -20,14 +20,18 @@ import (
 var embedded []byte
 
 type Asset struct {
-	ID     string   `json:"id"`
-	OS     string   `json:"os"`   // linux | windows | darwin
-	Arch   string   `json:"arch"` // amd64 | arm64
-	Accel  string   `json:"accel,omitempty"`
-	URL    string   `json:"url"`
-	SHA256 string   `json:"sha256"`
-	Size   int64    `json:"size"`
-	Extra  []string `json:"extra,omitempty"` // ids of further assets unpacked into the same dir (cudart)
+	ID     string `json:"id"`
+	OS     string `json:"os"`   // linux | windows | darwin
+	Arch   string `json:"arch"` // amd64 | arm64
+	Accel  string `json:"accel,omitempty"`
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+	// UnpackedSize is the disk the unpacked archive takes, measured by gencatalog when it
+	// generates the catalog: every file rounded up to a 4 KiB block plus 4 KiB per directory
+	// (ext4 and NTFS allocate in 4 KiB clusters, so this is an upper bound there). 0 = unknown.
+	UnpackedSize int64    `json:"unpacked_size,omitempty"`
+	Extra        []string `json:"extra,omitempty"` // ids of further assets unpacked into the same dir (cudart)
 }
 
 type LlamaCpp struct {
@@ -111,6 +115,40 @@ type Catalog struct {
 	LlamaCpp LlamaCpp `json:"llamacpp"`
 	UV       []Asset  `json:"uv"`
 	Models   []Model  `json:"models"`
+	// AgentRuntime is the measured disk a fresh agent setup takes (managed Python, the uv
+	// cache and the agent's venv or site dir), per OS. It is a default: a profile's agent
+	// block may declare its own figure (run.AgentSpec.DiskBytes).
+	AgentRuntime []RuntimeSize `json:"agent_runtime,omitempty"`
+}
+
+// RuntimeSize is one measured agent setup: the peak extra disk while it installs and what
+// stays after. Measured by a real install (tools/gencatalog/runtime.json says how and when).
+type RuntimeSize struct {
+	OS           string `json:"os"`
+	Arch         string `json:"arch"`
+	Python       string `json:"python"`
+	PeakBytes    int64  `json:"peak_bytes"`
+	KeepBytes    int64  `json:"keep_bytes"`
+	MeasuredOn   string `json:"measured_on"`   // date and machine
+	MeasuredWith string `json:"measured_with"` // the wheel and uv version measured
+}
+
+// RuntimeFor returns the measured agent setup for an OS/arch, falling back to the same OS on
+// another arch.
+func (c *Catalog) RuntimeFor(goos, goarch string) (RuntimeSize, bool) {
+	var alt *RuntimeSize
+	for i, r := range c.AgentRuntime {
+		if r.OS == goos && r.Arch == goarch {
+			return r, true
+		}
+		if r.OS == goos && alt == nil {
+			alt = &c.AgentRuntime[i]
+		}
+	}
+	if alt != nil {
+		return *alt, true
+	}
+	return RuntimeSize{}, false
 }
 
 // Parse decodes and sanity-checks a catalog document.

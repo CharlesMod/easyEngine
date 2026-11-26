@@ -1,0 +1,20 @@
+[
+  {
+    "os": "linux",
+    "arch": "amd64",
+    "python": "3.12",
+    "peak_bytes": 126652416,
+    "keep_bytes": 126652416,
+    "measured_on": "2026-11-26 poe (Ubuntu 24.04, ext4): du -sB1 of a fresh runtime dir sampled every 0.2 s, 3 runs identical",
+    "measured_with": "uv 0.13.10, CPython 3.12.16, hermesvoice-agent 0.1.0 wheel (httpx, pydantic); python 109.4 MB, uv cache 16.8 MB, venv 11.3 MB hard-linked to the cache"
+  },
+  {
+    "os": "windows",
+    "arch": "amd64",
+    "python": "3.12",
+    "peak_bytes": 106545152,
+    "keep_bytes": 106545152,
+    "measured_on": "2026-11-26 DESKTOP (Windows 11, NTFS): files of a fresh engine install's runtime dir rounded up to 4 KiB plus a 1 KiB MFT record each; the dir grew monotonically while sampled every second",
+    "measured_with": "uv 0.13.10, CPython 3.12.16 (uv python install --no-bin), hermesvoice-agent 0.1.0 wheel into site/ (no venv); python 73.0 MB, uv cache 17.3 MB, site 11.9 MB, 4284 files"
+  }
+]

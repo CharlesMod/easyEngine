@@ -434,7 +434,8 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 		return plan.PlanResult{}, err
 	}
 	sn := s.measure(ctx, hw, s.ours.pids())
-	res := plan.PlanSensed(cat, hw, s.wants(), sn.sum, s.modelInstalled)
+	need := func(m catalog.Model) plan.DiskNeed { return s.setupNeed(cat, hw, "", m) }
+	res := plan.PlanSensedDisk(cat, s.liveDisk(hw), s.wants(), sn.sum, s.modelInstalled, nil, need)
 	res.GPU = sn.report()
 	s.mu.Lock()
 	running, be := s.device, s.st.Backend

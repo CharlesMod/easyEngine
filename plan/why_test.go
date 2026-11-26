@@ -31,7 +31,7 @@ func TestPlanLimits(t *testing.T) {
 			"gemma4-e2b-q4km", LimitRAM, []string{"system RAM to run on the CPU", " 0 MiB available", "(no usable GPU)"}},
 		{"card too small, cpu ram", hwNvidia(4096, 300, 6000, "NVIDIA GeForce RTX 3050 Laptop GPU"), "gemma4-rp-maxxed-q3kxl", LimitRAM,
 			[]string{"system RAM to run on the CPU", "the card has under 2048 MiB left after the game's room"}},
-		{"disk", disk, "gemma4-rp-maxxed-q3kxl", LimitDisk, []string{"MiB of free disk for the download, 2000 MiB available"}},
+		{"disk", disk, "gemma4-rp-maxxed-q3kxl", LimitDisk, []string{"not enough free disk: needs ", "model 9.3 GB, headroom ", "2.0 GB free"}},
 	}
 	for _, tc := range cases {
 		v := verdicts(Plan(c, tc.hw, game, 2048, none))[tc.id]
@@ -88,8 +88,8 @@ func TestWhyNotEachLimit(t *testing.T) {
 	}
 }
 
-// The plan's disk verdict uses the installer's headroom (DiskHeadroomMiB): a disk the installer
-// would accept is not refused by the plan, and one MiB less is.
+// The plan's disk verdict uses the installer's count (DiskNeed, with DiskHeadroomMiB): a disk the
+// installer would accept is not refused by the plan, and one MiB less is.
 func TestPlanDiskHeadroomMatchesInstaller(t *testing.T) {
 	c := testCatalog()
 	none := func(catalog.Model) bool { return false }
@@ -104,7 +104,12 @@ func TestPlanDiskHeadroomMatchesInstaller(t *testing.T) {
 		t.Fatalf("%s not in the test catalog", id)
 	}
 	hw := hwNvidia(24576, 300, 60000, "Tesla P40")
-	hw.DiskFreeMiB = int(size/mib) + DiskHeadroomMiB
+	m, _ := c.Model(id)
+	need := ModelOnlyNeed(m).Total
+	if need < size+DiskHeadroomMiB<<20 {
+		t.Fatalf("need %d is under size+headroom", need)
+	}
+	hw.DiskFreeMiB = int((need + mib - 1) / mib) // the installer's free MiB at exactly the need
 	if v := verdicts(Plan(c, hw, game, 2048, none))[id]; v.Limit == LimitDisk {
 		t.Errorf("exactly size+headroom free: refused for disk (%s)", v.Why)
 	}

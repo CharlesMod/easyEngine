@@ -236,7 +236,8 @@ type Footprint struct {
 
 	// KVType is the cache type the per-token terms are priced at; "" when they cannot be priced
 	// at another (measured numbers). DequantPerTokenMiB is the part of ComputePerTokenMiB a
-	// quantised cache adds (the f16 expansion of the widest layer), whatever KVType is.
+	// quantised cache adds on a card (the f16 expansion of the widest layer), whatever KVType is;
+	// a run with no card prices none (settle).
 	KVType             string  `json:"kv_type"`
 	DequantPerTokenMiB float64 `json:"dequant_per_token_mib"`
 	// WeightsMiB is the weights on the card with no expert moved (one allocation); 0 = unknown.
@@ -683,7 +684,17 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	if fp.KVType == "" && len(st.w.KVTypes) == 0 {
 		t = "" // measured figures: taken as given
 	}
-	f, err := price(*fp, t)
+	src := *fp
+	if fp.KVType != "" && ((room != nil && room.NoGPU) || (s != nil && s.CPUOnly)) {
+		// No card: a processor lays no f16 expansion of a quantised cache, so none is priced at
+		// any type (neither price nor fig.at can add it back). This is the one place that decides
+		// it; a card's figures, and measured figures taken as given, must never lose the term.
+		if quantised(src.KVType) {
+			src.ComputePerTokenMiB -= src.DequantPerTokenMiB
+		}
+		src.DequantPerTokenMiB = 0
+	}
+	f, err := price(src, t)
 	if err != nil {
 		return st, err
 	}

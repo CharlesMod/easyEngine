@@ -65,7 +65,7 @@ func TestWantsAndRoomTable(t *testing.T) {
 		{name: "most ctx from the model: the header does not say it", fp: ref, room: room(16303, 1255, 24000), w: fromModel, err: ErrNoCtxTrain},
 		// 4. the room as given
 		{name: "no GPU, 12000 free: today's 2048 reserve leaves too little", fp: ref, room: Room{NoGPU: true, RAMAvail: 12000}, w: game, err: ErrTooBig},
-		{name: "no GPU, 12000 free, reserve 512", fp: ref, room: reserve(Room{NoGPU: true, RAMAvail: 12000}, 512), w: game, want: want{3, 39936, 0, "q4_0", true}},
+		{name: "no GPU, 12000 free, reserve 512", fp: ref, room: reserve(Room{NoGPU: true, RAMAvail: 12000}, 512), w: game, want: want{3, 65536, 0, "q4_0", true}},
 		{name: "8GB card, 7000 RAM: with today's reserve the experts do not fit in RAM", fp: ref, room: room(8192, 600, 7000), w: game, err: ErrTooBig},
 		{name: "8GB card, 7000 RAM, no reserve", fp: ref, room: reserve(room(8192, 600, 7000), -1), w: game, want: want{3, 17408, 22, "q4_0", false}},
 		{name: "margin unset is the default margin", fp: ref, room: margin(room(16303, 2800, 24000), 0), w: game, want: want{3, 35840, 0, "q4_0", false}},

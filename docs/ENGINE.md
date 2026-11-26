@@ -167,7 +167,10 @@ A source that is missing degrades the picture and never fails it (`Picture.Sourc
 
 `plan.MeasureReserve(picture, hardware, host, estimate)` turns a picture into the reserve the
 room is built from. The engine runs on one adapter **E**: the discrete one with the most
-dedicated memory; an integrated one only when there is no discrete adapter.
+dedicated memory (of equal cards the emptier); an integrated one only when there is no discrete
+adapter. A discrete card's capacity is the probe's total where the probe lists it (nvidia-smi on
+NVIDIA: the figure the footprints and thresholds were set against; DXGI reports 3965 MiB for a
+4096 MiB laptop 3050), else the sensed dedicated memory.
 
 | Part | Rule |
 |---|---|
@@ -175,7 +178,8 @@ dedicated memory; an integrated one only when there is no discrete adapter.
 | `host` | 0 when the host renders on another adapter (`other-adapter`); else the larger of what the host measurably holds on E and the estimate (`measured` when above it, else `estimate`); an unknown host adapter holds the estimate |
 | `margin` | `fit.DefaultMargin`, unchanged |
 
-The host's adapter is where its pid holds memory (the most), else the one the profile or
+The host's adapter is where its pid holds memory (the most, dedicated plus shared: on an
+integrated adapter a renderer holds shared memory only), else the one the profile or
 `POST host` names (matched by vendor id and name, case-insensitive substring either way), else
 unknown. The estimate is the profile's `game_reserve_mib`, or `reserve_mib` of the last `POST
 host`. The result is a `GPUSummary` (adapters, `engine_adapter` (-1 = CPU), `host_adapter` (-1

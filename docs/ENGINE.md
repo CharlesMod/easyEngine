@@ -200,7 +200,8 @@ GPU adapter, a Metal or a CPU build, nothing is added (its default is that one d
   shows llama-server that card alone as `CUDA0`, whatever order it would number the cards in
   (CUDA's default order is fastest first, not nvidia-smi's PCI order, so an index is never
   guessed). The pin is confirmed by `--list-devices` under it: exactly one CUDA device, else it is
-  dropped and the card matched by name as below. A `CUDA_VISIBLE_DEVICES` already in the engine's
+  dropped and the card matched by name as below (a `--list-devices` that does not answer within
+  the smoke test's limit says nothing against the UUID, which then stands). A `CUDA_VISIBLE_DEVICES` already in the engine's
   environment is the user's and is kept.
 - Otherwise (Vulkan; CUDA without a UUID): `--device <name>` (`Vulkan1`, `CUDA0`), the device in
   llama-server's own `--list-devices` whose name is E's (case and "(R)"/"(TM)" ignored), else the

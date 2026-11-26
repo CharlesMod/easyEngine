@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"hermesengine/plan"
 	"hermesengine/probe/gpusense"
@@ -16,32 +15,37 @@ import (
 
 var listCache sync.Map // bin + "\x00" + extra env -> []plan.ListedDevice
 
-var listDevicesTimeout = 60 * time.Second
+// listDevicesTimeout is smokeTest's: a first CUDA run on Windows may wait on the antivirus.
+var listDevicesTimeout = smokeDevicesTimeout
 
 // listDevices is llama-server's --list-devices under the extra env, read once per binary and env
-// (the devices a build sees do not change while it is installed). An empty, non-nil list when it
-// could not be read.
-func listDevices(bin string, extra []string) []plan.ListedDevice {
+// (the devices a build sees do not change while it is installed). ok is false when it could not
+// be run (not cached: the next start tries again); the list is then empty, not nil.
+func listDevices(bin string, extra []string) (ds []plan.ListedDevice, ok bool) {
 	key := bin + "\x00" + strings.Join(extra, "\x00")
 	if v, ok := listCache.Load(key); ok {
-		return v.([]plan.ListedDevice)
+		return v.([]plan.ListedDevice), true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), listDevicesTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "--list-devices")
 	cmd.Dir = filepath.Dir(bin)
 	cmd.Env = llamaEnv(bin, extra)
-	out, _ := cmd.CombinedOutput()
-	ds := plan.ParseListDevices(string(out))
+	out, err := cmd.CombinedOutput()
+	ds = plan.ParseListDevices(string(out))
 	if ds == nil {
 		ds = []plan.ListedDevice{}
 	}
+	if err != nil {
+		return ds, false
+	}
 	listCache.Store(key, ds)
-	return ds
+	return ds, true
 }
 
 // resolvePin holds llama-server to the adapter the plan picked (plan.PinDevice), checked against
-// the binary itself: a CUDA pin by UUID must leave exactly one CUDA device, a --device pin needs a
+// the binary itself: a CUDA pin by UUID must leave exactly one CUDA device (where --list-devices
+// answers at all; where it does not, the UUID stands), a --device pin needs a
 // binary that knows --device. Whatever cannot be confirmed falls back to llama-server's own
 // default devices, with the reason in the note; a start never fails for it. extra is the env the
 // engine adds (tests); a CUDA_VISIBLE_DEVICES already in the engine's environment is the user's
@@ -55,7 +59,7 @@ func resolvePin(bin, accel string, sum gpusense.GPUSummary, extra []string, know
 	}
 	var listed []plan.ListedDevice
 	if (accel == "cuda" || accel == "vulkan") && gpus > 1 && sum.EngineAdapter >= 0 {
-		listed = listDevices(bin, extra)
+		listed, _ = listDevices(bin, extra)
 	}
 	var prefix []string
 	if accel == "cuda" {
@@ -67,14 +71,18 @@ func resolvePin(bin, accel string, sum gpusense.GPUSummary, extra []string, know
 	p := plan.PinDevice(sum, accel, listed)
 	if p.Pinned && p.Via == "uuid" {
 		var cuda []plan.ListedDevice
-		for _, d := range listDevices(bin, append(append([]string{}, extra...), p.Env...)) {
+		ds, ran := listDevices(bin, append(append([]string{}, extra...), p.Env...))
+		for _, d := range ds {
 			if strings.HasPrefix(d.Name, "CUDA") {
 				cuda = append(cuda, d)
 			}
 		}
-		if len(cuda) == 1 {
+		switch {
+		case !ran: // nothing said against nvidia-smi's UUID: the pin stands
+			p.Note += " (not confirmed: llama-server --list-devices did not answer)"
+		case len(cuda) == 1:
 			p.Device = cuda[0].Name
-		} else {
+		default:
 			prefix = append(prefix, fmt.Sprintf("%s left llama-server %d CUDA devices", p.Env[0], len(cuda)))
 			p = plan.PinDevice(withoutUUID(sum), accel, listed)
 		}

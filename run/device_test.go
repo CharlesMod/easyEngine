@@ -82,3 +82,16 @@ func TestResolvePinOneCardListsNothing(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+// --list-devices that does not answer says nothing against the UUID: the pin stands.
+func TestResolvePinUnconfirmedUUIDStands(t *testing.T) {
+	t.Setenv("CUDA_VISIBLE_DEVICES", "")
+	bin := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := resolvePin(bin, "cuda", twoP40s(1), nil, allKnown)
+	if !p.Pinned || p.Env[0] != "CUDA_VISIBLE_DEVICES=GPU-cca6" || !strings.Contains(p.Note, "not confirmed") {
+		t.Fatalf("%+v", p)
+	}
+}

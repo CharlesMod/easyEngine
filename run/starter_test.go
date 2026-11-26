@@ -150,6 +150,46 @@ func TestStarterThenTargetSwap(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(s.e.Data, "models", "target.gguf")); err != nil {
 		t.Error(err)
 	}
+	if _, err := os.Stat(filepath.Join(s.e.Data, "models", "starter.gguf")); !os.IsNotExist(err) {
+		t.Errorf("the starter we downloaded should be deleted after the swap (stat err %v)", err)
+	}
+	if ss := run.LoadState(s.e.Data); ss.StarterOwned != "" {
+		t.Errorf("starter_owned not cleared: %+v", ss)
+	}
+}
+
+func TestStarterAlreadyOnDiskIsKeptAfterSwap(t *testing.T) {
+	s := newStage(t)
+	os.MkdirAll(filepath.Join(s.e.Data, "models"), 0o755)
+	if err := os.WriteFile(filepath.Join(s.e.Data, "models", "starter.gguf"), s.starter, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sup := s.start(t)
+	if err := sup.Install("target", ""); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, sup, "starter serving", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "starter" })
+	s.release()
+	waitStatus(t, sup, "swap to the target", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "target" })
+	if _, err := os.Stat(filepath.Join(s.e.Data, "models", "starter.gguf")); err != nil {
+		t.Errorf("a model that was on disk before must be kept: %v", err)
+	}
+}
+
+func TestFallbackModelIsNeverTheStarter(t *testing.T) {
+	s := newStage(t)
+	tiny := []byte(strings.Repeat("tiny", 100))
+	s.cat.Models = append(s.cat.Models, catalog.Model{ID: "tiny", Name: "Tiny", File: "tiny.gguf", URL: s.hs.URL + "/tiny.gguf",
+		SHA256: sum(tiny), Size: int64(len(tiny)), Quality: 10, Fallback: true, FallbackNote: "small"})
+	s.e.Cat = s.cat
+	sup := s.start(t)
+	if err := sup.Install("target", ""); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, sup, "the non-fallback starter serving", func(st run.Status) bool {
+		return st.Phase == "ready" && st.Model == "starter" && st.ModelTier == "starter"
+	})
+	s.release()
 }
 
 func TestSwapWaitsForRequestsInFlight(t *testing.T) {

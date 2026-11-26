@@ -145,6 +145,9 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID)); err != nil {
 					return err
 				}
+				s.mu.Lock()
+				s.st.StarterOwned = serve.ID // ours to delete after the swap
+				s.mu.Unlock()
 			}
 		} else {
 			if err := s.checkDisk(m); err != nil {

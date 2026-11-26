@@ -27,6 +27,9 @@ type State struct {
 	Backend       string `json:"backend"`
 	// Target is the model a first run is still upgrading to while a smaller starter serves (run/starter.go).
 	Target string   `json:"target,omitempty"`
+	// StarterOwned is the starter model this engine downloaded only to bridge a first run. It is
+	// deleted once the target serves; a model that was already on disk is never deleted.
+	StarterOwned string `json:"starter_owned,omitempty"`
 	Book   fit.Book `json:"book"`
 }
 

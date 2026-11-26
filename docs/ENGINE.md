@@ -307,8 +307,9 @@ Downloading the 10 GB reference model takes much longer than a player will wait 
 line, so a first install stages it:
 
 1. `POST install {model}` where `model` (the **target**) is not on disk: the engine also picks a
-   **starter**, the smallest installable catalog model that fits this machine (verdict not "no")
-   and is at most half the target's size (normally gemma4-e2b-q4km, 2-3 GB), with room on disk. It
+   **starter**, the smallest installable catalog model that fits this machine (verdict not "no"),
+   is at most half the target's size and is **not a fallback model** (normally gemma4-e4b, about
+   3.6-5 GB; a fallback such as E2B is too degraded to be a first impression), with room on disk. It
    downloads the starter first, starts serving it (`phase` goes `ready` as usual) and downloads
    the target in the background (same resume and sha256 rules as any download).
 2. When the target is on disk and verified, the engine **swaps** at a safe moment: it waits until
@@ -322,7 +323,10 @@ line, so a first install stages it:
 4. No starter when: the target is already on disk; the target is the smallest that fits (a
    CPU-only machine picks the smallest) or less than twice the next smaller model; the starter
    would not fit the disk; the install runs from the CLI (`hermes-engine install` exits with the
-   job and never stages). The starter file stays on disk after the swap.
+   job and never stages); the only smaller model is a fallback (so a target of E4B downloads
+   alone).
+   After a successful swap the starter's file is **deleted**, but only when this engine downloaded
+   it for the first run (`state.json` `starter_owned`); a model already on disk is kept.
 5. Failures never touch what serves. A failed or corrupt target download (sha256 mismatch drops
    the `.part`) is retried with backoff (`UpgradeBackoff` 30 s doubling to 15 min); a partial
    `.part` resumes with HTTP Range. If the free disk space (less the `.part` already held, plus

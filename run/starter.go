@@ -108,15 +108,16 @@ func (s *Supervisor) stagingLocked(st *Status) {
 	}
 }
 
-// pickStarter chooses the smallest installable catalog model that fits this machine and is at
-// most 1/starterRatio the size of the target. nil: no starter (the target is already small, or it
+// pickStarter chooses the smallest installable catalog model that fits this machine, is at most
+// 1/starterRatio the size of the target, and is not a fallback model (a fallback is only there for
+// machines that can run nothing else; its speech is too degraded to be anyone's first impression). nil: no starter (the target is already small, or it
 // is the smallest that fits, as on a CPU-only machine, or the starter would not fit the disk).
 func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, target catalog.Model) *catalog.Model {
 	res := fit.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
 	var best *catalog.Model
 	for _, v := range res.Models {
 		m, ok := cat.Model(v.ID)
-		if !ok || m.ID == target.ID || m.URL == "" || v.Fits == "no" {
+		if !ok || m.ID == target.ID || m.URL == "" || v.Fits == "no" || m.Fallback {
 			continue
 		}
 		if m.Size*starterRatio > target.Size {
@@ -357,12 +358,14 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	s.save()
 	if stopped || s.Phase() == "sleeping" {
 		s.finishSwap(upDone, "")
+		s.dropStarter(starterID, target.ID)
 		s.setPhase("sleeping", "Stopped")
 		return
 	}
 	err := s.startLocked()
 	if err == nil && s.Phase() == "ready" {
 		s.finishSwap(upDone, "")
+		s.dropStarter(starterID, target.ID)
 		return
 	}
 	msg := "the full model would not load"
@@ -377,6 +380,35 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	s.stopServerLocked()
 	s.finishSwap(upFailed, msg)
 	s.startLocked()
+}
+
+// dropStarter deletes the starter's model file once the target serves, but only when this engine
+// downloaded it for the first run (state.StarterOwned) and nothing else uses it.
+func (s *Supervisor) dropStarter(starterID, targetID string) {
+	s.mu.Lock()
+	owned := s.st.StarterOwned
+	s.st.StarterOwned = ""
+	s.mu.Unlock()
+	s.save()
+	if owned == "" || owned != starterID || owned == targetID {
+		return
+	}
+	cat, err := s.catalog()
+	if err != nil {
+		s.logf("starter %s kept: %v", owned, err)
+		return
+	}
+	m, ok := cat.Model(owned)
+	if !ok {
+		return
+	}
+	p := s.modelPath(m)
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		s.logf("starter %s kept: %v", owned, err)
+		return
+	}
+	os.Remove(p + ".part")
+	s.logf("removed starter %s (%d MiB) now that %s serves", owned, m.Size>>20, targetID)
 }
 
 func (s *Supervisor) finishSwap(state, errMsg string) {

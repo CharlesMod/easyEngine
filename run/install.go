@@ -21,8 +21,17 @@ import (
 
 func (s *Supervisor) jobProgress(step string) func(fetch.Progress) {
 	return func(p fetch.Progress) {
-		s.setProgress(step, &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds())})
+		s.setProgress(stepLabel(step, p), &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds())})
 	}
+}
+
+// stepLabel keeps fetch's "verifying" pass visible: after a download the file is hashed and the
+// byte count starts again from zero, which would read as the download going backwards.
+func stepLabel(step string, p fetch.Progress) string {
+	if p.Step == "verifying" {
+		return "verifying " + step
+	}
+	return step
 }
 
 // Install starts the install job: backend, then model, then uv and the agent.

@@ -283,7 +283,7 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.retryAt = upDownloading, "", time.Time{} })
 			err = fetch.Download(ctx, target.URL, s.modelPath(target), target.SHA256, target.Size, func(p fetch.Progress) {
 				s.setUpgrade(func(u *upgrade) {
-					u.progress = &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds()), Step: "model " + target.ID}
+					u.progress = &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds()), Step: stepLabel("model "+target.ID, p)}
 				})
 			})
 			if err == nil {

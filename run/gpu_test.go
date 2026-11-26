@@ -45,7 +45,7 @@ func (f *senseFake) sense(ctx context.Context, ours []int, host int) gpusense.Pi
 	}
 	return gpusense.Picture{
 		Adapters: []gpusense.Adapter{
-			{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "Fake GPU", DedicatedMiB: 16384, UsedMiB: o + 15000},
+			{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "Fake GPU", DedicatedMiB: 16384, UsedMiB: o + 15000*len(ours)},
 			{Index: 1, Vendor: "intel", VendorID: 0x8086, Name: "Intel(R) Iris(R) Xe Graphics", DedicatedMiB: 128, SharedMiB: 8000, UsedMiB: 100, Integrated: true},
 		},
 		Processes: procs, Sources: map[string]string{"fake": "ok"},

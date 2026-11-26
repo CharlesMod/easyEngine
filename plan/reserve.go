@@ -128,7 +128,9 @@ func capacity(a gpusense.Adapter, hw probe.Hardware) int {
 // MeasureReserve is the reserve the engine plans around, measured from a picture of the
 // adapters (gpusense.Sense) instead of guessed. The engine runs on one adapter E (pickEngine).
 //
-//	others = what processes neither ours nor the host hold on E (basis "processes"); where no
+//	others = what processes neither ours nor the host hold on E (basis "processes"), or the
+//	         card's used memory less ours and the host's where that is more (driver contexts and
+//	         processes the sense cannot see); where no
 //	         process is listed on E, the card's used memory less ours ("card"); a pooled adapter
 //	         (unified or integrated) counts the pool's memory the rest of the system holds
 //	host   = 0 when the host renders on another adapter ("other-adapter"); else the larger of
@@ -178,6 +180,15 @@ func MeasureReserve(pic gpusense.Picture, hw probe.Hardware, host HostInfo, esti
 		}
 	case len(procs) > 0:
 		sum.Reserve.OthersBasis = "processes"
+		if e.UsedMiB >= 0 { // the card's own count also holds what no listed process accounts for
+			hostHeld := 0
+			for _, p := range procs {
+				if !p.Ours && isHost(p) {
+					hostHeld += p.DedicatedMiB
+				}
+			}
+			others = max(others, e.UsedMiB-ours-hostHeld)
+		}
 	case e.UsedMiB >= 0:
 		sum.Reserve.OthersBasis = "card"
 		others = max(e.UsedMiB-ours, 0)

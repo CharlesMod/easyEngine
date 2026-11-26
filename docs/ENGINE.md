@@ -171,7 +171,7 @@ dedicated memory; an integrated one only when there is no discrete adapter.
 
 | Part | Rule |
 |---|---|
-| `others` | what processes on E hold that are neither the engine's own nor the host's (basis `processes`); with no process listed on E, the card's used memory less ours (`card`); on a pooled adapter (below) the memory the rest of the system holds (`card`) |
+| `others` | what processes on E hold that are neither the engine's own nor the host's (basis `processes`), or the card's used memory less ours and the host's where that is more (driver contexts, processes the sense cannot see); with no process listed on E, the card's used memory less ours (`card`); on a pooled adapter (below) the memory the rest of the system holds (`card`) |
 | `host` | 0 when the host renders on another adapter (`other-adapter`); else the larger of what the host measurably holds on E and the estimate (`measured` when above it, else `estimate`); an unknown host adapter holds the estimate |
 | `margin` | `fit.DefaultMargin`, unchanged |
 

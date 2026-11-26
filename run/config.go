@@ -38,6 +38,10 @@ type Profile struct {
 	// Samplers are the game's own named sampler profiles. A request names one with the
 	// X-Hermes-Sampler header; a name here also replaces the model's profile of that name.
 	Samplers map[string]catalog.SamplerProfile `json:"samplers,omitempty"`
+	// HostFilesMiB is how far the host's own files may still grow on the engine's disk (for
+	// example the agent's call log: its cap times the copies it keeps). Every disk check counts
+	// it in full, so a setup never fills the disk the host still writes to. 0 = none declared.
+	HostFilesMiB int `json:"host_files_mib,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.
@@ -52,6 +56,9 @@ type AgentSpec struct {
 	// LLMURLEnv names the variable that carries the engine URL
 	// (default HERMESVOICE_LLM_URL, per ENGINE.md section 8).
 	LLMURLEnv string `json:"llm_url_env,omitempty"`
+	// DiskBytes is the measured disk the agent's setup takes (managed Python, uv cache, venv or
+	// site dir) at its peak; 0 uses the catalog's measurement for the OS (agent_runtime).
+	DiskBytes int64 `json:"disk_bytes,omitempty"`
 }
 
 // LoadProfile reads a profile file; an empty path gives the defaults.

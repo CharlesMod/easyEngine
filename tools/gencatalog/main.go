@@ -2,7 +2,14 @@
 // (llama.cpp, uv) and the Hugging Face API (stock models). Hashes are never typed by hand:
 // they come from the API's asset digest, the LFS object id, or a download-and-hash.
 //
-//	go run ./tools/gencatalog -out catalog/catalog.json
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 8 -llama-tag b12651 -uv-tag 0.13.10
+//
+// Flags: -llama-tag and -uv-tag pin the llama.cpp build and the uv release (default: newest);
+// -cache DIR (default $HOME/.cache/gencatalog) keeps every downloaded archive as <sha256>.<ext>
+// and its measured unpacked size as <sha256>.unpacked, so a rerun neither downloads nor unpacks
+// again; -measured-only re-attaches measured.json and runtime.json to an existing catalog with no
+// network. Each asset gets unpacked_size: the archive is unpacked, every regular file is counted
+// rounded up to 4 KiB, plus 4 KiB per directory (the root too) and per symlink.
 package main
 
 import (
@@ -14,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +33,7 @@ import (
 	"time"
 
 	"hermesengine/catalog"
+	"hermesengine/fetch"
 )
 
 // The reference build is published on Hugging Face by the keeper; its sha256 is checked against
@@ -41,6 +50,21 @@ const (
 //
 //go:embed measured.json
 var measuredJSON []byte
+
+// runtime.json is the checked-in measured agent setup sizes (a JSON array of catalog.RuntimeSize),
+// carried into every catalog like measured.json.
+//
+//go:embed runtime.json
+var runtimeJSON []byte
+
+// loadRuntime parses runtime.json.
+func loadRuntime(b []byte) ([]catalog.RuntimeSize, error) {
+	var r []catalog.RuntimeSize
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil, fmt.Errorf("runtime.json: %w", err)
+	}
+	return r, nil
+}
 
 // loadMeasured parses measured.json.
 func loadMeasured(b []byte) (map[string]catalog.Footprint, error) {
@@ -92,6 +116,140 @@ type client struct {
 	http  *http.Client
 	token string
 	log   func(string, ...any)
+	cache string // archive and unpacked-size cache dir; "" = no unpacked sizes (offline tests)
+}
+
+const block = 4096
+
+func roundUp(n int64) int64 { return (n + block - 1) / block * block }
+
+// allocSize is the disk a tree takes: every regular file rounded up to 4 KiB, plus 4 KiB for
+// every directory (root included) and every symlink.
+func allocSize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir(), d.Type()&fs.ModeSymlink != 0:
+			total += block
+		case d.Type().IsRegular():
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			total += roundUp(fi.Size())
+		}
+		return nil
+	})
+	return total, err
+}
+
+// archiveExt returns .zip or .tar.gz from a URL's path.
+func archiveExt(u string) (string, error) {
+	p := strings.ToLower(u)
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	switch {
+	case strings.HasSuffix(p, ".zip"):
+		return ".zip", nil
+	case strings.HasSuffix(p, ".tar.gz"):
+		return ".tar.gz", nil
+	}
+	return "", fmt.Errorf("unknown archive type in %s", u)
+}
+
+func fileSHA(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// download fetches u into dst (via a temp file in the same dir) and returns its sha256.
+func (c *client) download(u, dst string) (string, error) {
+	c.log("downloading %s", u)
+	resp, err := c.get(u)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	f, err := os.CreateTemp(filepath.Dir(dst), "dl-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(f.Name())
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(f, h), resp.Body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return "", err
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	return sum, os.Rename(f.Name(), dst)
+}
+
+// unpackedSize returns the allocated size of the archive at u (sha256 sum, size bytes), using
+// the cache dir: download when absent or wrong, unpack into a fresh dir, measure, remove it.
+func (c *client) unpackedSize(u, sum string, size int64) (int64, error) {
+	if c.cache == "" {
+		return 0, nil
+	}
+	if err := os.MkdirAll(c.cache, 0o755); err != nil {
+		return 0, err
+	}
+	szFile := filepath.Join(c.cache, sum+".unpacked")
+	if b, err := os.ReadFile(szFile); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && n > 0 {
+			return n, nil
+		}
+	}
+	ext, err := archiveExt(u)
+	if err != nil {
+		return 0, err
+	}
+	arc := filepath.Join(c.cache, sum+ext)
+	ok := false
+	if fi, err := os.Stat(arc); err == nil && (size == 0 || fi.Size() == size) {
+		if got, err := fileSHA(arc); err == nil && got == sum {
+			ok = true
+		}
+	}
+	if !ok {
+		got, err := c.download(u, arc)
+		if err != nil {
+			return 0, err
+		}
+		if got != sum {
+			os.Remove(arc)
+			return 0, fmt.Errorf("%s: sha256 %s, expected %s", u, got, sum)
+		}
+	}
+	tmp, err := os.MkdirTemp(c.cache, "unpack-")
+	if err != nil {
+		return 0, err
+	}
+	defer os.RemoveAll(tmp)
+	dest := filepath.Join(tmp, "x")
+	if err := fetch.Unpack(arc, dest); err != nil {
+		return 0, fmt.Errorf("unpack %s: %w", u, err)
+	}
+	n, err := allocSize(dest)
+	if err != nil {
+		return 0, err
+	}
+	c.log("%s unpacks to %d bytes on disk", filepath.Base(arc), n)
+	return n, os.WriteFile(szFile, []byte(strconv.FormatInt(n, 10)+"\n"), 0o644)
 }
 
 func (c *client) get(u string) (*http.Response, error) {
@@ -142,6 +300,20 @@ func (c *client) hashURL(u string) (string, error) {
 func (c *client) digest(a ghAsset) (string, error) {
 	if d, ok := strings.CutPrefix(a.Digest, "sha256:"); ok && len(d) == 64 {
 		return strings.ToLower(d), nil
+	}
+	if c.cache != "" {
+		if ext, err := archiveExt(a.BrowserDownloadURL); err == nil {
+			if err := os.MkdirAll(c.cache, 0o755); err != nil {
+				return "", err
+			}
+			tmp := filepath.Join(c.cache, "nodigest-"+a.Name)
+			sum, err := c.download(a.BrowserDownloadURL, tmp)
+			if err != nil {
+				return "", err
+			}
+			// keep the file under its hash so unpackedSize finds it
+			return sum, os.Rename(tmp, filepath.Join(c.cache, sum+ext))
+		}
 	}
 	return c.hashURL(a.BrowserDownloadURL)
 }
@@ -278,6 +450,9 @@ func (c *client) llamaAssets(r ghRelease) ([]catalog.Asset, error) {
 			return nil, err
 		}
 		as := catalog.Asset{ID: sp.id, OS: sp.os, Arch: sp.arch, Accel: sp.accel, URL: a.BrowserDownloadURL, SHA256: sum, Size: a.Size}
+		if as.UnpackedSize, err = c.unpackedSize(as.URL, sum, a.Size); err != nil {
+			return nil, err
+		}
 		var extra *catalog.Asset
 		if sp.extraRe != "" {
 			if e, ok := findAsset(r.Assets, pat(sp.extraRe, r.TagName)); ok {
@@ -286,6 +461,9 @@ func (c *client) llamaAssets(r ghRelease) ([]catalog.Asset, error) {
 					return nil, err
 				}
 				extra = &catalog.Asset{ID: sp.extraID, OS: sp.os, Arch: sp.arch, Accel: "cudart", URL: e.BrowserDownloadURL, SHA256: es, Size: e.Size}
+				if extra.UnpackedSize, err = c.unpackedSize(extra.URL, es, e.Size); err != nil {
+					return nil, err
+				}
 				as.Extra = []string{sp.extraID}
 			} else if !sp.optional {
 				return nil, fmt.Errorf("missing extra asset for %s", sp.id)
@@ -328,7 +506,11 @@ func (c *client) uvAssets(r ghRelease) ([]catalog.Asset, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, catalog.Asset{ID: sp.id, OS: sp.os, Arch: sp.arch, URL: found.BrowserDownloadURL, SHA256: sum, Size: found.Size})
+		un, err := c.unpackedSize(found.BrowserDownloadURL, sum, found.Size)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, catalog.Asset{ID: sp.id, OS: sp.os, Arch: sp.arch, URL: found.BrowserDownloadURL, SHA256: sum, Size: found.Size, UnpackedSize: un})
 	}
 	return out, nil
 }
@@ -408,6 +590,8 @@ func main() {
 	// Windows test it blocked b12680's llama.dll at about a day old, while b12651 (3 days) and older ran.
 	minAge := flag.Duration("min-age", 7*24*time.Hour, "when every release is a prerelease, skip builds newer than this (Windows Smart App Control needs a build to have a reputation)")
 	ref := flag.String("ref-file", filepath.Join(os.Getenv("HOME"), ".hive/models/gemma4-rp-maxxed", refFile), "the reference model file; its size is recorded (not copied or loaded)")
+	uvTag := flag.String("uv-tag", "", "pin a uv release tag instead of the latest")
+	cacheDir := flag.String("cache", filepath.Join(os.Getenv("HOME"), ".cache", "gencatalog"), "archive and unpacked-size cache")
 	version := flag.Int("version", 1, "catalog version to write")
 	measuredOnly := flag.Bool("measured-only", false, "no network: re-read -out, attach tools/gencatalog/measured.json and write it back with -version")
 	flag.Parse()
@@ -420,18 +604,14 @@ func main() {
 		}
 		return
 	}
-	c := &client{http: &http.Client{Timeout: 30 * time.Minute}, token: os.Getenv("GITHUB_TOKEN"), log: logf}
-	if err := run(c, *out, *pin, *minAge, *ref, *version); err != nil {
+	c := &client{http: &http.Client{Timeout: 30 * time.Minute}, token: os.Getenv("GITHUB_TOKEN"), log: logf, cache: *cacheDir}
+	if err := run(c, *out, *pin, *uvTag, *minAge, *ref, *version); err != nil {
 		fmt.Fprintln(os.Stderr, "gencatalog:", err)
 		os.Exit(1)
 	}
 }
 
-func run(c *client, out, pin string, minAge time.Duration, refPath string, version int) error {
-	st, err := os.Stat(refPath)
-	if err != nil {
-		return fmt.Errorf("reference model: %w", err)
-	}
+func run(c *client, out, pin, uvTag string, minAge time.Duration, refPath string, version int) error {
 	var rs []ghRelease
 	if err := c.getJSON("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100", &rs); err != nil {
 		return err
@@ -446,7 +626,11 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 		return err
 	}
 	var uvRel ghRelease
-	if err := c.getJSON("https://api.github.com/repos/astral-sh/uv/releases/latest", &uvRel); err != nil {
+	uvURL := "https://api.github.com/repos/astral-sh/uv/releases/latest"
+	if uvTag != "" {
+		uvURL = "https://api.github.com/repos/astral-sh/uv/releases/tags/" + url.PathEscape(uvTag)
+	}
+	if err := c.getJSON(uvURL, &uvRel); err != nil {
 		return err
 	}
 	c.log("uv %s", uvRel.TagName)
@@ -458,6 +642,10 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 	switch {
 	case err != nil:
 		c.log("WARNING: reference model not on Hugging Face yet (%v); writing it import-only", err)
+		st, serr := os.Stat(refPath)
+		if serr != nil {
+			return fmt.Errorf("reference model is not on Hugging Face (%v) and the local file is missing: %w", err, serr)
+		}
 		refModel = catalog.Model{ID: refID, Name: refSpec.name, File: refFile, SHA256: refSHA256, Size: st.Size(),
 			MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only"}
 	case refModel.SHA256 != refSHA256:
@@ -486,6 +674,9 @@ func run(c *client, out, pin string, minAge time.Duration, refPath string, versi
 	}
 	if un := applySamplers(cat.Models); len(un) > 0 {
 		return fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
+	}
+	if cat.AgentRuntime, err = loadRuntime(runtimeJSON); err != nil {
+		return err
 	}
 	if err := writeCatalog(out, &cat); err != nil {
 		return err
@@ -522,6 +713,9 @@ func refreshMeasured(out string, version int) error {
 	}
 	if un := applySamplers(cat.Models); len(un) > 0 {
 		return fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
+	}
+	if cat.AgentRuntime, err = loadRuntime(runtimeJSON); err != nil {
+		return err
 	}
 	cat.Version = version
 	return writeCatalog(out, cat)

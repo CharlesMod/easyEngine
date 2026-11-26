@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hermesengine/catalog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -158,5 +159,68 @@ func TestCommittedCatalogCarriesMeasured(t *testing.T) {
 		if !ok || mod.Footprint == nil {
 			t.Errorf("%s: catalog.json lacks the measured footprint (run gencatalog -measured-only)", id)
 		}
+	}
+}
+
+func TestAllocSize(t *testing.T) {
+	root := t.TempDir()
+	for name, n := range map[string]int{"a0": 0, "a1": 1, "a4096": 4096, "a4097": 4097} {
+		if err := os.WriteFile(filepath.Join(root, name), make([]byte, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "b"), make([]byte, 10000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a1", filepath.Join(root, "link")); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	// root 4096 + sub 4096 + link 4096 + files 0+4096+4096+8192 + b 12288
+	want := int64(4096*3 + 0 + 4096 + 4096 + 8192 + 12288)
+	got, err := allocSize(root)
+	if err != nil || got != want {
+		t.Fatalf("allocSize = %d, %v; want %d", got, err, want)
+	}
+}
+
+func TestArchiveExt(t *testing.T) {
+	for u, want := range map[string]string{"https://x/a.tar.gz": ".tar.gz", "https://x/a.ZIP?x=1": ".zip"} {
+		if got, err := archiveExt(u); err != nil || got != want {
+			t.Errorf("%s: %q %v", u, got, err)
+		}
+	}
+	if _, err := archiveExt("https://x/a.7z"); err == nil {
+		t.Error("7z must fail")
+	}
+}
+
+func TestRuntimeEmbeddedAndRefreshed(t *testing.T) {
+	if _, err := loadRuntime(runtimeJSON); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := loadRuntime([]byte(`[{"os":"linux","arch":"amd64","python":"3.12","peak_bytes":5,"keep_bytes":3,"measured_on":"d","measured_with":"w"}]`))
+	if err != nil || len(rt) != 1 || rt[0].PeakBytes != 5 {
+		t.Fatal(rt, err)
+	}
+	saved, savedM := runtimeJSON, measuredJSON
+	defer func() { runtimeJSON, measuredJSON = saved, savedM }()
+	measuredJSON = []byte(`{}`)
+	runtimeJSON = []byte(`[{"os":"linux","arch":"amd64","python":"3.12","peak_bytes":5,"keep_bytes":3}]`)
+	cat := catalog.Catalog{Version: 1, LlamaCpp: catalog.LlamaCpp{Tag: "b1"}}
+	out := filepath.Join(t.TempDir(), "c.json")
+	if err := writeCatalog(out, &cat); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshMeasured(out, 2); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(out)
+	got, err := catalog.Parse(b)
+	if err != nil || len(got.AgentRuntime) != 1 || got.AgentRuntime[0].PeakBytes != 5 || got.Version != 2 {
+		t.Fatal(got, err)
 	}
 }

@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "llamacpp": {
     "tag": "b12651",
     "assets": [
@@ -11,6 +11,7 @@
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
         "sha256": "cb099350c6a025e67eefaa13f2b67b2dcce53e38a0da22476e070d166ef367ea",
         "size": 220195495,
+        "unpacked_size": 281907200,
         "extra": [
           "cudart-linux-x64"
         ]
@@ -22,7 +23,8 @@
         "accel": "cudart",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
         "sha256": "485df8f0b0ab30c15807d25fd23a821aeaef62a3947722c683429491a5e0d027",
-        "size": 594371475
+        "size": 594371475,
+        "unpacked_size": 868909056
       },
       {
         "id": "vulkan-linux-x64",
@@ -31,7 +33,8 @@
         "accel": "vulkan",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-vulkan-x64.tar.gz",
         "sha256": "0bbcf2093f15c64c8a9bf54b809c9b2c812b982992dc2fbc9b36720c1d32cf13",
-        "size": 36976824
+        "size": 36976824,
+        "unpacked_size": 103936000
       },
       {
         "id": "cpu-linux-x64",
@@ -40,7 +43,8 @@
         "accel": "cpu",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-x64.tar.gz",
         "sha256": "17b242259181d5b1b1f7719aba27929700a8b0dab39bfaef1b971a992b397b38",
-        "size": 23297838
+        "size": 23297838,
+        "unpacked_size": 59944960
       },
       {
         "id": "cuda-win-x64",
@@ -50,6 +54,7 @@
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-12.4-x64.zip",
         "sha256": "1a6c090f76fab41260b5b7597c6fb1add1fad2efaac692ae2673a22366220a29",
         "size": 358031654,
+        "unpacked_size": 833679360,
         "extra": [
           "cudart-win-x64"
         ]
@@ -61,7 +66,8 @@
         "accel": "cudart",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-12.4-x64.zip",
         "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
-        "size": 391443627
+        "size": 391443627,
+        "unpacked_size": 574152704
       },
       {
         "id": "cuda13-win-x64",
@@ -71,6 +77,7 @@
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-13.5-x64.zip",
         "sha256": "5ad87e0771f3a129f6461b5fc706d8c2c5e5b71b2bd1f953a4221ca4d7797fef",
         "size": 225702093,
+        "unpacked_size": 282218496,
         "extra": [
           "cudart13-win-x64"
         ]
@@ -82,7 +89,8 @@
         "accel": "cudart",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-13.5-x64.zip",
         "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
-        "size": 426314199
+        "size": 426314199,
+        "unpacked_size": 554876928
       },
       {
         "id": "vulkan-win-x64",
@@ -91,7 +99,8 @@
         "accel": "vulkan",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-vulkan-x64.zip",
         "sha256": "e58fa9a137d8046c69334005ad6fb3e904ddc7e56f2a61ad1b844335826ef3f4",
-        "size": 38939211
+        "size": 38939211,
+        "unpacked_size": 110895104
       },
       {
         "id": "cpu-win-x64",
@@ -100,7 +109,8 @@
         "accel": "cpu",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cpu-x64.zip",
         "sha256": "b2d794fa7587aba29f654d717ff9b73e31caeabf50a7766692903008bbe0855d",
-        "size": 25096571
+        "size": 25096571,
+        "unpacked_size": 66027520
       },
       {
         "id": "metal-mac-arm64",
@@ -109,7 +119,8 @@
         "accel": "metal",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-arm64.tar.gz",
         "sha256": "264fd872de61679c45ad57e1e21c2a2a54e29b35734ecf3d50f24166447ab8d2",
-        "size": 16644358
+        "size": 16644358,
+        "unpacked_size": 42975232
       },
       {
         "id": "cpu-mac-x64",
@@ -118,7 +129,8 @@
         "accel": "cpu",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-x64.tar.gz",
         "sha256": "34c19771545479a783d3b68c446383ab703033890c052d3ff0b860a5c9f59e56",
-        "size": 12434934
+        "size": 12434934,
+        "unpacked_size": 30466048
       }
     ]
   },
@@ -129,7 +141,8 @@
       "arch": "amd64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-unknown-linux-gnu.tar.gz",
       "sha256": "bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c",
-      "size": 17113138
+      "size": 17113138,
+      "unpacked_size": 38879232
     },
     {
       "id": "uv-linux-arm64",
@@ -137,7 +150,8 @@
       "arch": "arm64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-unknown-linux-gnu.tar.gz",
       "sha256": "14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2",
-      "size": 16275135
+      "size": 16275135,
+      "unpacked_size": 33021952
     },
     {
       "id": "uv-windows-amd64",
@@ -145,7 +159,8 @@
       "arch": "amd64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-pc-windows-msvc.zip",
       "sha256": "297b3881fe1adfb922becc2c1613202abb41dc83ea5ff43d472aa087ca1f8683",
-      "size": 15641577
+      "size": 15641577,
+      "unpacked_size": 33456128
     },
     {
       "id": "uv-windows-arm64",
@@ -153,7 +168,8 @@
       "arch": "arm64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-pc-windows-msvc.zip",
       "sha256": "f223bcd3fa010174ffeeb885cc1d5334bb81388640c65baa5b8b42b47017337e",
-      "size": 15841571
+      "size": 15841571,
+      "unpacked_size": 32108544
     },
     {
       "id": "uv-darwin-arm64",
@@ -161,7 +177,8 @@
       "arch": "arm64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-aarch64-apple-darwin.tar.gz",
       "sha256": "e419bf07533bdbf48795fc793601c834dd79db57a8c49ce8e25cfe3a8639958d",
-      "size": 14700626
+      "size": 14700626,
+      "unpacked_size": 28950528
     },
     {
       "id": "uv-darwin-amd64",
@@ -169,7 +186,8 @@
       "arch": "amd64",
       "url": "https://github.com/astral-sh/uv/releases/download/0.13.10/uv-x86_64-apple-darwin.tar.gz",
       "sha256": "153e03197588204c04fc4c81cc4bafbfa4280222a385e4ee36a87aeec0ae63b4",
-      "size": 17489953
+      "size": 17489953,
+      "unpacked_size": 39612416
     }
   ],
   "models": [
@@ -428,6 +446,26 @@
       "sampler_match": [
         "gemma4e2b"
       ]
+    }
+  ],
+  "agent_runtime": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "python": "3.12",
+      "peak_bytes": 126652416,
+      "keep_bytes": 126652416,
+      "measured_on": "2026-11-26 poe (Ubuntu 24.04, ext4): du -sB1 of a fresh runtime dir sampled every 0.2 s, 3 runs identical",
+      "measured_with": "uv 0.13.10, CPython 3.12.16, hermesvoice-agent 0.1.0 wheel (httpx, pydantic); python 109.4 MB, uv cache 16.8 MB, venv 11.3 MB hard-linked to the cache"
+    },
+    {
+      "os": "windows",
+      "arch": "amd64",
+      "python": "3.12",
+      "peak_bytes": 106545152,
+      "keep_bytes": 106545152,
+      "measured_on": "2026-11-26 DESKTOP (Windows 11, NTFS): files of a fresh engine install's runtime dir rounded up to 4 KiB plus a 1 KiB MFT record each; the dir grew monotonically while sampled every second",
+      "measured_with": "uv 0.13.10, CPython 3.12.16 (uv python install --no-bin), hermesvoice-agent 0.1.0 wheel into site/ (no venv); python 73.0 MB, uv cache 17.3 MB, site 11.9 MB, 4284 files"
     }
   ]
 }

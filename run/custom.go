@@ -232,6 +232,9 @@ func (s *Supervisor) installBackendOnly(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.checkNeed(s.setupNeed(cat, hw, ""), "the model server"); err != nil {
+		return err
+	}
 	s.setPhase("downloading", "Installing the model server")
 	be, err := s.ensureBackend(ctx, cat, hw, "")
 	if err != nil {

@@ -21,7 +21,7 @@ func TestEmbedded(t *testing.T) {
 		t.Fatalf("empty catalog: %+v", c.LlamaCpp)
 	}
 	for _, a := range append(append([]Asset{}, c.LlamaCpp.Assets...), c.UV...) {
-		if !hex64.MatchString(a.SHA256) || !strings.HasPrefix(a.URL, "https://") || a.Size <= 0 || a.ID == "" || a.OS == "" || a.Arch == "" {
+		if !hex64.MatchString(a.SHA256) || !strings.HasPrefix(a.URL, "https://") || a.Size <= 0 || a.UnpackedSize < a.Size || a.ID == "" || a.OS == "" || a.Arch == "" {
 			t.Errorf("bad asset %+v", a)
 		}
 		for _, e := range a.Extra {

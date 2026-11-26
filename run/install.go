@@ -18,6 +18,7 @@ import (
 
 	"hermesengine/catalog"
 	"hermesengine/fetch"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -142,8 +143,12 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 	if err != nil {
 		return err
 	}
+	// The whole setup up front (the build, the model, the agent): refuse before writing a byte.
+	if err := s.checkNeed(s.setupNeed(cat, hw, backendID, m), m.Name); err != nil {
+		return err
+	}
 	s.setPhase("downloading", "Installing the model server")
-	be, err := s.ensureBackend(ctx, cat, hw, backendID)
+	be, err := s.ensureBackend(ctx, cat, hw, backendID, m)
 	if err != nil {
 		return err
 	}
@@ -189,7 +194,9 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 	return nil
 }
 
-func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string) (string, error) {
+// ensureBackend installs the first build that passes its smoke test; models are what the setup
+// installs after it (for the space check before each fallback build).
+func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string, models ...catalog.Model) (string, error) {
 	var list []catalog.Asset
 	if want != "" {
 		a, ok := cat.Asset(want)
@@ -204,7 +211,12 @@ func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw
 		return "", errors.New("no llama.cpp build in the catalog for this machine")
 	}
 	var last error
-	for _, a := range list {
+	for i, a := range list {
+		if i > 0 { // a fallback build: the failed one stays on disk; check again from here
+			if err := s.checkNeed(s.setupNeed(cat, hw, a.ID, models...), a.ID); err != nil {
+				return "", err
+			}
+		}
 		if err := s.installBackend(ctx, cat, a); err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
@@ -551,7 +563,10 @@ func (s *Supervisor) runImport(ctx context.Context, src string) error {
 	if m == nil {
 		return fmt.Errorf("%s is not a model in the catalog (sha256 %s)", filepath.Base(src), sum)
 	}
-	if err := fetch.Import(src, s.modelPath(*m), sum); err != nil {
+	room := func(n int64) error { // a copy, not a link: the whole file lands on our disk
+		return s.checkNeed(plan.NeedOf([]plan.DiskStep{plan.ModelStep(m.Name, n, 0)}, s.logRoom(), s.hostFiles()), "the copy of "+m.Name)
+	}
+	if err := fetch.ImportCheck(src, s.modelPath(*m), sum, room); err != nil {
 		return err
 	}
 	s.mu.Lock()

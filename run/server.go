@@ -22,7 +22,8 @@ import (
 type loadCtx struct {
 	in   install
 	key  string
-	fp   fit.Footprint
+	fp   fit.Footprint // the seed with the book's overlay
+	seed fit.Footprint // the header's seed alone, which Calibrate holds every reading to
 	gpu  probe.GPU
 	hasG bool
 }
@@ -76,15 +77,19 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	}
 	room := s.room(ctx, hw, nil)
 	s.mu.Lock()
-	had := s.st.Book.Entries[key].CapCtxTotal
-	stands, _ := s.st.Book.LetGo(key, room, in.backend)
+	was := s.st.Book.Entries[key]
+	stands, lift := s.st.Book.LetGo(key, room, in.build)
 	fp := s.st.Book.Footprint(key, seed)
 	s.mu.Unlock()
-	if had > 0 && !stands {
-		s.logf("ctx cap %d let go: the room grew past what it missed by, or the backend moved", had)
+	switch {
+	case was.CapCtxTotal > 0 && !stands:
+		s.logf("ctx cap %d let go: the room grew past what it missed by, or the engine build moved", was.CapCtxTotal)
+		s.save()
+	case stands && was.Lift == nil: // an older book's cap now records the room and build it stands under
+		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
 		s.save()
 	}
-	lc := loadCtx{in: in, key: key, fp: fp, gpu: g, hasG: hasG}
+	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG}
 	return lc, room, s.wantsFor(key), nil
 }
 
@@ -167,7 +172,7 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			next, err = fit.StepDown(lc.fp, shape, room, w)
 			if err == nil {
 				s.mu.Lock()
-				s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.backend, time.Now())
+				s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.build, time.Now())
 				s.mu.Unlock()
 				s.save()
 			}
@@ -231,7 +236,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-tick.C:
 			if s.healthy(url) {
-				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, startedAt: s.cfg.Now()}
+				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now()}
 				srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowIdle)
 				s.calibrate(ctx, srv)
 				s.srv = srv
@@ -290,7 +295,7 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 	}
 	srv.measured = m
 	s.mu.Lock()
-	c := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m, time.Now())
+	c := s.st.Book.Calibrate(srv.key, srv.seed, srv.shape, m, time.Now())
 	s.mu.Unlock()
 	s.logf("calibrate: measured %d MiB, %s", m, c)
 	if c.Verdict != fit.CPUOnly { // the reading is kept for its shape whether or not it was taken
@@ -483,7 +488,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
 		s.mu.Lock()
-		s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.backend, time.Now())
+		s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.build, time.Now())
 		s.mu.Unlock()
 		s.save()
 		shape = next
@@ -528,7 +533,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 		s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
 		if res.oom {
 			s.mu.Lock()
-			s.st.Book.LowerCap(lc.key, lc.fp, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room, lc.in.backend, time.Now())
+			s.st.Book.LowerCap(lc.key, lc.fp, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room, lc.in.build, time.Now())
 			s.mu.Unlock()
 			s.save()
 		}

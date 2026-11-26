@@ -974,8 +974,8 @@ type Calib struct {
 	CapCtxTotal int       `json:"cap_ctx_total"`
 	Loads       int       `json:"loads"` // readings taken
 	Updated     time.Time `json:"updated"`
-	// Lift is what lets CapCtxTotal go (Book.LetGo); nil for a cap an older build lowered, which
-	// stands as it always did.
+	// Lift is what lets CapCtxTotal go (Book.LetGo). Every cap this build lowers carries one; a
+	// cap an older build lowered has none until the first LetGo records it.
 	Lift *CapLift `json:"cap_lift,omitempty"`
 	// Readings is the card memory each shape that came up held, one per shape, whether or not
 	// its reading was taken for the fixed part (Book.Mark).
@@ -984,13 +984,13 @@ type Calib struct {
 
 // CapLift is what a cap was measured under: the room (Room.Budget, or Room.RAMBudget for a run
 // with no GPU), how much less the cap's shape was predicted to need than the shape that ran out
-// of memory, and the engine build. A room larger than RoomMiB by more than MissMiB, or another
-// build, lets the cap go.
+// of memory (0 where that cannot be told), and the engine build. A room larger than RoomMiB by
+// more than MissMiB (with a miss of 0: any larger room), or another build, lets the cap go.
 type CapLift struct {
 	RoomMiB int    `json:"room_mib"`
 	MissMiB int    `json:"miss_mib"`
 	NoGPU   bool   `json:"no_gpu,omitempty"`
-	Backend string `json:"backend"`
+	Build   string `json:"build"`
 }
 
 // Reading is the card memory one shape held when its load came up, read by its process.
@@ -1061,10 +1061,13 @@ const (
 	NoReading CalibVerdict = "no_reading"
 	// CPUOnly: a CPU-only shape's card use says nothing of the fixed part on the card.
 	CPUOnly CalibVerdict = "cpu_only"
+	// NotSeed: the footprint offered is the book's overlay (Basis Measured), not the header's
+	// seed, so there is no seed to hold the reading to; the fixed part does not move.
+	NotSeed CalibVerdict = "not_seed"
 )
 
 // Calibration is what Calibrate did: its verdict, the fixed part the reading implies (0 where
-// there was no card reading) and the seed's fixed part it was held to.
+// there was no card reading) and the header seed's fixed part it was held to (0 for NotSeed).
 type Calibration struct {
 	Verdict         CalibVerdict `json:"verdict"`
 	ImpliedFixedMiB float64      `json:"implied_fixed_mib"`
@@ -1081,14 +1084,19 @@ func (c Calibration) String() string {
 	if c.Verdict == NoReading || c.Verdict == CPUOnly {
 		return string(c.Verdict)
 	}
+	if c.Verdict == NotSeed {
+		return fmt.Sprintf("%s (implied fixed %.0f MiB; the book's figure was offered, not the header's seed)", c.Verdict, c.ImpliedFixedMiB)
+	}
 	return fmt.Sprintf("%s (implied fixed %.0f MiB, seed %.0f MiB, off %+.0f MiB)", c.Verdict, c.ImpliedFixedMiB, c.SeedFixedMiB, c.OffMiB())
 }
 
 // Calibrate records a healthy load that held measuredMiB of VRAM at shape s, and says what it did.
-// The reading is kept for its shape (Book.Mark) whatever the gate says. Like the hive's
-// calibrate() it becomes the book's fixed part only within +-15 % of the seed's (a wild reading
-// means others changed during the load, or the seed is wrong here: the caller sees by how much).
-// now is the stamp the entry is given.
+// seed is the header's seed (Basis Predicted), never the book's overlay: every reading is held to
+// it, so a run of readings each near the last cannot walk the fixed part away from the seed. The
+// overlay offered is NotSeed and moves nothing. The reading is kept for its shape (Book.Mark)
+// whatever the gate says. Like the hive's calibrate() it becomes the book's fixed part only
+// within +-15 % of the seed's (a wild reading means others changed during the load, or the seed
+// is wrong here: the caller sees by how much). now is the stamp the entry is given.
 func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) Calibration {
 	c := Calibration{SeedFixedMiB: seed.FixedMiB}
 	switch {
@@ -1101,6 +1109,8 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 	}
 	c.ImpliedFixedMiB = float64(measuredMiB) - (seed.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - seed.FixedMiB)
 	switch {
+	case seed.Basis == Measured:
+		c.Verdict, c.SeedFixedMiB = NotSeed, 0
 	case seed.FixedMiB <= 0:
 		c.Verdict = NoSeed
 	case math.Abs(c.ImpliedFixedMiB-seed.FixedMiB) > 0.15*seed.FixedMiB:
@@ -1137,30 +1147,32 @@ func capRoom(room Room) int {
 	return int(room.Budget())
 }
 
-// LowerCap records an out-of-memory of shape failed in room with engine build backendID: the
-// next start must use less total ctx than ctxTotal. Where the cap moves it carries what lifts it
+// LowerCap records an out-of-memory of shape failed in room with engine build build: the next
+// start must use less total ctx than ctxTotal. Where the cap moves it carries what lifts it
 // (CapLift): the room, the miss (the memory fp predicts failed needs above the same slots at
 // ctxTotal) and the build. Where the miss cannot be told (no slots, a type fp cannot be priced
-// at, nothing between them) the cap carries no lift and stands as caps always did. now is the
-// stamp the entry is given.
-func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, room Room, backendID string, now time.Time) {
+// at, or nothing between them, as when the walk kept the ctx and moved experts) the miss is 0 and
+// any larger room lifts it. A standing cap that carries no lift (an older book's) is given this
+// room and build. now is the stamp the entry is given.
+func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, room Room, build string, now time.Time) {
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}
 	e := b.Entries[key]
 	if ctxTotal > 0 && (e.CapCtxTotal == 0 || ctxTotal < e.CapCtxTotal) {
 		e.CapCtxTotal = ctxTotal
-		e.Lift = nil
+		miss := 0
 		ft, err := fp, error(nil) // a footprint naming no type is taken as given, as the walk does
 		if fp.KVType != "" && failed.KVType != "" {
 			ft, err = fp.atType(failed.KVType)
 		}
 		if err == nil && failed.Slots > 0 {
-			miss := ceilMiB(ft.kvAt(failed.Slots, failed.CtxPerSlot) - ft.kvAt(failed.Slots, ctxTotal/failed.Slots))
-			if miss > 0 {
-				e.Lift = &CapLift{RoomMiB: capRoom(room), MissMiB: miss, NoGPU: room.NoGPU, Backend: backendID}
-			}
+			miss = max(0, ceilMiB(ft.kvAt(failed.Slots, failed.CtxPerSlot)-ft.kvAt(failed.Slots, ctxTotal/failed.Slots)))
 		}
+		e.Lift = &CapLift{RoomMiB: capRoom(room), MissMiB: miss, NoGPU: room.NoGPU, Build: build}
+	}
+	if e.CapCtxTotal > 0 && e.Lift == nil {
+		e.Lift = &CapLift{RoomMiB: capRoom(room), NoGPU: room.NoGPU, Build: build}
 	}
 	e.Updated = now
 	b.Entries[key] = e
@@ -1168,10 +1180,13 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 
 // LetGo lets the cap of key go where room, as it stands now, is larger than the room it was
 // measured under by more than its miss (the same kind of room: card, or host with no GPU), or
-// backendID is another build than the one it was measured with. It answers whether a cap still
-// stands and, where one does, what would lift it (nil for a cap that carries none). With no cap:
-// false, nil. A cap let go takes its lift with it; the fixed part and the readings stay.
-func (b *Book) LetGo(key string, room Room, backendID string) (stands bool, lift *CapLift) {
+// build is another than the one it was measured with. It answers whether a cap still stands and,
+// where one does, what would lift it, never nothing. A cap an older book holds recorded nothing it
+// was measured under: the first LetGo records room and build as they stand then (miss 0), so from
+// there any larger room or another build lifts it, and until then it stands as it always did.
+// With no cap: false, nil. A cap let go takes its lift with it; the fixed part and the readings
+// stay.
+func (b *Book) LetGo(key string, room Room, build string) (stands bool, lift *CapLift) {
 	if b == nil {
 		return false, nil
 	}
@@ -1181,9 +1196,11 @@ func (b *Book) LetGo(key string, room Room, backendID string) (stands bool, lift
 	}
 	l := e.Lift
 	if l == nil {
-		return true, nil
+		l = &CapLift{RoomMiB: capRoom(room), NoGPU: room.NoGPU, Build: build}
+		e.Lift = l
+		b.Entries[key] = e
 	}
-	if l.Backend == backendID && (l.NoGPU != room.NoGPU || capRoom(room) <= l.RoomMiB+l.MissMiB) {
+	if l.Build == build && (l.NoGPU != room.NoGPU || capRoom(room) <= l.RoomMiB+l.MissMiB) {
 		c := *l
 		return true, &c
 	}

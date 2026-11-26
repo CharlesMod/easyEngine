@@ -196,18 +196,27 @@ loop lives in `run`.
   `shape.vram_basis` says whether `vram_mib` was read from the running server.
 - **A calibration says what it did.** `Book.Calibrate` answers a `fit.Calibration`: its
   `Verdict` (`taken`; `outside_gate`, more than ±15 % off the seed's `fixed`; `no_seed`;
-  `no_reading`; `cpu_only`), the `fixed` the reading implies and the seed's, so `OffMiB()` says by
-  how much the seed is off. Only `taken` moves the book's `fixed`; the footprint then stays
-  predicted. The engine logs the whole answer.
-- **A cap names what lifts it.** `Book.LowerCap(key, fp, failed, ctxTotal, room, backendID,
-  now)` keeps beside the cap a `CapLift`: the room it was measured under (`Room.Budget`, or
-  `RAMBudget` with no GPU), the miss (the memory `fp` predicts the failed shape needs above
-  the same slots at `ctxTotal`) and the backend id. `Book.LetGo(key, room, backendID)`, with the room
-  and build as they stand now, lets the cap go where the room is larger by more than the miss
-  (of the same kind) or the build is another, and otherwise answers that it stands and its
-  `CapLift`. With neither changed the cap stands exactly as before. A cap with no lift (lowered
-  by an older build, or with no miss to tell) stands as caps always did. The engine calls
-  `LetGo` each time it reads the book for a start.
+  `no_reading`; `cpu_only`; `not_seed`), the `fixed` the reading implies and the seed's, so
+  `OffMiB()` says by how much the seed is off. The gate and the seed's `fixed` are always the
+  header's seed (`Basis` predicted), never the book's last reading: the engine keeps the seed
+  beside the overlaid footprint and hands Calibrate the seed, so readings each near the last
+  cannot walk the book away from it. A footprint marked measured offered as the seed is
+  `not_seed` and moves nothing. Only `taken` moves the book's `fixed`; otherwise the footprint
+  stays predicted. The engine logs the whole answer.
+- **A cap names what lifts it.** `Book.LowerCap(key, fp, failed, ctxTotal, room, build, now)`
+  keeps beside every cap it lowers a `CapLift` (`cap_lift`): the room it was measured under
+  (`Room.Budget`, or `RAMBudget` with no GPU), the miss (the memory `fp` predicts the failed
+  shape needs above the same slots at `ctxTotal`; 0 where that cannot be told, as when the walk
+  kept the ctx and moved experts) and the engine build. `Book.LetGo(key, room, build)`, with the
+  room and build as they stand now, lets the cap go where the room is larger by more than the
+  miss (any larger room for a miss of 0; of the same kind) or the build is another, and otherwise
+  answers that it stands and its `CapLift`, never a standing cap with nothing named. With
+  neither changed the cap stands exactly as before. A cap from an older book recorded nothing:
+  the first `LetGo` (or `LowerCap`) records the room and build as they stand then, and it lifts
+  from there as any other. In the engine the build is the backend id and the sha256 of the
+  archive installed under it (`backends/<id>/.installed`), so a new llama.cpp build under the
+  same id lets the cap go; another id is another book key altogether. The engine calls `LetGo`
+  each time it reads the book for a start.
 - **An unknown cache type is refused.** `Seed`, `SeedFromBytes`, `KVBytes`, `Choose` (`KVType`
   or any of `KVTypes`), `MissRetry` and `StepDown` (also the current shape's type) and pricing at
   another type answer `*fit.KVTypeError` naming it, never a price; `Grow` does not grow. The
@@ -217,7 +226,7 @@ loop lives in `run`.
   with their meaning and adds `cap_lift` and `readings`, both left out when empty. An older build
   reads a newer book with all four fields it knew (Go's decoder skips the rest) and drops the new
   ones when it writes; a newer build reads an older book as a book with no lifts and no
-  readings, which is exactly how it behaved. `TestBookJSONBothWays` holds both.
+  readings: its caps stand as before until the first `LetGo` records what lifts them. `TestBookJSONBothWays` holds both.
 - **Room:** `budget = VRAM total - others - game_reserve - margin`. `game_reserve` comes from the
   profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
   loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.

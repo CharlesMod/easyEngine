@@ -70,97 +70,123 @@ func TestEveryFigureMarked(t *testing.T) {
 }
 
 // A calibration says what it did: taken, or passed over with the figure the reading implies and
-// why. The book's fixed part moves only when taken.
+// why. The book's fixed part moves only when taken. Every reading is held to the header's seed,
+// never to a reading taken before (the gate would drift with each one), and the book's overlay
+// offered as the seed is refused as not the seed.
 func TestCalibrationSaysWhatItDid(t *testing.T) {
 	ref := seed(refInfo(), "q4_0")
 	sh := Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}
 	rest := ref.vram(3, 65536, 0) - ref.FixedMiB // what the shape adds to the fixed part
+	up14 := rest + 1.14*ref.FixedMiB             // a reading implying 14 % above the seed
+	up30 := rest + 1.14*1.14*ref.FixedMiB        // 14 % above that one: 30 % above the seed
 	cases := []struct {
 		name     string
 		s        Shape
 		seed     Footprint
+		before   float64 // a reading taken before this one; 0: none
+		overlay  bool    // the book's footprint is offered in place of the seed
 		measured int
 		want     CalibVerdict
 		implied  float64 // 0: none
-		moves    bool    // the book's fixed part is now the implied figure
+		fixed    float64 // the book's fixed part after; 0: none
 	}{
-		{"within the gate", sh, ref, 12500, Taken, 12500 - rest, true},
-		{"too high", sh, ref, 16000, OutsideGate, 16000 - rest, false},
-		{"too low", sh, ref, 8000, OutsideGate, 8000 - rest, false},
-		{"no reading", sh, ref, 0, NoReading, 0, false},
-		{"cpu-only", Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, ref, 12000, CPUOnly, 0, false},
-		{"no fixed part in the seed", sh, Footprint{PerTokenMiB: 0.01, KVType: "q4_0"}, 12000, NoSeed, 12000 - 0.01*3*65536, false},
+		{"within the gate", sh, ref, 0, false, 12500, Taken, 12500 - rest, 12500 - rest},
+		{"too high", sh, ref, 0, false, 16000, OutsideGate, 16000 - rest, 0},
+		{"too low", sh, ref, 0, false, 8000, OutsideGate, 8000 - rest, 0},
+		{"no reading", sh, ref, 0, false, 0, NoReading, 0, 0},
+		{"cpu-only", Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, ref, 0, false, 12000, CPUOnly, 0, 0},
+		{"no fixed part in the seed", sh, Footprint{PerTokenMiB: 0.01, KVType: "q4_0"}, 0, false, 12000, NoSeed, 12000 - 0.01*3*65536, 0},
+		{"a second reading, held to the seed", sh, ref, up14, false, int(up30), OutsideGate, float64(int(up30)) - rest, float64(int(up14)) - rest},
+		{"the overlay offered as the seed", sh, ref, up14, true, int(up14), NotSeed, float64(int(up14)) - rest, float64(int(up14)) - rest},
 	}
 	for _, c := range cases {
 		var b Book
-		got := b.Calibrate("k", c.seed, c.s, c.measured, stamp)
-		if got.Verdict != c.want || math.Abs(got.ImpliedFixedMiB-c.implied) > 1e-6 || got.SeedFixedMiB != c.seed.FixedMiB {
-			t.Errorf("%s: %+v, want %s implied %.1f", c.name, got, c.want, c.implied)
+		if c.before > 0 {
+			if got := b.Calibrate("k", c.seed, c.s, int(c.before), stamp); !got.Taken() {
+				t.Fatalf("%s: the first reading %v", c.name, got)
+			}
 		}
-		if got.Taken() != (c.want == Taken) || (c.implied != 0 && math.Abs(got.OffMiB()-(c.implied-c.seed.FixedMiB)) > 1e-6) {
+		sd := c.seed
+		if c.overlay {
+			sd = b.Footprint("k", c.seed)
+		}
+		got := b.Calibrate("k", sd, c.s, c.measured, stamp)
+		wantSeed := c.seed.FixedMiB
+		if c.overlay {
+			wantSeed = 0
+		}
+		if got.Verdict != c.want || math.Abs(got.ImpliedFixedMiB-c.implied) > 1e-6 || got.SeedFixedMiB != wantSeed {
+			t.Errorf("%s: %+v, want %s implied %.1f seed %.1f", c.name, got, c.want, c.implied, wantSeed)
+		}
+		if got.Taken() != (c.want == Taken) || (c.implied != 0 && wantSeed != 0 && math.Abs(got.OffMiB()-(c.implied-wantSeed)) > 1e-6) {
 			t.Errorf("%s: taken %v off %.1f", c.name, got.Taken(), got.OffMiB())
 		}
-		e := b.Entries["k"]
-		if moved := e.FixedMiB != 0; moved != c.moves || (moved && math.Abs(e.FixedMiB-c.implied) > 1e-6) {
-			t.Errorf("%s: book fixed %.1f", c.name, e.FixedMiB)
+		if e := b.Entries["k"]; math.Abs(e.FixedMiB-c.fixed) > 1e-6 {
+			t.Errorf("%s: book fixed %.1f, want %.1f", c.name, e.FixedMiB, c.fixed)
 		}
 	}
 }
 
 // A cap lowered by an out-of-memory carries the room and the build it was measured with; LetGo
 // lets it go where the room grew by more than the miss or the build is another, and says what
-// would lift it while it stands. With the same room and build it stands exactly as before.
+// would lift it while it stands: never a standing cap with nothing named. With the same room and
+// build it stands exactly as before. A cap whose miss cannot be told (the walk kept the ctx and
+// moved experts) lifts on any rise in room; a cap from an older book, which recorded nothing, is
+// given the room and build of the first LetGo and lifts as any other from there.
 func TestCapNamesWhatLiftsIt(t *testing.T) {
 	ref := seed(refInfo(), "q4_0")
 	failed := Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}
 	at := room(16303, 3000, 24000)
 	cases := []struct {
-		name   string
-		old    bool               // a cap from a book written before caps carried their room
-		grow   func(miss int) int // MiB the room grew by since
-		build  string             // the build now
-		stands bool
+		name     string
+		ctxTotal int                // the cap the out-of-memory lowered to
+		old      bool               // a cap from a book written before caps carried their room
+		grow     func(miss int) int // MiB the room grew by since
+		build    string             // the build now
+		stands   bool
 	}{
-		{"same room, same build", false, func(int) int { return 0 }, "b1", true},
-		{"smaller room", false, func(int) int { return -500 }, "b1", true},
-		{"grew by the miss exactly", false, func(m int) int { return m }, "b1", true},
-		{"grew by more than the miss", false, func(m int) int { return m + 1 }, "b1", false},
-		{"another build", false, func(int) int { return 0 }, "b2", false},
-		{"an older book's cap, room grown", true, func(int) int { return 2000 }, "b2", true},
+		{"same room, same build", 150000, false, func(int) int { return 0 }, "cuda@b1", true},
+		{"smaller room", 150000, false, func(int) int { return -500 }, "cuda@b1", true},
+		{"grew by the miss exactly", 150000, false, func(m int) int { return m }, "cuda@b1", true},
+		{"grew by more than the miss", 150000, false, func(m int) int { return m + 1 }, "cuda@b1", false},
+		{"another build under the same backend", 150000, false, func(int) int { return 0 }, "cuda@b2", false},
+		{"ctx kept by the walk: same room", 196608, false, func(int) int { return 0 }, "cuda@b1", true},
+		{"ctx kept by the walk: any rise", 196608, false, func(int) int { return 1 }, "cuda@b1", false},
+		{"an older book's cap: same room", 150000, true, func(int) int { return 0 }, "cuda@b1", true},
+		{"an older book's cap: room grown", 150000, true, func(int) int { return 1 }, "cuda@b1", false},
+		{"an older book's cap: another build", 150000, true, func(int) int { return 0 }, "cuda@b2", false},
 	}
 	for _, c := range cases {
 		var b Book
-		b.LowerCap("k", ref, failed, 150000, at, "b1", stamp)
-		b.LowerCap("k", ref, failed, 170000, at, "b1", stamp) // never raised
+		b.LowerCap("k", ref, failed, c.ctxTotal, at, "cuda@b1", stamp)
+		b.LowerCap("k", ref, failed, c.ctxTotal+20000, at, "cuda@b1", stamp) // never raised
 		if c.old {
 			e := b.Entries["k"]
 			e.Lift = nil
 			b.Entries["k"] = e
-		}
-		lift := b.Entries["k"].Lift
-		miss := 0
-		if lift != nil {
-			miss = lift.MissMiB
-			if lift.RoomMiB != int(at.Budget()) || lift.Backend != "b1" || miss <= 0 {
-				t.Fatalf("%s: lift %+v", c.name, lift)
+			// The first LetGo records what the older book did not.
+			if stands, l := b.LetGo("k", at, "cuda@b1"); !stands || l == nil || l.RoomMiB != int(at.Budget()) || l.Build != "cuda@b1" || l.MissMiB != 0 {
+				t.Fatalf("%s: the first LetGo of an older cap: %v %+v", c.name, stands, l)
 			}
 		}
+		lift := b.Entries["k"].Lift
+		if lift == nil || lift.RoomMiB != int(at.Budget()) || lift.Build != "cuda@b1" || lift.MissMiB < 0 ||
+			(c.ctxTotal == 150000 && !c.old && lift.MissMiB <= 0) || (c.ctxTotal == 196608 && lift.MissMiB != 0) {
+			t.Fatalf("%s: lift %+v", c.name, lift)
+		}
 		now := at
-		now.Others -= c.grow(miss)
+		now.Others -= c.grow(lift.MissMiB)
 		stands, l := b.LetGo("k", now, c.build)
 		cap := b.Footprint("k", ref).CapCtxTotal
-		if stands != c.stands || (stands && cap != 150000) || (!stands && cap != 0) {
+		if stands != c.stands || (stands && cap != c.ctxTotal) || (!stands && cap != 0) {
 			t.Errorf("%s: stands %v cap %d", c.name, stands, cap)
 		}
-		if stands && !c.old && (l == nil || *l != *lift) {
+		if stands && (l == nil || *l != *lift) {
 			t.Errorf("%s: a standing cap says %v, want %v", c.name, l, lift)
-		}
-		if c.old && l != nil {
-			t.Errorf("%s: an older cap names %v", c.name, l)
 		}
 	}
 	var b Book
-	if stands, l := b.LetGo("k", at, "b1"); stands || l != nil {
+	if stands, l := b.LetGo("k", at, "cuda@b1"); stands || l != nil {
 		t.Error("no cap, yet one stands")
 	}
 }
@@ -228,7 +254,7 @@ func TestBookJSONBothWays(t *testing.T) {
 		t.Errorf("old book read as %+v", fp)
 	}
 	if stands, _ := b.LetGo("k", room(16303, 0, 24000), "another"); !stands {
-		t.Error("an old cap was let go: nothing it recorded can lift it")
+		t.Error("an old cap was let go by its first LetGo: it recorded nothing to measure a change against")
 	}
 
 	// The older reader: Calib as it was before this change.

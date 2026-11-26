@@ -248,3 +248,35 @@ func TestListenFallback(t *testing.T) {
 		t.Fatalf("fallback %d -> %d", p1, p2)
 	}
 }
+
+func TestStorageRoutes(t *testing.T) {
+	e, _, srv := readyEnv(t)
+	c, body, _ := do(t, "GET", srv.URL+"/engine/v1/storage?refresh=1", "", nil)
+	if c != 200 || !strings.Contains(body, `"data_dir"`) || !strings.Contains(body, `"parts"`) || !strings.Contains(body, `"models"`) {
+		t.Fatalf("storage: %d %s", c, body)
+	}
+	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/remove-downloads", `{}`, csrf); c != 400 {
+		t.Fatalf("no confirm: %d", c)
+	}
+	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/remove-downloads", `{"confirm":true}`, nil); c != 403 {
+		t.Fatalf("no csrf: %d", c)
+	}
+	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/delete-model", `{}`, csrf); c != 400 {
+		t.Fatalf("empty delete: %d", c)
+	}
+	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/delete-model", `{"file":"nope.gguf"}`, csrf); c != 404 {
+		t.Fatalf("missing delete: %d", c)
+	}
+	// the installed fake model is serving: 409
+	if c, b, _ := do(t, "POST", srv.URL+"/engine/v1/delete-model", `{"id":"m1"}`, csrf); c != 409 {
+		t.Fatalf("serving delete: %d %s", c, b)
+	}
+	if c, b, _ := do(t, "POST", srv.URL+"/engine/v1/remove-downloads", `{"confirm":true}`, csrf); c != 202 || !strings.Contains(b, "started") {
+		t.Fatalf("remove: %d %s", c, b)
+	}
+	testkit.WaitFor(t, 15*time.Second, "not_installed", func() bool {
+		_, b, _ := do(t, "GET", srv.URL+"/engine/v1/status", "", nil)
+		return strings.Contains(b, `"not_installed"`) && strings.Contains(b, "Removed downloaded files")
+	})
+	_ = e
+}

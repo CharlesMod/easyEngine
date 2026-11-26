@@ -43,6 +43,8 @@ type upgrade struct {
 	err      string
 	attempt  int
 	retryAt  time.Time
+	// switching: the user chose another model while this one serves; it is not a first-run starter.
+	switching bool
 }
 
 func (u *upgrade) activeState() bool {
@@ -62,6 +64,8 @@ type UpgradeInfo struct {
 	Error      string    `json:"error,omitempty"`
 	Attempt    int       `json:"attempt"`
 	RetryInS   int       `json:"retry_in_s,omitempty"`
+	// Switch is true when the user switched models (the current one is not a starter).
+	Switch bool `json:"switch,omitempty"`
 }
 
 const starterGenericNote = "A smaller model is serving in place of the full one: expect simpler speech."
@@ -76,7 +80,7 @@ func (s *Supervisor) stagingLocked(st *Status) {
 	if u == nil {
 		return
 	}
-	info := &UpgradeInfo{Target: u.target.ID, TargetName: u.target.Name, State: u.state, Error: u.err, Attempt: u.attempt}
+	info := &UpgradeInfo{Switch: u.switching, Target: u.target.ID, TargetName: u.target.Name, State: u.state, Error: u.err, Attempt: u.attempt}
 	if u.progress != nil {
 		p := *u.progress
 		info.Progress = &p
@@ -102,6 +106,10 @@ func (s *Supervisor) stagingLocked(st *Status) {
 		st.ModelTier, st.ModelStage = "starter", "starter_serving"
 	case upDone:
 		st.ModelStage = "target_serving"
+	}
+	if u.switching {
+		st.ModelTier = "full"
+		return
 	}
 	if st.ModelTier == "starter" && !st.ModelFallback {
 		st.ModelFallback, st.ModelNote = true, starterGenericNote
@@ -359,6 +367,7 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	if stopped || s.Phase() == "sleeping" {
 		s.finishSwap(upDone, "")
 		s.dropStarter(starterID, target.ID)
+		s.recordPrevious(starterID, target.ID)
 		s.setPhase("sleeping", "Stopped")
 		return
 	}
@@ -366,6 +375,7 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	if err == nil && s.Phase() == "ready" {
 		s.finishSwap(upDone, "")
 		s.dropStarter(starterID, target.ID)
+		s.recordPrevious(starterID, target.ID)
 		return
 	}
 	msg := "the full model would not load"

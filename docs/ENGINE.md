@@ -349,11 +349,15 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, sampler}`; `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler}`; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, fallback, fallback_note}], backend}` |
-| `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes}`; `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
+| `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
+| `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |
+| `GET storage[?refresh=1]` | what the engine keeps on disk (§7b): `{data_dir, total_bytes, free_bytes (-1 unknown), parts: [{name: "models"\|"backends"\|"runtime"\|"downloads"\|"logs", path, bytes}], models: [{file, id, bytes, in_use, partial}], approximate}` |
+| `POST remove-downloads {confirm: true}` | 202; job that deletes the downloaded files (§7b); 400 without `confirm: true`; 409 if one runs |
+| `POST delete-model {id\|file}` | deletes one file in `models/`: 200 `{freed_bytes}`, 404 no such file, 409 it is serving or downloading |
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
@@ -414,10 +418,78 @@ Status fields (all in `GET status`; `null` or `""` when nothing is staged):
 | `upgrade` | `{target, target_name, state, progress, error, attempt, retry_in_s}`; `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
 | `model_fallback`, `model_note` | also set while `model_tier` is `starter` (the starter's own `fallback_note`, else a generic sentence), the same warning idea as for a fallback model |
 
+### 7b. Storage, removing downloads, switching models
+
+Data dir layout: `state.json`, `models/` (`<file>.gguf`, partial `<file>.gguf.part`), `backends/`,
+`runtime/` (uv, venvs, python), `downloads/` (archives), `logs/`.
+
+- `GET storage` sizes each directory with a walk capped at 2 s (`approximate: true` when the cap
+  hit); complete results are cached 10 s, `?refresh=1` re-walks. `models[].in_use` is true for the
+  selected model, the target of a running download, and partial files while an install job runs.
+- `POST remove-downloads {confirm:true}` runs a job: cancels any install/upgrade, stops the agent
+  and llama-server, deletes the contents of `models/`, `backends/`, `runtime/`, `downloads/`
+  (symlinks and junctions are unlinked, never followed; nothing outside the data dir is touched;
+  `logs/` and `state.json` stay), clears `model`, `target`, `starter_owned`, `backend`, `previous`
+  and the fit book; mode, external, linger, kv_type and sampler_policy stay. Phase becomes
+  `not_installed` and `status.message` reads "Removed downloaded files (X GB freed)", plus the
+  paths that could not be deleted (a file still in use on Windows; each delete is retried for about a
+  second). `POST install` then works from scratch. Phase is `removing` while it runs and installs
+  answer 409.
+- `POST delete-model {id|file}` deletes one file in `models/` (and its `.part`). 409 when it is the
+  selected model or an active download. A plain file name only; no paths.
+- **Switching:** `POST install {model: B}` while A is ready and serving keeps A serving and
+  downloads B through the upgrade path (`status.upgrade` with `switch: true`, `model_stage`
+  `target_downloading`, ...), then swaps (A stopped, B started with a fresh fit). `model_tier`
+  stays `full` and no starter warning is set. If B is already on disk the swap is immediate. A is
+  never deleted; after the swap `status.previous` is `{id, name, file, bytes}` of A (null when A
+  was a first-run starter that was deleted, or after `delete-model` of it or the next switch).
+  `POST cancel` during the download keeps A serving and forgets B (`state.target` cleared). If there
+  is not enough disk the install answers 400 `not enough disk space for B: needs X GB, Y GB free`.
+  The CLI `install` command keeps the old, non-switching path.
+
 `status.progress` keeps showing the install job (the starter, or the model server); the target's
 download is `upgrade.progress`. `status.model` is the id of the model answering right now. A client
 shows its "simpler speech" notice when `model_tier == "starter"`, and a progress bar from
 `upgrade.progress` when `model_stage` is `target_downloading`.
+
+### 7b. Your own GGUF file (`custom/*`)
+
+The engine can serve a local GGUF file in place. The file is never copied, moved or deleted (not by
+`custom/clear`, not by any cleanup); `state.custom.path` lies outside `models/`.
+
+- `POST custom/check {path}` -> 200 `CustomCheck`: `ok`, `error` ("file not found", "not a GGUF file",
+  "header unreadable: ..."), `path`, `name` (base name without `.gguf`), `size`, `arch`, `params`
+  (sum of tensor elements), `ctx_train`, `quant` (from `general.file_type`), `moe`, `known`,
+  `estimated`, `fits` (`yes|tight|no`), `why`, `shape`, `est_vram_mib`, `est_ram_mib`,
+  `est_decode_tps`, `chat_template`. Reads the header only; nothing is stored.
+- `POST custom/use {path}` -> 202 `{started:true}` | 400 `{error}` | 409 (an install job runs). Saves
+  `state.custom = {path, name, size, mtime}` and `state.model = "custom"` (the catalog model it
+  replaced is kept as `custom_prev`), stops the running server and loads the file in the background.
+  On a machine with no backend yet it first runs an install job for llama.cpp and the agent only (no
+  catalog model, no starter download), reported in status phase/progress like a normal install and
+  answering 409 while another job runs; when the job ends the file is served. An engine restart with
+  `state.model = "custom"` and a backend resumes serving the file.
+- `POST custom/clear {}` -> 200. Forgets the file; the `custom_prev` model serves again when installed,
+  else `not_installed`.
+
+Serving: alias `custom:<name>`, `--jinja` and the other fixed flags as for any model. Footprint: a
+catalog model with a measured footprint whose file has exactly the same byte size lends its measured
+footprint and sampler profiles (the catalog records no arch/params/quant, and a ten GB hash is not
+cheap), and the check reports `known: true`. Otherwise the footprint is the header seed (`fit.Seed`),
+`estimated: true`, and the room is narrowed by an extra 768 MiB margin (`plan.CustomExtraMarginMiB`).
+The ctx balancer and verdicts are those of a catalog model. Sampler: a catalog model matched by size
+or by name lends its profiles; else the generic rp values (temperature 1.0, top_k 64, top_p 0.95,
+min_p 0) as both `official` and `rp`. The calibration book keys on `custom-<hash of path+size+mtime>`
+instead of a sha256.
+
+Status: `custom` is `{path, name, size, missing}` or null; `model` is `"custom:<name>"` while it
+serves; `model_name` is the human name of the selected model (the catalog name, or the file name).
+`GET plan` gains `custom` (a `CustomCheck` of the current file, or null).
+
+A missing file (at `custom/use`, at engine start, at restart or by the watchdog): `custom/use` answers
+400 "file not found"; an engine start or restart goes to phase `error`, message
+`Model file not found: <path>`, with no retry; `custom/use` with another path or `custom/clear`
+recovers.
 
 ### Proxy
 

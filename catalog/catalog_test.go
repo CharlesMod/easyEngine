@@ -140,8 +140,13 @@ func TestEveryModelHasSamplerProfiles(t *testing.T) {
 				t.Errorf("%s: no %s profile", m.ID, name)
 				continue
 			}
-			// every Gemma 4 build: Google's generation_config.json (temperature 1.0, top_k 64, top_p 0.95), DRY off
-			if p.Temperature == nil || *p.Temperature != 1 || p.TopK == nil || *p.TopK != 64 || p.TopP == nil || *p.TopP != 0.95 ||
+			// every Gemma 4 build: Google's generation_config.json (temperature 1.0, top_k 64, top_p 0.95), DRY off;
+			// structured is greedy (measured 2026-11-25, docs/SAMPLERS.md)
+			wantT := 1.0
+			if name == ProfileStructured {
+				wantT = 0
+			}
+			if p.Temperature == nil || *p.Temperature != wantT || p.TopK == nil || *p.TopK != 64 || p.TopP == nil || *p.TopP != 0.95 ||
 				p.MinP == nil || *p.MinP != 0 || p.RepeatPenalty == nil || *p.RepeatPenalty != 1 || p.DryMultiplier == nil || *p.DryMultiplier != 0 {
 				t.Errorf("%s/%s: %+v", m.ID, name, p)
 			}

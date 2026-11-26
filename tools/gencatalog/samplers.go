@@ -21,10 +21,11 @@ func gemmaOfficial() catalog.SamplerProfile {
 }
 
 // samplerSpec is one model's sampler block. rp is what spoken lines and creative text get; it
-// equals official until an A/B test on the GPU says otherwise. structured is for
-// grammar-constrained JSON (intent, tool steps): no vendor statement exists for constrained
-// decoding, so it is official too (the grammar already restricts the tokens; temperature only
-// reweights what the grammar allows).
+// equals official (the GPU A/B of 2026-11-25 found the old temp 0.8 / min_p 0.05 no better).
+// structured is for grammar-constrained JSON (intent, tool steps) and is greedy: measured on
+// 2026-11-25 (first client's GPU bench, see docs/SAMPLERS.md), temperature 0 beat 1.0 on intent for E4B rp
+// (+5 to +17 points) and removed invalid schema and free replies on the 26B and E4B rp, with
+// reflection unchanged.
 type samplerSpec struct {
 	source                   string
 	match                    []string
@@ -33,7 +34,9 @@ type samplerSpec struct {
 
 func gemmaSpec(source string, match ...string) samplerSpec {
 	o := gemmaOfficial()
-	return samplerSpec{source: source, match: match, official: o, rp: o, structured: o}
+	s := gemmaOfficial()
+	s.Temperature = f64(0) // greedy; top_k/top_p/min_p as official (inert at temperature 0)
+	return samplerSpec{source: source, match: match, official: o, rp: o, structured: s}
 }
 
 // samplerSpecs is keyed by catalog model id. The commits are the Hugging Face revisions read

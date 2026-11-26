@@ -37,11 +37,15 @@ fragments that recognise the model on an external endpoint):
 |---|---|---|
 | `official` | the vendor's values; also llama-server's start defaults | as the table |
 | `rp` | spoken lines and creative text; the default when no profile is named | = official |
-| `structured` | grammar-constrained JSON: intent and tool steps | = official |
+| `structured` | grammar-constrained JSON: intent and tool steps | `temperature 0` (top_k 64, top_p 0.95, min_p 0 as official; inert at temperature 0) |
 
-`structured` is official because no vendor statement exists for constrained decoding (none
-invented). A grammar already restricts which tokens are possible; temperature only reweights
-the ones it allows.
+`rp` stays official: on 2026-11-25 the GPU A/B against the old temp 0.8 / min_p 0.05 found no
+difference within noise on the 26B or E4B rp (no loops either way, equal voice accuracy, no
+grammar or format difference; the one gap was a trailing intent-label leak, fixed in the agent's
+sanitiser). `structured` is greedy: measured on the same day (the first client's GPU bench),
+temperature 0 beats 1.0 on intent for E4B rp (grammar 82 to 86.7 %, schema 63 to 80 %, schema
+valid 86 to 100 %) and removes invalid schema and free replies on the 26B (schema 88 to 97 %,
+valid 90 to 100 %); reflection is unchanged.
 
 ## Enforcement
 

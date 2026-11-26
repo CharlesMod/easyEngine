@@ -264,7 +264,7 @@
           "dry_multiplier": 0
         },
         "structured": {
-          "temperature": 1,
+          "temperature": 0,
           "top_k": 64,
           "top_p": 0.95,
           "min_p": 0,
@@ -340,7 +340,7 @@
           "dry_multiplier": 0
         },
         "structured": {
-          "temperature": 1,
+          "temperature": 0,
           "top_k": 64,
           "top_p": 0.95,
           "min_p": 0,
@@ -416,7 +416,7 @@
           "dry_multiplier": 0
         },
         "structured": {
-          "temperature": 1,
+          "temperature": 0,
           "top_k": 64,
           "top_p": 0.95,
           "min_p": 0,

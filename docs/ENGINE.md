@@ -47,7 +47,7 @@ set it to a temp dir; **tests never touch the real data dir and only remove what
   backends/<backend-id>/      unpacked llama.cpp release (llama-server[.exe] + libs)
   models/<file>.gguf
   runtime/uv[.exe]            pinned uv binary
-  runtime/venvs/<agent-id>/   agent virtualenv (uv-managed Python 3.12)
+  runtime/venvs/<agent-id>/   agent virtualenv (uv-managed Python 3.12; on Windows site/ + base-python.txt, §8)
   downloads/<name>.part       in-progress downloads (resume with HTTP Range)
   logs/engine.log, logs/llama-server.log, logs/agent.log   (rotated at 10 MB, keep 2)
   engine.lock                 single-instance lock (pid + port)
@@ -483,7 +483,13 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
 The engine installs the agent wheel into `runtime/venvs/<agent.id>` with the pinned `uv`
 (`uv venv --python 3.12`, `uv pip install <wheel>`; reinstall when the wheel's sha256
 changes) and runs it as `<venv>/bin/python -m <module> <args>` (the module name is derived
-from the wheel's console script entry; for HermesVoice `hermesvoice_agent.cli`). It adds
+from the wheel's console script entry; for HermesVoice `hermesvoice_agent.cli`). uv only ever
+uses its own managed Python (`UV_PYTHON_PREFERENCE=only-managed`), never one on the player's PATH.
+On Windows there is no venv: a venv's `python.exe` is an unsigned launcher copy that Smart App
+Control blocks, so the engine runs `uv python install --no-bin 3.12`, installs the wheel with
+`uv pip install --python <base> --target runtime\venvs\<agent.id>\site`, records the base
+interpreter in `base-python.txt` there, and runs `<base python> -m <module> <args>` with
+`PYTHONPATH=<that site>` and `PYTHONNOUSERSITE=1`. It adds
 `HERMESVOICE_LLM_URL=http://127.0.0.1:<engine port>` (`/v1` appended in openai mode) to
 the agent's env; the agent already reads that variable. Agent crash → restart with backoff
 (1, 2, 4 … 30 s).

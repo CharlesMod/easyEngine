@@ -65,6 +65,18 @@ if [ -f "$FAKE_AGENT_DIE" ]; then exit 3; fi
 exec sleep 30
 EOS
     chmod +x "$4/bin/python" ;;
+  python)
+    case "$2" in
+      install) : ;;
+      find)  # the managed base interpreter (no-venv layout)
+        b="$UV_PYTHON_INSTALL_DIR/base/bin"; mkdir -p "$b"
+        cat > "$b/python" <<'EOS'
+#!/bin/sh
+echo "$(date +%s%N) url=$HERMESVOICE_LLM_URL pythonpath=$PYTHONPATH nousersite=$PYTHONNOUSERSITE args=$*" >> "$FAKE_AGENT_LOG"
+exec sleep 30
+EOS
+        chmod +x "$b/python"; echo "$b/python" ;;
+    esac ;;
   pip) : ;;
 esac
 `
@@ -345,5 +357,36 @@ func TestAgentRestartWithBackoff(t *testing.T) {
 	}
 	if st := sup.Status().Agent; st.Restarts < 3 {
 		t.Fatalf("agent status %+v", st)
+	}
+}
+
+// Windows layout: no venv (its python.exe launcher was blocked by Smart App Control); the managed base
+// Python runs the agent with the packages in <env>/site on PYTHONPATH, and uv puts no shim in ~/.local/bin.
+func TestInstallJobNoVenv(t *testing.T) {
+	defer run.SetAgentNoVenv(true)()
+	s := newSite(t)
+	sup := s.sup(t)
+	if err := sup.Install("dl", ""); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitPhase(t, sup, "ready", 30*time.Second)
+	var sawInstall, sawFind, sawTarget, sawVenv bool
+	for _, l := range lines(s.uvLog) {
+		sawInstall = sawInstall || strings.HasPrefix(l, "python install --no-bin")
+		sawFind = sawFind || strings.HasPrefix(l, "python find")
+		sawTarget = sawTarget || (strings.HasPrefix(l, "pip install --python ") && strings.Contains(l, "--target "+filepath.Join(s.e.Data, "runtime", "venvs", "hello-agent", "site")))
+		sawVenv = sawVenv || strings.HasPrefix(l, "venv ")
+	}
+	if !sawInstall || !sawFind || !sawTarget || sawVenv {
+		t.Fatalf("uv calls (install=%v find=%v target=%v venv=%v): %v", sawInstall, sawFind, sawTarget, sawVenv, lines(s.uvLog))
+	}
+	testkit.WaitFor(t, 5*time.Second, "agent to start", func() bool { return len(lines(s.agent)) >= 1 })
+	l := lines(s.agent)[0]
+	site := filepath.Join(s.e.Data, "runtime", "venvs", "hello-agent", "site")
+	if !strings.Contains(l, "pythonpath="+site) || !strings.Contains(l, "nousersite=1") || !strings.Contains(l, "args=-m hello_agent.cli run") {
+		t.Fatalf("agent line: %s", l)
+	}
+	if sup.Status().Agent.Phase != "running" {
+		t.Fatalf("agent status %+v", sup.Status().Agent)
 	}
 }

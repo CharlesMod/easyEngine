@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"hermesengine/catalog"
@@ -338,16 +340,34 @@ func copyFlat(src, dst string) error {
 }
 
 func (s *Supervisor) runCmd(ctx context.Context, env []string, name string, args ...string) error {
+	_, err := s.runCombined(ctx, env, false, name, args...)
+	return err
+}
+
+// runOut is runCmd that returns stdout alone (stderr is only logged).
+func (s *Supervisor) runOut(ctx context.Context, env []string, name string, args ...string) (string, error) {
+	return s.runCombined(ctx, env, true, name, args...)
+}
+
+func (s *Supervisor) runCombined(ctx context.Context, env []string, stdoutOnly bool, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.CmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, name, args...)
 	cmd.Env = append(os.Environ(), env...)
-	out, err := cmd.CombinedOutput()
-	s.logf("%s %s: %v\n%s", path.Base(name), strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	var stdout bytes.Buffer
+	all := &lockedBuf{}
+	cmd.Stdout = io.MultiWriter(&stdout, all)
+	cmd.Stderr = all
+	err := cmd.Run()
+	out := all.String()
+	s.logf("%s %s: %v\n%s", path.Base(name), strings.Join(args, " "), err, strings.TrimSpace(out))
 	if err != nil {
-		return fmt.Errorf("%s %s: %v: %s", filepath.Base(name), args[0], err, lastLine(string(out)))
+		return "", fmt.Errorf("%s %s: %v: %s", filepath.Base(name), args[0], err, lastLine(out))
 	}
-	return nil
+	if stdoutOnly {
+		return stdout.String(), nil
+	}
+	return out, nil
 }
 
 // ensureUV installs the pinned uv into runtime/.
@@ -438,11 +458,33 @@ func (s *Supervisor) ensureAgent(ctx context.Context, cat *catalog.Catalog) erro
 		// and removing the data dir removes all of it.
 		"UV_PYTHON_PREFERENCE=only-managed",
 	}
-	if err := s.runCmd(ctx, env, uv, "venv", "--python", ag.Python, venv); err != nil {
-		return err
-	}
-	if err := s.runCmd(ctx, env, uv, "pip", "install", "--python", venvPython(venv), ag.Wheel); err != nil {
-		return err
+	if agentNoVenv {
+		// Managed base Python (no shim in the player's ~/.local/bin), packages into <env>/site.
+		if err := s.runCmd(ctx, env, uv, "python", "install", "--no-bin", ag.Python); err != nil {
+			return err
+		}
+		out, err := s.runOut(ctx, env, uv, "python", "find", ag.Python)
+		if err != nil {
+			return err
+		}
+		base := lastLine(out)
+		if base == "" {
+			return errors.New("uv python find: no interpreter")
+		}
+		if err := s.runCmd(ctx, env, uv, "pip", "install", "--python", base, "--target", filepath.Join(venv, "site"), ag.Wheel); err != nil {
+			return err
+		}
+		os.MkdirAll(venv, 0o755)
+		if err := os.WriteFile(filepath.Join(venv, basePythonFile), []byte(base), 0o644); err != nil {
+			return err
+		}
+	} else {
+		if err := s.runCmd(ctx, env, uv, "venv", "--python", ag.Python, venv); err != nil {
+			return err
+		}
+		if err := s.runCmd(ctx, env, uv, "pip", "install", "--python", venvPython(venv), ag.Wheel); err != nil {
+			return err
+		}
 	}
 	s.agent.set("stopped", "", 0)
 	return os.WriteFile(filepath.Join(venv, ".wheel-sha"), []byte(sha), 0o644)
@@ -529,4 +571,22 @@ func (s *Supervisor) restartServer() {
 	defer s.opMu.Unlock()
 	s.stopServerLocked()
 	s.startLocked()
+}
+
+// lockedBuf is a bytes.Buffer safe for exec's two copying goroutines (stdout and stderr).
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

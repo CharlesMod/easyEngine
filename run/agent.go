@@ -58,6 +58,26 @@ func venvDir(dataDir string, ag *AgentSpec) string {
 	return filepath.Join(dataDir, "runtime", "venvs", ag.ID)
 }
 
+// agentNoVenv: on Windows the agent runs from the managed base Python with its packages in <env>\site
+// (PYTHONPATH), not from a venv. A venv's python.exe there is a small unsigned launcher copy that Smart App
+// Control blocked in the first Windows test (os error 4551) while the base interpreter it starts ran fine.
+var agentNoVenv = runtime.GOOS == "windows"
+
+// basePythonFile, in the agent env dir, holds the base interpreter's path (no-venv layout).
+const basePythonFile = "base-python.txt"
+
+// agentPython is the interpreter that runs the agent.
+func agentPython(env string) string {
+	if agentNoVenv {
+		b, err := os.ReadFile(filepath.Join(env, basePythonFile))
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return venvPython(env)
+}
+
 func venvPython(venv string) string {
 	if runtime.GOOS == "windows" {
 		return filepath.Join(venv, "Scripts", "python.exe")
@@ -137,7 +157,11 @@ func (s *Supervisor) agentReady() bool {
 	if err != nil || strings.TrimSpace(string(b)) != sha {
 		return false
 	}
-	_, err = os.Stat(venvPython(v))
+	py := agentPython(v)
+	if py == "" {
+		return false
+	}
+	_, err = os.Stat(py)
 	return err == nil
 }
 
@@ -169,6 +193,9 @@ func (s *Supervisor) agentEnv() []string {
 		}
 	}
 	env = append(env, urlEnv+"="+url, "HERMES_ENGINE_URL="+base)
+	if agentNoVenv {
+		env = append(env, "PYTHONPATH="+filepath.Join(venvDir(s.dir, ag), "site"), "PYTHONNOUSERSITE=1")
+	}
 	return append(env, s.cfg.AgentEnv...)
 }
 
@@ -231,7 +258,7 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 		sink, _ := lifecycle.OpenLog(filepath.Join(s.dir, "logs", "agent.log"))
 		args := append([]string{"-m", module}, ag.Args...)
 		started := s.cfg.Now()
-		proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "agent", Path: venvPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
+		proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "agent", Path: agentPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
 		if err != nil {
 			s.addError("agent start: %v", err)
 			a.set("error", err.Error(), 0)

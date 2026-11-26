@@ -15,6 +15,7 @@ import (
 	"hermesengine/lifecycle"
 	"hermesengine/plan"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 )
 
 // Profile is the game profile (ENGINE.md section 8). Game-agnostic fields only.
@@ -26,8 +27,14 @@ type Profile struct {
 		Max   int `json:"max"`
 		Floor int `json:"floor"`
 	} `json:"ctx_per_slot"`
-	GameReserveMiB int        `json:"game_reserve_mib"`
-	Agent          *AgentSpec `json:"agent,omitempty"`
+	// GameReserveMiB is the host's estimated GPU use before it has any (the measured use wins
+	// once above it; POST /engine/v1/host can change it).
+	GameReserveMiB int `json:"game_reserve_mib"`
+	// HostPID is the host app's process id (0: POST /engine/v1/host, else the first parent pid);
+	// HostAdapter is the adapter it renders on, when it knows.
+	HostPID     int               `json:"host_pid,omitempty"`
+	HostAdapter *plan.HostAdapter `json:"host_adapter,omitempty"`
+	Agent       *AgentSpec        `json:"agent,omitempty"`
 	// Samplers are the game's own named sampler profiles. A request names one with the
 	// X-Hermes-Sampler header; a name here also replaces the model's profile of that name.
 	Samplers map[string]catalog.SamplerProfile `json:"samplers,omitempty"`
@@ -79,6 +86,15 @@ func (p *Profile) defaults() {
 			p.CtxPerSlot.Floor = p.CtxPerSlot.Max
 		}
 	}
+	if p.HostPID < 0 {
+		p.HostPID = 0
+	}
+	if p.GameReserveMiB < 0 {
+		p.GameReserveMiB = 0
+	}
+	if a := p.HostAdapter; a != nil && a.Name == "" && a.VendorID == 0 {
+		p.HostAdapter = nil
+	}
 	if p.Agent != nil && p.Agent.Python == "" {
 		p.Agent.Python = "3.12"
 	}
@@ -93,8 +109,11 @@ type Config struct {
 	Catalog *catalog.Catalog // nil: catalog.Load(DataDir)
 
 	// Injectable system access.
-	Probe    func(ctx context.Context) (probe.Hardware, error)
-	Others   func(ctx context.Context, gpu probe.GPU, ourPIDs []int) (int, error)
+	Probe  func(ctx context.Context) (probe.Hardware, error)
+	Others func(ctx context.Context, gpu probe.GPU, ourPIDs []int) (int, error)
+	// Sense reads the adapters and what each process holds on them; ours are the engine's own
+	// pids, host the host app's.
+	Sense    func(ctx context.Context, ours []int, host int) gpusense.Picture
 	Measure  func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
 	Seed     func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
 	Group    *lifecycle.Group
@@ -132,6 +151,11 @@ func (c *Config) defaults() {
 	}
 	if c.Others == nil {
 		c.Others = probe.Others
+	}
+	if c.Sense == nil {
+		c.Sense = func(ctx context.Context, ours []int, host int) gpusense.Picture {
+			return gpusense.Sense(ctx, probe.OSSources{}, ours, host)
+		}
 	}
 	if c.Measure == nil {
 		c.Measure = nvidiaMeasure

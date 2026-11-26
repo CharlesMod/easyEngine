@@ -286,6 +286,20 @@ func hwIndex(hw probe.Hardware, a gpusense.Adapter) int {
 // as a pool of system memory (Room.Unified), and otherwise the run is CPU-only: its dedicated
 // figure is never taken as VRAM.
 func RoomForSensed(hw probe.Hardware, sum gpusense.GPUSummary, backend string) fit.Room {
+	r := RoomForRun(hw, sum, backend)
+	if r.NoGPU {
+		return r
+	}
+	if v, _, err := r.Budget(); err == nil && int(v) < minUsableVRAM {
+		r.NoGPU = true // too little card to be worth using next to the game
+	}
+	return r
+}
+
+// RoomForRun is RoomForSensed for a server that is running or about to: the same room without
+// the planner's rule that a card with under minUsableVRAM left is no GPU (the shape chosen
+// answers for it).
+func RoomForRun(hw probe.Hardware, sum gpusense.GPUSummary, backend string) fit.Room {
 	r := fit.Room{RAMAvail: hw.RAMAvailMiB}
 	e, ok := adapterByIndex(sum.Adapters, sum.EngineAdapter)
 	if !ok || sum.Reserve.TotalMiB <= 0 {
@@ -299,10 +313,6 @@ func RoomForSensed(hw probe.Hardware, sum gpusense.GPUSummary, backend string) f
 	r.Unified = pooled(e)
 	if e.Integrated && !e.Unified && !strings.HasPrefix(backend, "vulkan") {
 		r.NoGPU = true
-		return r
-	}
-	if v, _, err := r.Budget(); err == nil && int(v) < minUsableVRAM {
-		r.NoGPU = true // too little card to be worth using next to the game
 	}
 	return r
 }

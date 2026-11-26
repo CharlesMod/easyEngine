@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -34,30 +35,30 @@ func (s *Supervisor) llamaLog(trunc bool) (*lifecycle.LogSink, error) {
 
 // room measures what the card has now. ourPIDs are excluded from "others".
 func (s *Supervisor) room(ctx context.Context, hw probe.Hardware, ourPIDs []int) fit.Room {
-	g, ok := bestGPU(hw)
-	r := fit.Room{RAMAvail: hw.RAMAvailMiB, GameReserve: s.cfg.Profile.GameReserveMiB, NoGPU: !ok || g.VRAMTotalMiB == 0, Unified: g.UnifiedMemory}
-	if ok {
-		r.GPUName = g.Name
-		s.mu.Lock()
-		id := s.st.Model
-		s.mu.Unlock()
-		if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
-			if m, ok := s.modelFor(cat, id); ok {
-				r.SpeedScale = plan.SpeedScaleFor(g.Name, m.Footprint)
-			}
-		}
-		r.VRAMTotal = g.VRAMTotalMiB
-		r.Margin = fit.DefaultMargin(g.VRAMTotalMiB)
-		if s.customEstimated() { // no measurement behind the footprint: a wider margin
-			r = plan.WithCustomMargin(r)
-		}
-		if o, err := s.cfg.Others(ctx, g, ourPIDs); err == nil {
-			r.Others = o
-		} else {
-			r.Others = g.VRAMUsedMiB
+	r, _ := s.roomSensed(ctx, hw, ourPIDs)
+	return r
+}
+
+// roomSensed is room with the reading it was made from: the others and the host's share come
+// from the sensed adapters (plan.MeasureReserve), on the adapter the engine runs on.
+func (s *Supervisor) roomSensed(ctx context.Context, hw probe.Hardware, ourPIDs []int) (fit.Room, sensed) {
+	sn := s.measure(ctx, hw, ourPIDs)
+	r := plan.RoomForRun(hw, sn.sum, s.backendNow())
+	if r.NoGPU {
+		return r, sn
+	}
+	s.mu.Lock()
+	id := s.st.Model
+	s.mu.Unlock()
+	if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
+		if m, ok := s.modelFor(cat, id); ok {
+			r.SpeedScale = plan.SpeedScaleFor(r.GPUName, m.Footprint)
 		}
 	}
-	return r
+	if s.customEstimated() { // no measurement behind the footprint: a wider margin
+		r = plan.WithCustomMargin(r)
+	}
+	return r, sn
 }
 
 func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wants, error) {
@@ -69,7 +70,11 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if err != nil {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, err
 	}
+	room, sn := s.roomSensed(ctx, hw, nil)
 	g, hasG := bestGPU(hw)
+	if sn.gpu >= 0 { // the adapter the engine runs on, not the one with the most dedicated memory
+		g, hasG = hw.GPUs[sn.gpu], true
+	}
 	key := fit.BookKey(in.model.SHA256, g.Name, in.backend)
 	s.mu.Lock()
 	kv := s.st.KVType
@@ -78,7 +83,6 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if err != nil {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, err
 	}
-	room := s.room(ctx, hw, nil)
 	s.mu.Lock()
 	was := s.st.Book.Entries[key]
 	stands, lift, err := s.st.Book.LetGo(key, room, in.build)
@@ -245,10 +249,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-tick.C:
 			if s.healthy(url) {
-				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now()}
+				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(), prevReserve: -1}
 				srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowIdle)
 				s.calibrate(ctx, srv)
 				s.srv = srv
+				s.ours.set(proc.Pid)
 				s.mu.Lock()
 				s.llamaURL = url
 				basis := shape.VRAMBasis
@@ -435,40 +440,50 @@ func (s *Supervisor) tick() {
 		s.reload(ctx, srv, "KV type changed")
 		return
 	}
-	// 4. make room for the game
+	// 4. make room for the game: read the adapters (the reserve is measured, never the card's
+	// used memory, which holds our own server too), and shrink when the model's memory no longer
+	// fits the budget the reserve leaves
 	hw, err := s.cfg.Probe(ctx)
 	if err != nil {
 		return
 	}
-	g, ok := bestGPU(hw)
-	if !ok || g.VRAMTotalMiB == 0 {
+	room, sn := s.roomSensed(ctx, hw, []int{srv.proc.Pid})
+	held := srv.heldReserve(sn.sum.Reserve.OthersMiB + sn.sum.Reserve.HostMiB)
+	if room.NoGPU || srv.shape.CPUOnly {
 		return
 	}
-	margin := fit.DefaultMargin(g.VRAMTotalMiB)
-	free := g.VRAMTotalMiB - g.VRAMUsedMiB
-	if free < margin {
-		if !idle {
-			return // never in the middle of a line
-		}
-		room := s.room(ctx, hw, []int{srv.proc.Pid})
-		w := s.wantsFor(srv.key)
-		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
-		if err != nil {
+	if vram, _, err := room.Budget(); err == nil {
+		if need, _, err := srv.fp.Need(srv.shape); err == nil && int(math.Ceil(need)) > int(vram) {
+			if !idle || !held {
+				return // never in the middle of a line, and not on a reading that is still moving
+			}
+			w := s.wantsFor(srv.key)
+			next, err := fit.StepDown(srv.fp, srv.shape, room, w)
+			if err != nil {
+				return
+			}
+			r := sn.sum.Reserve
+			s.logf("model needs %d MiB, the room leaves %d (others %d, host %d, margin %d): shrinking to %d x %d (moe %d)", int(math.Ceil(need)), int(vram), r.OthersMiB, r.HostMiB, r.MarginMiB, next.Slots, next.CtxPerSlot, next.NCpuMoe)
+			s.resize(ctx, srv, next, false)
 			return
 		}
-		s.logf("free VRAM %d MiB below margin %d: shrinking to %d x %d (moe %d)", free, margin, next.Slots, next.CtxPerSlot, next.NCpuMoe)
-		s.resize(ctx, srv, next, false)
-		return
 	}
-	// 5. grow back when idle for long enough
-	if idle && !srv.idleSince.IsZero() && s.cfg.Now().Sub(srv.idleSince) >= s.cfg.GrowIdle && !s.cfg.Now().Before(srv.nextGrow) {
-		room := s.room(ctx, hw, []int{srv.proc.Pid})
+	// 5. grow back when idle for long enough, on a reserve that has held
+	if held && idle && !srv.idleSince.IsZero() && s.cfg.Now().Sub(srv.idleSince) >= s.cfg.GrowIdle && !s.cfg.Now().Before(srv.nextGrow) {
 		w := s.wantsFor(srv.key)
 		if next, ok, err := fit.Grow(srv.fp, srv.shape, room, w); err == nil && ok {
 			s.logf("idle with room: growing to %d x %d (moe %d)", next.Slots, next.CtxPerSlot, next.NCpuMoe)
 			s.resize(ctx, srv, next, true)
 		}
 	}
+}
+
+// heldReserve records this tick's reserve (others plus the host's share, MiB) and reports
+// whether the last two reads agree: a change in the room reshapes the model only once held.
+func (srv *server) heldReserve(total int) bool {
+	held := srv.prevReserve >= 0 && total-srv.prevReserve <= heldTolMiB && srv.prevReserve-total <= heldTolMiB
+	srv.prevReserve = total
+	return held
 }
 
 func (s *Supervisor) countRestart() {
@@ -495,6 +510,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	tail := srv.proc.Tail()
 	oom, _ := ParseOOM(tail)
 	s.srv = nil
+	s.ours.set(0)
 	s.mu.Lock()
 	s.shape = nil
 	s.llamaURL = ""

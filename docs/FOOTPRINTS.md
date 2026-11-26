@@ -71,6 +71,32 @@ caller that has read its own gives them as a `fit.Consts` set to `fit.SeedWith`;
 shape says which set built it, so a figure from the default set on another card is a prediction. A
 fixed part the book worked out from a reading is laid only on a seed of the set it was worked out under.
 
+## Re-measured on llama.cpp b12651 (2026-11-26)
+
+The catalog pin moved from b12680 to b12651 (Windows Smart App Control refused b12680's `llama.dll`).
+The footprints above were measured at b12680 on the RTX 5080, so the same sweep (`sweep.py`, the 15-row
+grid per model, plus the 30-layer offload rows for the 26B; 50 runs, all ok) was run on a Tesla P40
+(24 GB, CUDA 12.8 Linux build, `-ngl 999 -fa on --no-kv-unified`, default `-ub 512`) at both builds,
+so the build is the only thing that differs between the two P40 columns.
+
+| model | fixed MiB: 5080 / b12680 (catalog) | P40 / b12680 | P40 / b12651 | largest per-row VRAM change b12680 to b12651 |
+|---|---|---|---|---|
+| gemma4-e2b-q4km | 1803 | 1671 | 1671 | 0 MiB (0 %) |
+| gemma4-e4b-rp-q40 | 2994 | 2862 | 2862 | 0 MiB (0 %) |
+| gemma4-rp-maxxed-q3kxl | 9961 | 9829 | 9829 | 16 MiB (0.15 %) |
+
+Every KV slope (q4_0 / q8_0 / f16), per-slot state, host RAM and per-expert-layer figure is the same to
+the printed digit at both builds; the scratch term is also the same at both builds (e2b 66, e4b 118, 26B 56 on
+the P40, against 54, 55 and 60 in the catalog: a fit residual that depends on the card, not the build). The 132 MiB lower `fixed` on the P40 is the
+card (its CUDA context is smaller than the 5080's), identical at both builds. Nothing moved by more than
+2 % or 64 MiB because of the build, so `measured.json` is unchanged and still describes the RTX 5080
+reference card; its `llamacpp` field keeps "b12680", where the numbers were read, and they hold at b12651.
+
+Speed on the P40 (mean of the 15-row grid, b12651 / b12680): decode 1.012 (e2b), 0.987 (e4b rp), 1.024
+(26B); prompt 1.006, 1.000, 1.009. E4B rp, 1 slot at 65536 ctx: 51.8 against 52.0 tok/s. Raw CSVs and
+fitcheck output: `~/.local/share/rimworld-hermes-engine/pin/` (`sweep-b12651.csv`, `sweep-b12680.csv`,
+`fit-b12651.txt`, `fit-b12680.txt`).
+
 ## Measured but not shipped
 
 Ling 3.0-tiny (Q4_K_M, bailingmoe3: MLA plus linear attention, 4.76 GB, MoE with 23 expert layers) was

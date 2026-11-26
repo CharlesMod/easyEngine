@@ -10,7 +10,7 @@ func raw(fp Footprint) fig {
 	return fig{Footprint: fp, src: fp, c: c}
 }
 
-func (fp Footprint) kvAt(slots, ctx int) float64       { return raw(fp).kvAt(slots, ctx) }
+func (fp Footprint) kvAt(slots, ctx int) float64       { return raw(fp).kvAt(slots, ctx, false) }
 func (fp Footprint) vram(slots, ctx, n int) float64    { return raw(fp).vram(slots, ctx, n) }
 func (fp Footprint) largest(slots, ctx, n int) float64 { return raw(fp).largest(slots, ctx, n) }
 func (fp Footprint) need(s Shape) float64              { return raw(fp).need(s) }

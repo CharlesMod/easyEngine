@@ -192,3 +192,29 @@ func TestCtxFromModelIsTheNamedNumber(t *testing.T) {
 		t.Errorf("StepDown at 512 trained: %v %v", s, err)
 	}
 }
+
+// With a list of cache types, the walk down after a failed load moves on to the next type at an
+// earlier type's floor, and answers too big only at the last type's: a room Choose places the
+// model in is never refused by MissRetry or StepDown.
+func TestStepDownMovesToTheNextType(t *testing.T) {
+	fp := seed(refInfo(), "q4_0")
+	w := game
+	w.Whole = true
+	w.KVTypes = []string{"f16", "q4_0"}
+	r := room(17920, 5208, 64000)
+	want, err := Choose(fp, r, w)
+	if err != nil || want.KVType != "q4_0" {
+		t.Fatalf("Choose: %v %v", want, err)
+	}
+	atFloor := Shape{Slots: 1, CtxPerSlot: 8192, KVType: "f16"}
+	if s, err := StepDown(fp, atFloor, r, w); err != nil || s != want {
+		t.Errorf("StepDown at the f16 floor: %v %v, want %v", s, err, want)
+	}
+	if s, err := MissRetry(fp, atFloor, 900, r, w); err != nil || s != want {
+		t.Errorf("MissRetry at the f16 floor: %v %v, want %v", s, err, want)
+	}
+	last := Shape{Slots: 1, CtxPerSlot: 8192, KVType: "q4_0"}
+	if s, err := StepDown(fp, last, r, w); !errors.Is(err, ErrTooBig) {
+		t.Errorf("StepDown at the last type's floor: %v %v", s, err)
+	}
+}

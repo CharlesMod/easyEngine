@@ -706,7 +706,8 @@ func better(a, b Shape) bool {
 // the room is the freshly measured one. The result is always smaller than cur; when the floor
 // is reached it moves on to StepDown.
 //
-// With Wants.KVTypes it keeps cur's type: a smaller shape is never a costlier cache.
+// With Wants.KVTypes it re-plans at cur's type (a smaller shape is never a costlier cache), and
+// StepDown moves on to the next type at that type's floor.
 func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (Shape, error) {
 	if err := room.check(fp); err != nil {
 		return Shape{}, err
@@ -714,9 +715,6 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	w, err := fp.resolve(w)
 	if err != nil {
 		return Shape{}, err
-	}
-	if len(w.KVTypes) > 0 && cur.KVType != "" {
-		w.KVTypes = []string{cur.KVType}
 	}
 	if fp, err = fp.typed(w, cur); err != nil {
 		return Shape{}, err
@@ -736,6 +734,9 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	}
 	w2 := w
 	w2.CtxFromModel = false // w is resolved: CtxMax already holds the trained context, and the cap must stand
+	if len(w2.KVTypes) > 0 {
+		w2.KVTypes = []string{fp.KVType} // fp is priced at cur's type
+	}
 	if cap < w2.CtxMax {
 		w2.CtxMax = cap
 	}
@@ -748,6 +749,8 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 // StepDown makes the shape one notch smaller: ctx per slot down by 1/16 (at least 1024) toward
 // the floor, then one more expert layer to RAM (MoE, not with Wants.Whole), then one slot fewer
 // at the floor ctx. It keeps cur's cache type; with Whole no step has an expert off the card.
+// With Wants.KVTypes, at the floor with MinSlots at a type that is not the last, it answers Choose
+// over the types after cur's; ErrTooBig comes only at the last type's floor.
 func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	if err := room.check(fp); err != nil {
 		return Shape{}, err
@@ -781,6 +784,13 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	if cur.Slots > w.MinSlots {
 		return fp.shape(w, cur.Slots-1, w.CtxFloor, cur.NCpuMoe, cur.CPUOnly), nil
+	}
+	for i, t := range w.KVTypes {
+		if t == fp.KVType && i < len(w.KVTypes)-1 {
+			w.KVTypes = w.KVTypes[i+1:]
+			w.CtxFromModel = false // w is resolved
+			return Choose(fp, room, w)
+		}
 	}
 	return Shape{}, ErrTooBig
 }

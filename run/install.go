@@ -399,6 +399,7 @@ func (s *Supervisor) ensureUV(ctx context.Context, cat *catalog.Catalog) (string
 	if err := fetch.Unpack(arch, tmp); err != nil {
 		return "", err
 	}
+	os.Remove(arch) // unpacked; uv.exe is copied out below
 	var found string
 	filepath.WalkDir(tmp, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && (d.Name() == "uv" || d.Name() == "uv.exe") && found == "" {

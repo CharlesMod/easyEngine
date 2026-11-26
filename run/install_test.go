@@ -205,7 +205,7 @@ func TestInstallJob(t *testing.T) {
 		t.Fatal("uv not installed")
 	}
 	// unpacked backend archives are not kept (on Windows they were about 0.8 GB of dead weight)
-	if left, _ := filepath.Glob(filepath.Join(s.e.Data, "downloads", "*-test.*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(s.e.Data, "downloads", "*")); len(left) != 0 {
 		t.Fatalf("backend archives left after unpacking: %v", left)
 	}
 	uv := lines(s.uvLog)

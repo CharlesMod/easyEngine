@@ -182,6 +182,7 @@ func TestDenseLlamaScalarKV(t *testing.T) {
 		{"llama.embedding_length", uint32(4096)},
 		{"llama.attention.head_count", uint32(32)},
 		{"llama.attention.head_count_kv", uint32(8)},
+		{"llama.context_length", uint32(131072)},
 	}
 	p := writeFile(t, build(3, kvs, []tn{{"blk.0.attn_q.weight", []uint64{256, 4}, 12}}))
 	in, err := read(p)
@@ -193,6 +194,13 @@ func TestDenseLlamaScalarKV(t *testing.T) {
 	}
 	if len(in.Layers) != 32 || in.Layers[31].KVHeads != 8 || in.Layers[31].SWA || !in.Layers[31].HasKV {
 		t.Errorf("layers")
+	}
+	// the trained context is the header's own; where the header does not say it, it is 0, never a guess
+	if in.CtxTrain != 131072 {
+		t.Errorf("trained ctx %d", in.CtxTrain)
+	}
+	if in, err := read(writeFile(t, build(3, kvs[:5], nil))); err != nil || in.CtxTrain != 0 {
+		t.Errorf("no context_length in the header: trained ctx %d (%v)", in.CtxTrain, err)
 	}
 }
 

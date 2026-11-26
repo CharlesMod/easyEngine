@@ -49,6 +49,9 @@ type Info struct {
 	// (logits) buffers on the card.
 	VocabSize int
 	FileSize  int64
+	// CtxTrain is the context the model was trained for (<arch>.context_length), in tokens;
+	// 0 when the header does not say it (never a guess).
+	CtxTrain int
 
 	ExpertLayers int     // layers that hold *_exps* tensors
 	Layers       []Layer // per layer, len == NLayer when known
@@ -387,6 +390,7 @@ func (f *File) Info() (Info, error) {
 	in.NExpert = geti("expert_count")
 	in.NExpertUsed = geti("expert_used_count")
 	in.SlidingWindow = geti("attention.sliding_window")
+	in.CtxTrain = geti("context_length")
 	in.NTensors = len(f.Tensors)
 	in.FileSize = f.FileSize
 

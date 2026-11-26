@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/core/gguf"
 	"hermesengine/catalog"
 	"hermesengine/plan"
 	"hermesengine/probe"
@@ -25,10 +27,12 @@ type CustomFile struct {
 
 // CustomInfo is the status view of it.
 type CustomInfo struct {
-	Path    string `json:"path"`
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
-	Missing bool   `json:"missing"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	Missing   bool   `json:"missing"`
+	Params    int64  `json:"params"`
+	SizeClass string `json:"size_class"`
 }
 
 // genericSampler is the profile of a custom file the catalog has no profile for: the rp values.
@@ -116,6 +120,11 @@ func (s *Supervisor) customStatusLocked(st *Status) {
 	if c := s.st.Custom; c != nil {
 		fi, err := os.Stat(c.Path)
 		st.Custom = &CustomInfo{Path: c.Path, Name: c.Name, Size: c.Size, Missing: err != nil || fi.IsDir()}
+		if !st.Custom.Missing {
+			st.Custom.Params = customParams(c.Path, fi.Size(), fi.ModTime().UnixNano())
+			st.Custom.SizeClass = gguf.SizeClass(st.Custom.Params)
+			st.ModelParams, st.ModelSizeClass = st.Custom.Params, st.Custom.SizeClass
+		}
 	}
 }
 
@@ -292,4 +301,29 @@ func (s *Supervisor) reloadSelected() {
 	if err := s.startLocked(); err != nil {
 		s.logf("custom: start failed: %v", err)
 	}
+}
+
+var paramCache struct {
+	sync.Mutex
+	path        string
+	size, mtime int64
+	params      int64
+}
+
+// customParams reads the header's parameter count, cached by path, size and mtime (status is polled).
+func customParams(path string, size, mtime int64) int64 {
+	paramCache.Lock()
+	defer paramCache.Unlock()
+	if paramCache.path == path && paramCache.size == size && paramCache.mtime == mtime {
+		return paramCache.params
+	}
+	var n int64
+	if fh, err := os.Open(path); err == nil {
+		if f, err := gguf.Parse(fh, size); err == nil {
+			n = f.ParamCount()
+		}
+		fh.Close()
+	}
+	paramCache.path, paramCache.size, paramCache.mtime, paramCache.params = path, size, mtime, n
+	return n
 }

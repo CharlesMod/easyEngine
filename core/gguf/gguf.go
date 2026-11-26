@@ -835,3 +835,35 @@ func blockIndex(name string) (int, bool) {
 
 // sharedKV reports whether layer i reuses an earlier layer's cache (the last n layers).
 func sharedKV(nLayer, n, i int) bool { return n > 0 && n < nLayer && i >= nLayer-n }
+
+// SmallParams is the parameter count below which a model is "small".
+const SmallParams = 8_000_000_000
+
+// ParamCount is the model's total parameter count (a mixture-of-experts model counts every
+// expert): general.parameter_count when the header has it, else the sum of the tensor element
+// counts. 0 when neither is known.
+func (f *File) ParamCount() int64 {
+	if n, ok := f.Meta["general.parameter_count"].Int(); ok && n > 0 {
+		return n
+	}
+	var sum int64
+	for _, t := range f.Tensors {
+		n := int64(1)
+		for _, d := range t.Dims {
+			n *= int64(d)
+		}
+		sum += n
+	}
+	return sum
+}
+
+// SizeClass is "small" below SmallParams parameters, "large" at or above, "" when params is 0.
+func SizeClass(params int64) string {
+	switch {
+	case params <= 0:
+		return ""
+	case params < SmallParams:
+		return "small"
+	}
+	return "large"
+}

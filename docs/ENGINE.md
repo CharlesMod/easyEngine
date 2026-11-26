@@ -349,7 +349,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler}`; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, model_params, model_size_class}`; `model_params`/`model_size_class` are in §7b; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
 | `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes}`; `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
@@ -482,9 +482,16 @@ or by name lends its profiles; else the generic rp values (temperature 1.0, top_
 min_p 0) as both `official` and `rp`. The calibration book keys on `custom-<hash of path+size+mtime>`
 instead of a sha256.
 
-Status: `custom` is `{path, name, size, missing}` or null; `model` is `"custom:<name>"` while it
+Status: `custom` is `{path, name, size, missing, params, size_class}` or null; `model` is `"custom:<name>"` while it
 serves; `model_name` is the human name of the selected model (the catalog name, or the file name).
 `GET plan` gains `custom` (a `CustomCheck` of the current file, or null).
+
+Size class: status has top-level `model_params` (int64, total parameters, 0 unknown) and
+`model_size_class` (`"small"` below 8e9 parameters, `"large"` at or above, `""` unknown); a
+mixture-of-experts model counts every expert. While a custom file serves they are read from its
+header (`general.parameter_count` when present, else the sum of the tensor element counts) and
+repeated inside `custom` as `params` / `size_class`; `custom/check` carries the same `params` and
+`size_class`. For a catalog model they are 0 and `""` (the catalog holds no parameter count).
 
 A missing file (at `custom/use`, at engine start, at restart or by the watchdog): `custom/use` answers
 400 "file not found"; an engine start or restart goes to phase `error`, message

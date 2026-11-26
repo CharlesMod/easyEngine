@@ -88,6 +88,10 @@ type Status struct {
 	// (nil when none is set). While it serves, Model is "custom:<name>".
 	ModelName string      `json:"model_name"`
 	Custom    *CustomInfo `json:"custom"`
+	// ModelParams is the total parameter count of the served custom file (0 unknown);
+	// ModelSizeClass is "small" (< 8e9), "large" or "" (custom.go).
+	ModelParams    int64  `json:"model_params"`
+	ModelSizeClass string `json:"model_size_class"`
 	// Previous is the model the last switch replaced; its file is still on disk (run/switch.go).
 	Previous *PreviousInfo `json:"previous"`
 }

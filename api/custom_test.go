@@ -48,7 +48,7 @@ func TestCustomCheck(t *testing.T) {
 		return ck
 	}
 	ck := check(good)
-	if !ck.OK || ck.Arch != "llama" || ck.Quant != "Q4_K_M" || ck.Name != "My Model" || !ck.ChatTemplate || ck.MoE || ck.CtxTrain != 8192 || ck.Params != 256*100+2*(256*256+512*256) || ck.Fits == "" || ck.Known || !ck.Estimated {
+	if !ck.OK || ck.Arch != "llama" || ck.Quant != "Q4_K_M" || ck.Name != "My Model" || !ck.ChatTemplate || ck.MoE || ck.CtxTrain != 8192 || ck.Params != 256*100+2*(256*256+512*256) || ck.SizeClass != "small" || ck.Fits == "" || ck.Known || !ck.Estimated {
 		t.Fatalf("good: %+v", ck)
 	}
 	if ck := check(filepath.Join(dir, "nope.gguf")); ck.OK || ck.Error != "file not found" {
@@ -93,7 +93,7 @@ func TestCustomUseRestartMissingClear(t *testing.T) {
 	}
 	testkit.WaitFor(t, 15*time.Second, "custom serving", servedCustom("mine"))
 	st := s.Status()
-	if st.Phase != "ready" || st.Model != "custom:mine" || st.ModelName != "mine" || st.Custom == nil || st.Custom.Missing || st.Custom.Path != p {
+	if st.Phase != "ready" || st.Model != "custom:mine" || st.ModelName != "mine" || st.Custom == nil || st.Custom.Missing || st.Custom.Path != p || st.ModelParams != 256*100+2*(256*256+512*256) || st.ModelSizeClass != "small" || st.Custom.Params != st.ModelParams || st.Custom.SizeClass != "small" {
 		t.Fatalf("status %+v custom %+v", st, st.Custom)
 	}
 	starts := strings.Join(e.Starts(), "\n")

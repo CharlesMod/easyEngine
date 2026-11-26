@@ -645,6 +645,10 @@ E4B RP with cuda + cudart b12651, uv 0.13.10 and the agent: counted peak 4966006
 peak 4965629952 B (the count is 368 KiB over before any headroom). With free space set to the
 need + 1 MiB the install finished; at the need - 1 MiB it was refused up front with 4 KiB
 written.
+Windows (DESKTOP, NTFS, cuda-win + cudart-win, no venv): the files the install left (rounded
+to 4 KiB) were 5192 MB against 5218 MB counted, and the cudart step's sampled peak stayed under
+its count; free space on that system disk moved by up to 300 MB either way during a run from
+other programs (remote-desktop traces, a WSL disk), which is what the headroom is for there.
 
 ## 8. Game profile
 

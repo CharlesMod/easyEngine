@@ -162,8 +162,8 @@ const OSReserveMiB = 2048
 type Wants struct {
 	Slots    int    `json:"slots"`
 	MinSlots int    `json:"min_slots"`
-	CtxMax   int    `json:"ctx_max"` // per slot
-	CtxFloor int    `json:"ctx_floor"`
+	CtxMax   int    `json:"ctx_max"`   // per slot
+	CtxFloor int    `json:"ctx_floor"` // per slot; held exactly, on the step of context or not (Norm)
 	KVType   string `json:"kv_type"`
 	// MinTPS is the decode speed floor in tokens/s per stream (default 20, negative = no floor).
 	// Where the footprint has a measured speed curve, the planner keeps the expert layers moved to
@@ -274,9 +274,13 @@ type Shape struct {
 	// measured curve exists for the model.
 	EstTPS float64 `json:"est_decode_tps"`
 	// VRAMBasis is of VRAMMiB: Predicted from the planner; Measured from Book.Mark, where the book
-	// holds a reading of this very shape and VRAMMiB is that reading. RAMMiB is always predicted:
-	// no reading of host memory is taken.
+	// holds a card reading of this very shape and VRAMMiB is that reading.
 	VRAMBasis Basis `json:"vram_basis,omitempty"`
+	// RAMBasis is of RAMMiB: Predicted from the planner; Measured from Book.Mark only for a
+	// CPU-only shape, where the book holds a host reading of this very shape and RAMMiB is that
+	// reading. A card shape's RAMMiB (its expert layers in RAM) is never read, so always predicted.
+	// "" (a shape built by hand, or by an older build) says nothing.
+	RAMBasis Basis `json:"ram_basis,omitempty"`
 	// ConstsBackend and ConstsCard name the set of constants the predicted figures were built
 	// with (Consts.Backend, Consts.Card); where they are not the build and card it runs on, the
 	// figures were measured elsewhere.
@@ -288,6 +292,9 @@ type Shape struct {
 func (s Shape) CtxTotal() int { return s.Slots * s.CtxPerSlot }
 
 // Norm is w with every default filled in and every bound made consistent: what Choose plans with.
+// CtxMax is taken down to the step of context (1024 tokens); CtxFloor is kept exactly as asked,
+// on the step or not (never under 1024), and where it is above CtxMax, CtxMax is the floor. So a
+// shape planned from it never holds less context per slot than the floor asked.
 func (w Wants) Norm() Wants {
 	if w.Slots < 1 {
 		w.Slots = 1
@@ -305,7 +312,6 @@ func (w Wants) Norm() Wants {
 		w.CtxFloor = 8192
 	}
 	w.CtxMax = alignDown(w.CtxMax)
-	w.CtxFloor = alignDown(w.CtxFloor)
 	if w.CtxFloor < alignTokens {
 		w.CtxFloor = alignTokens
 	}
@@ -874,7 +880,7 @@ func (fp Footprint) Largest(s Shape) (float64, error) {
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }
 
 func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
-	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted,
+	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted, RAMBasis: Predicted,
 		ConstsBackend: fp.c.backend, ConstsCard: fp.c.card}
 	if cpuOnly {
 		s.NCpuMoe = 0
@@ -886,7 +892,8 @@ func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 	return s
 }
 
-// ctxCeiling is the largest 1024-aligned ctx per slot allowed by wants and the book's cap.
+// ctxCeiling is the largest ctx per slot allowed by wants and the book's cap: aligned, or the
+// floor itself where CtxMax is the floor; under the floor where the cap is (no shape then).
 func (fp fig) ctxCeiling(w Wants, slots int) int {
 	c := w.CtxMax
 	if fp.CapCtxTotal > 0 {
@@ -897,14 +904,18 @@ func (fp fig) ctxCeiling(w Wants, slots int) int {
 	return c
 }
 
-// maxCtx finds the largest aligned ctx per slot in [floor, ceiling] with ok(ctx) true; ok must
-// be monotone (true for small ctx).
+// maxCtx finds the largest aligned ctx per slot in [floor, ceiling] with ok(ctx) true, or the
+// floor itself where ok holds there and at no aligned ctx above it (a floor off the step). It
+// never answers under the floor. ok must be monotone (true for small ctx).
 func maxCtx(floor, ceiling int, ok func(ctx int) bool) (int, bool) {
 	if ceiling < floor || !ok(floor) {
 		return 0, false
 	}
-	lo, hi := floor/alignTokens, ceiling/alignTokens // lo ok
-	for lo < hi {
+	lo, hi := (floor+alignTokens-1)/alignTokens, ceiling/alignTokens // the aligned ctx in [floor, ceiling]
+	if lo > hi || !ok(lo*alignTokens) {
+		return floor, true
+	}
+	for lo < hi { // lo ok
 		mid := (lo + hi + 1) / 2
 		if ok(mid * alignTokens) {
 			lo = mid
@@ -981,7 +992,9 @@ func resolve(fp Footprint, w Wants) (Wants, error) {
 // card and RAM; with no usable GPU they run CPU-only. When the footprint has a measured speed
 // curve the CPU layers stop at the Wants.MinTPS floor (scaled by Room.SpeedScale) even if that
 // costs ctx; if nothing reaches the floor the best shape is returned, with EstTPS under it.
-// With Wants.KVTypes it does all this at each type in turn (see there).
+// With Wants.KVTypes it does all this at each type in turn (see there). No shape it answers holds
+// less context per slot than Wants.CtxFloor: above the floor ctx moves by the step (1024 tokens),
+// and a floor off the step is answered as itself where no aligned ctx at or above it fits.
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	st, err := settle(&fp, nil, &room, &w)
 	if err != nil {
@@ -1058,8 +1071,8 @@ func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed boo
 				return fp.vram(slots, c, n) <= budget && (block <= 0 || fp.largest(slots, c, n) <= block)
 			}
 		}
-		// (1) all on GPU at the largest ctx.
-		if ctx, ok := maxCtx(ceil, ceil, okAt(0)); ok {
+		// (1) all on GPU at the largest ctx, never under the floor (a cap may put ceil there).
+		if ctx, ok := maxCtx(max(ceil, w.CtxFloor), ceil, okAt(0)); ok {
 			return fp.shape(w, slots, ctx, 0, false), nil
 		}
 		// (2) ctx per slot down to half the largest.
@@ -1209,7 +1222,11 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	// The next type's shape: no more slots or ctx per slot than cur, no more memory than cur needs.
 	w.Slots = min(w.Slots, cur.Slots)
 	w.MinSlots = min(w.MinSlots, w.Slots)
-	w.CtxMax = min(w.CtxMax, alignDown(cur.CtxPerSlot))
+	c := alignDown(cur.CtxPerSlot)
+	if c < w.CtxFloor {
+		c = cur.CtxPerSlot // cur at a floor off the step: the next type holds that floor exactly
+	}
+	w.CtxMax = min(w.CtxMax, c)
 	budget, hostRAM := st.room.budget, ram
 	if cur.CPUOnly {
 		hostRAM = min(hostRAM, f.need(cur))
@@ -1286,9 +1303,13 @@ type Calib struct {
 	// Under is the caps this one was lowered beneath, latest last, each with its own lift: where
 	// LetGo lets CapCtxTotal go it falls back to the latest of these that still stands.
 	Under []HeldCap `json:"cap_under,omitempty"`
-	// Readings is the card memory each shape that came up held, one per shape, whether or not
-	// its reading was taken for the fixed part (Book.Mark).
+	// Readings is the card memory each shape on a card that came up held, one per shape, whether
+	// or not its reading was taken for the fixed part (Book.Mark).
 	Readings []Reading `json:"readings,omitempty"`
+	// HostReadings is the host memory each CPU-only shape that came up held, one per shape
+	// (Book.Mark). They are kept apart from Readings so an older build, which takes every reading
+	// there as card memory, never reads one as a card reading: it drops them when it writes.
+	HostReadings []Reading `json:"host_readings,omitempty"`
 	// Consts is the set of constants of the seed FixedMiB was worked out against (the reading less
 	// that seed's other figures); nil, as an older build wrote it, is the default set.
 	Consts *Consts `json:"consts,omitempty"`
@@ -1316,19 +1337,35 @@ func (l CapLift) lifted(room roomFig, build string) bool {
 	return l.Build != build || (l.NoGPU == room.NoGPU && room.capRoom() > l.RoomMiB+l.MissMiB)
 }
 
-// Reading is the card memory one shape held when its load came up, read by its process.
+// Reading is the memory one shape held when its load came up, read by its process: for a shape on
+// a card, its card memory (VRAMMiB); for a CPU-only shape (CPUOnly), its host memory (RAMMiB), with
+// no expert layer counted (a CPU-only run moves none). A reading without CPUOnly, as every older
+// build wrote it, is a card reading.
 type Reading struct {
 	Slots      int    `json:"slots"`
 	CtxPerSlot int    `json:"ctx_per_slot"`
 	NCpuMoe    int    `json:"n_cpu_moe"`
 	KVType     string `json:"kv_type"`
 	VRAMMiB    int    `json:"vram_mib"`
+	CPUOnly    bool   `json:"cpu_only,omitempty"`
+	RAMMiB     int    `json:"ram_mib,omitempty"`
 }
 
-// of is whether the reading was taken from this shape. A cache type is compared as the type it
-// runs at (runKV), so a shape that names none and one that names the default are one shape.
+// of is whether the reading was taken from this shape: a card reading only of a card shape and a
+// host reading only of a CPU-only one, never across. A cache type is compared as the type it runs
+// at (runKV), so a shape that names none and one that names the default are one shape; a CPU-only
+// shape's expert layers are not compared (it runs none off a card, Args).
 func (r Reading) of(s Shape) bool {
-	return !s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot && r.NCpuMoe == s.NCpuMoe && runKV(Shape{KVType: r.KVType}) == runKV(s)
+	return r.CPUOnly == s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot &&
+		(s.CPUOnly || r.NCpuMoe == s.NCpuMoe) && runKV(Shape{KVType: r.KVType}) == runKV(s)
+}
+
+// readingsOf is where the book keeps the readings of shapes like s: card or host.
+func (e *Calib) readingsOf(s Shape) *[]Reading {
+	if s.CPUOnly {
+		return &e.HostReadings
+	}
+	return &e.Readings
 }
 
 // Book is the calibration book kept in state.json.
@@ -1360,14 +1397,21 @@ func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	return seed
 }
 
-// Mark is s with what the book holds of it: where key has a reading of this very shape, VRAMMiB
-// is that reading and VRAMBasis Measured. Otherwise s as given.
+// Mark is s with what the book holds of it: where key has a reading of this very shape, for a
+// card shape VRAMMiB is that reading and VRAMBasis Measured; for a CPU-only shape RAMMiB is that
+// reading (its host memory) and RAMBasis Measured. Otherwise s as given. It writes only a measured
+// figure, never a predicted one over it.
 func (b *Book) Mark(key string, s Shape) Shape {
 	if b == nil {
 		return s
 	}
-	for _, r := range b.Entries[key].Readings {
-		if r.of(s) {
+	e := b.Entries[key]
+	for _, r := range *e.readingsOf(s) {
+		switch {
+		case !r.of(s):
+		case s.CPUOnly:
+			s.RAMMiB, s.RAMBasis = r.RAMMiB, Measured
+		default:
 			s.VRAMMiB, s.VRAMBasis = r.VRAMMiB, Measured
 		}
 	}
@@ -1387,7 +1431,9 @@ const (
 	NoSeed CalibVerdict = "no_seed"
 	// NoReading: no reading was given (0 MiB or less).
 	NoReading CalibVerdict = "no_reading"
-	// CPUOnly: a CPU-only shape's card use says nothing of the fixed part on the card.
+	// CPUOnly: the shape ran on the processor alone. The reading is its host memory, kept for its
+	// shape (Book.Mark gives it as RAMMiB, Measured); it says nothing of the fixed part on the
+	// card, which is not calibrated from it.
 	CPUOnly CalibVerdict = "cpu_only"
 	// NotSeed: the footprint offered is the book's overlay (Basis Measured), not the header's
 	// seed, so there is no seed to hold the reading to; the fixed part does not move.
@@ -1409,8 +1455,11 @@ func (c Calibration) Taken() bool { return c.Verdict == Taken }
 func (c Calibration) OffMiB() float64 { return c.ImpliedFixedMiB - c.SeedFixedMiB }
 
 func (c Calibration) String() string {
-	if c.Verdict == NoReading || c.Verdict == CPUOnly {
+	switch c.Verdict {
+	case NoReading:
 		return string(c.Verdict)
+	case CPUOnly:
+		return string(c.Verdict) + " (host memory kept for its shape; the card's fixed part not calibrated)"
 	}
 	if c.Verdict == NotSeed {
 		return fmt.Sprintf("%s (implied fixed %.0f MiB; the book's figure was offered, not the header's seed)", c.Verdict, c.ImpliedFixedMiB)
@@ -1418,7 +1467,11 @@ func (c Calibration) String() string {
 	return fmt.Sprintf("%s (implied fixed %.0f MiB, seed %.0f MiB, off %+.0f MiB)", c.Verdict, c.ImpliedFixedMiB, c.SeedFixedMiB, c.OffMiB())
 }
 
-// Calibrate records a healthy load that held measuredMiB of VRAM at shape s, and says what it did.
+// Calibrate records a healthy load that held measuredMiB at shape s, and says what it did: card
+// memory for a shape on a card, host memory for a CPU-only shape. A CPU-only reading is kept for
+// its shape alone (verdict CPUOnly, no implied fixed part, the book's fixed part untouched). A
+// reading of 0 MiB or less keeps nothing (NoReading), whatever the shape.
+//
 // seed is the header's seed (Basis Predicted), never the book's overlay: every reading is held to
 // it, so a run of readings each near the last cannot walk the fixed part away from the seed. The
 // overlay offered is NotSeed and moves nothing. The reading is kept for its shape (Book.Mark)
@@ -1433,16 +1486,16 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 		return Calibration{}, err
 	}
 	c := Calibration{SeedFixedMiB: seed.FixedMiB}
-	switch {
-	case s.CPUOnly:
-		c.Verdict = CPUOnly
-		return c, nil
-	case measuredMiB <= 0:
+	if measuredMiB <= 0 {
 		c.Verdict = NoReading
 		return c, nil
 	}
-	c.ImpliedFixedMiB = float64(measuredMiB) - (st.fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - st.fp.FixedMiB)
+	if !s.CPUOnly {
+		c.ImpliedFixedMiB = float64(measuredMiB) - (st.fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - st.fp.FixedMiB)
+	}
 	switch {
+	case s.CPUOnly: // host memory: nothing of the card's fixed part to hold to the seed
+		c.Verdict = CPUOnly
 	case seed.Basis == Measured:
 		c.Verdict, c.SeedFixedMiB = NotSeed, 0
 	case seed.FixedMiB <= 0:
@@ -1457,13 +1510,18 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 	}
 	e := b.Entries[key]
 	// A new slice every time: a copy of the book handed to a writer may still hold the old one.
-	rs := make([]Reading, 0, len(e.Readings)+1)
-	for _, r := range e.Readings {
+	old := e.readingsOf(s)
+	rs := make([]Reading, 0, len(*old)+1)
+	for _, r := range *old {
 		if !r.of(s) {
 			rs = append(rs, r)
 		}
 	}
-	e.Readings = append(rs, Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB})
+	r := Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB}
+	if s.CPUOnly {
+		r = Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, KVType: s.KVType, CPUOnly: true, RAMMiB: measuredMiB}
+	}
+	*old = append(rs, r)
 	if c.Taken() {
 		e.FixedMiB = c.ImpliedFixedMiB
 		e.Consts = cloneSet(seed.Consts)

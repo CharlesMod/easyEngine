@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -34,12 +35,30 @@ type entry struct {
 	why                      string
 }
 
+// runs is the cache type a shape is run at: its own, or for "" the default Args renders.
+func runs(s Shape) string {
+	if s.KVType == "" {
+		return "q4_0"
+	}
+	return s.KVType
+}
+
+// walked is a walk entry's answer priced as shapePrice does, and an error where it left the type
+// the failed shape ran at: without a list, and with a list that does not hold that type, every
+// step keeps it.
+func walked(f feed, s Shape, err error) (float64, float64, error) {
+	if err == nil && len(f.w.KVTypes) == 0 && runs(s) != runs(f.s) {
+		return 0, 0, errors.New("the walk left the type " + runs(f.s) + " the failed shape ran at for " + runs(s))
+	}
+	return shapePrice(f.fp, s, err)
+}
+
 // shapePrice is a returned shape's predicted memory and that shape priced at its own type.
 func shapePrice(fp Footprint, s Shape, err error) (float64, float64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	ft, perr := fp.atType(s.KVType)
+	ft, perr := fp.atType(runs(s))
 	if perr != nil { // never the typed error: only the entry may answer that
 		return 0, 0, errors.New("the entry answered a shape at a type it cannot price: " + s.KVType)
 	}
@@ -57,11 +76,11 @@ var entries = map[string]entry{
 	}},
 	"MissRetry": {room: true, wants: true, shape: true, call: func(f feed) (float64, float64, error) {
 		s, err := MissRetry(f.fp, f.s, 500, f.room, f.w)
-		return shapePrice(f.fp, s, err)
+		return walked(f, s, err)
 	}},
 	"StepDown": {room: true, wants: true, shape: true, call: func(f feed) (float64, float64, error) {
 		s, err := StepDown(f.fp, f.s, f.room, f.w)
-		return shapePrice(f.fp, s, err)
+		return walked(f, s, err)
 	}},
 	"Grow": {room: true, wants: true, shape: true, call: func(f feed) (float64, float64, error) {
 		s, _, err := Grow(f.fp, f.s, f.room, f.w)
@@ -80,7 +99,7 @@ var entries = map[string]entry{
 		if err := f.book.LowerCap("k", f.fp, f.s, ctx, f.room, "b1", stamp); err != nil {
 			return 0, 0, err
 		}
-		ft, _ := f.fp.atType(f.s.KVType)
+		ft, _ := f.fp.atType(runs(f.s))
 		miss := math.Ceil(ft.kvAt(f.s.Slots, f.s.CtxPerSlot) - ft.kvAt(f.s.Slots, ctx/f.s.Slots))
 		return float64(f.book.Entries["k"].Lift.MissMiB), miss, nil
 	}},
@@ -94,12 +113,12 @@ var entries = map[string]entry{
 	}},
 	"Footprint.Need": {shape: true, call: func(f feed) (float64, float64, error) {
 		v, _, err := f.fp.Need(f.s)
-		ft, _ := f.fp.atType(f.s.KVType)
+		ft, _ := f.fp.atType(runs(f.s))
 		return v, ft.vram(f.s.Slots, f.s.CtxPerSlot, f.s.NCpuMoe), err
 	}},
 	"Footprint.Largest": {shape: true, call: func(f feed) (float64, float64, error) {
 		v, err := f.fp.Largest(f.s)
-		ft, _ := f.fp.atType(f.s.KVType)
+		ft, _ := f.fp.atType(runs(f.s))
 		return v, ft.largest(f.s.Slots, f.s.CtxPerSlot, f.s.NCpuMoe), err
 	}},
 	"Seed": {name: true, call: func(f feed) (float64, float64, error) { _, _, err := Seed(refInfo(), f.kv); return 0, 0, err }},
@@ -145,6 +164,8 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 	q4 := f16
 	q4.KVType = "q4_0"
 	q4.VRAMMiB = int(math.Ceil(ref.vram(q4.Slots, q4.CtxPerSlot, q4.NCpuMoe)))
+	untyped := q4
+	untyped.KVType = ""
 	book := func() *Book { // a cap that a larger room would let go
 		return &Book{Entries: map[string]Calib{"k": {CapCtxTotal: 1 << 20, Lift: &CapLift{RoomMiB: capRoom(base), Build: "b1"}}}}
 	}
@@ -165,6 +186,10 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 		{name: "unknown type in the shape", applies: func(e entry) bool { return e.shape }, mod: func(f *feed) { f.s.KVType = "q3_k" }, unknownType: "q3_k", keepsBook: true},
 		{name: "unknown type name", applies: func(e entry) bool { return e.name }, mod: func(f *feed) { f.kv = "q3_k" }, unknownType: "q3_k"},
 		{name: "a shape at a type not the seed's", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = f16; f.w.KVType = "f16" }, priced: true},
+		// A shape naming no type runs at the default (Args): every entry prices it there, with
+		// wants at another type or a list that does not hold the default, or with none.
+		{name: "a shape naming no type, wants at another", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = untyped; f.w.KVType = "f16" }, priced: true},
+		{name: "a shape naming no type, a list without the default", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = untyped; f.w.KVTypes = []string{"f16", "q8_0"} }, priced: true},
 	}
 	names := make([]string, 0, len(entries))
 	for n := range entries {
@@ -279,6 +304,92 @@ func TestEntriesTableIsComplete(t *testing.T) {
 		}
 		if (e.call == nil) == (e.why == "") {
 			t.Errorf("%s: a row has a call or says why it needs none, not both", k)
+		}
+	}
+}
+
+// A shape naming no type runs at the default, so the walk down prices it there whatever type the
+// wants name: no step answers a shape needing more memory, more slots or more context than it.
+func TestUntypedShapeWalksAtTheDefault(t *testing.T) {
+	ref := seed(refInfo(), "q4_0")
+	rm := room(16303, 3000, 24000)
+	cur := Shape{Slots: 1, CtxPerSlot: 16384}
+	q4, _ := ref.atType("q4_0")
+	need := q4.vram(cur.Slots, cur.CtxPerSlot, 0)
+	for _, list := range [][]string{nil, {"f16", "q8_0"}} {
+		w := Wants{Slots: 1, CtxMax: 16384, CtxFloor: 1024, KVType: "f16", KVTypes: list}
+		if v, _, err := ref.Need(cur); err != nil || math.Abs(v-need) > 1 {
+			t.Fatalf("Need: %.1f %v, at the default %.1f", v, err, need)
+		}
+		check := func(op string, s Shape, err error) {
+			if err != nil {
+				t.Errorf("%v %s: %v", list, op, err)
+				return
+			}
+			ft, _ := ref.atType(runs(s))
+			if n := ft.need(s); n > need || s.Slots > cur.Slots || s.CtxPerSlot > cur.CtxPerSlot || runs(s) != "q4_0" {
+				t.Errorf("%v %s after a failed %v (%.0f MiB at q4_0): %v %s needing %.0f MiB", list, op, cur, need, s, s.KVType, n)
+			}
+		}
+		s, err := StepDown(ref, cur, rm, w)
+		check("StepDown", s, err)
+		s, err = MissRetry(ref, cur, 500, rm, w)
+		check("MissRetry", s, err)
+	}
+}
+
+// The walk down from shapes naming no type or a named one, over a handful of rooms and lists,
+// StepDown and MissRetry alike: each step lowers the measure (types left after the type the shape
+// runs at, then its memory) and is no larger in slots or ctx, and the walk ends at ErrTooBig.
+func TestWalkFromAnyTypeEnds(t *testing.T) {
+	ref, dense := seed(refInfo(), "q4_0"), seed(denseInfo(), "q4_0")
+	lists := [][]string{nil, {"f16", "q4_0"}, {"q4_0", "f16"}, {"f16", "q8_0"}}
+	cases := []struct {
+		fp    Footprint
+		whole bool
+	}{{ref, true}, {ref, false}, {dense, true}}
+	for _, c := range cases {
+		for vram := 8192; vram <= 24576; vram += 8192 {
+			r := room(vram, 1255, 64000)
+			for _, list := range lists {
+				for _, wt := range []string{"q4_0", "f16"} {
+					for _, st := range []string{"", "q4_0", "f16", "q8_0"} {
+						w := game
+						w.Whole, w.KVType, w.KVTypes = c.whole, wt, list
+						types := kvTypes(list)
+						measure := func(s Shape) (int, float64) {
+							ft, _ := c.fp.atType(runs(s))
+							left := 0
+							if i := slices.Index(types, runs(s)); i >= 0 {
+								left = len(types) - 1 - i
+							}
+							return left, ft.need(s)
+						}
+						for op, step := range map[string]func(Shape) (Shape, error){
+							"StepDown":  func(s Shape) (Shape, error) { return StepDown(c.fp, s, r, w) },
+							"MissRetry": func(s Shape) (Shape, error) { return MissRetry(c.fp, s, 500, r, w) },
+						} {
+							cur := Shape{Slots: 2, CtxPerSlot: 16384, KVType: st}
+							for i := 0; ; i++ {
+								next, err := step(cur)
+								if errors.Is(err, ErrTooBig) {
+									break
+								}
+								if err != nil || i > 2000 {
+									t.Fatalf("%s %v %s from %q on %d: %v (step %d)", op, list, wt, st, vram, err, i)
+								}
+								l0, m0 := measure(cur)
+								l1, m1 := measure(next)
+								if l1 > l0 || (l1 == l0 && m1 >= m0) || next.Slots > cur.Slots || next.CtxPerSlot > cur.CtxPerSlot {
+									t.Fatalf("%s %v wants %s, whole %v, on %d: %v %q -> %v %q does not lower the measure",
+										op, list, wt, c.whole, vram, cur, cur.KVType, next, next.KVType)
+								}
+								cur = next
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 }

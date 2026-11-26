@@ -446,11 +446,22 @@ type roomFig struct {
 }
 
 // settled is what one entry prices from: the footprint priced at the type its numbers are taken
-// at, the room read whole and the wants resolved. A part the entry did not give is zero.
+// at, the room read whole, the wants resolved and the type the shape runs at. A part the entry did
+// not give is zero.
 type settled struct {
 	fp   fig
 	room roomFig
 	w    Wants
+	kv   string // the cache type the shape runs at (runKV); "" with no shape
+}
+
+// runKV is the cache type a shape is run at: its own, or for "" the default q4_0. Args renders it
+// and settle prices it, so a shape naming no type has that one meaning everywhere.
+func runKV(s Shape) string {
+	if s.KVType == "" {
+		return "q4_0"
+	}
+	return s.KVType
 }
 
 // settle is the one checked place. Each argument is nil where the entry takes none (with wants,
@@ -460,11 +471,12 @@ type settled struct {
 // ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
 // price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError).
 //
-// The figures are priced at the shape's own cache type where a shape is given ("" is the wants'
-// type, or q4_0 with no wants), else at the wants' (the first of KVTypes), else at the
-// footprint's own: never at the seed's in place of the shape's. A footprint that names no type
-// (measured numbers) is taken as given, except with a list of types, which it cannot be priced
-// at (ErrNoKVType). With a shape and wants, the resolved wants' KVType is the shape's type.
+// The figures are priced at the type the shape runs at where a shape is given (runKV: a shape's
+// "" is the default q4_0, with or without wants, as Args renders it), else at the wants' (the
+// first of KVTypes), else at the footprint's own: never at the seed's in place of the shape's. A
+// footprint that names no type (measured numbers) is taken as given, except with a list of types,
+// which it cannot be priced at (ErrNoKVType). The resolved wants are never rewritten from a shape:
+// the type the shape runs at is answered beside them (settled.kv).
 func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	var st settled
 	if room != nil {
@@ -503,15 +515,11 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	}
 	t := fp.KVType
 	switch {
-	case s != nil && s.KVType != "":
-		t = s.KVType
+	case s != nil:
+		st.kv = runKV(*s)
+		t = st.kv
 	case w != nil:
 		t = st.w.KVType
-	case s != nil:
-		t = "q4_0"
-	}
-	if s != nil && w != nil {
-		st.w.KVType = t
 	}
 	if fp.KVType == "" && len(st.w.KVTypes) == 0 {
 		t = "" // measured figures: taken as given
@@ -892,7 +900,7 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	if err != nil {
 		return Shape{}, err
 	}
-	f, w := st.fp, st.w // f is priced at cur's type, and w.KVType is that type
+	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
 	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
 		drop := int(math.Ceil((float64(failedBufMiB) + runtimeMiB) / (perTok * float64(cur.Slots))))
@@ -908,8 +916,9 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	}
 	w2 := w
 	w2.CtxFromModel = false // w is resolved: CtxMax already holds the trained context, and the cap must stand
+	w2.KVType = st.kv       // the re-plan keeps the type cur runs at
 	if len(w2.KVTypes) > 0 {
-		w2.KVTypes = []string{f.KVType}
+		w2.KVTypes = []string{st.kv}
 	}
 	if cap < w2.CtxMax {
 		w2.CtxMax = cap
@@ -922,13 +931,16 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 
 // StepDown makes the shape one notch smaller: ctx per slot down by 1/16 (at least 1024) toward
 // the floor, then one more expert layer to RAM (MoE, not with Wants.Whole), then one slot fewer
-// at the floor ctx. It keeps cur's cache type; with Whole no step has an expert off the card.
+// at the floor ctx. It keeps the cache type cur runs at (runKV: a shape naming no type runs at the
+// default q4_0, whatever type the wants name); with Whole no step has an expert off the card.
 // With Wants.KVTypes (taken once, each type at its first place and repeats dropped), at the floor
 // with MinSlots at a type that is not the last, it moves to the next type in the list with the
 // largest shape there that needs no more memory than cur (predicted at cur's type) and is never
 // better than it (no more slots, no more ctx per slot); where none fits, on to the type after;
-// ErrTooBig comes only at the last type's floor. It never plans the room afresh (Choose alone
-// does): the load that failed disproved that plan.
+// ErrTooBig comes only at the last type's floor. A shape at a type the wants do not list (with no
+// list, any type; so a shape naming no type under wants at f16 walks down at q4_0) keeps that type
+// to its floor and ends at ErrTooBig there, never moving to a type it was not running. It never
+// plans the room afresh (Choose alone does): the load that failed disproved that plan.
 //
 // The walk is monotone: each step strictly lowers the pair (types left after the shape's in the
 // list, then the predicted memory the shape is sized against, Footprint.need), compared in that
@@ -940,7 +952,8 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	if err != nil {
 		return Shape{}, err
 	}
-	f, w := st.fp, st.w // f is priced at cur's type, and w.KVType is that type
+	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
+	w.KVType = st.kv    // every step keeps that type until the move to the next type of the list
 	if w.Whole {
 		cur.NCpuMoe = 0
 	}
@@ -963,7 +976,7 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	if cur.Slots > w.MinSlots {
 		return f.shape(w, cur.Slots-1, w.CtxFloor, cur.NCpuMoe, cur.CPUOnly), nil
 	}
-	i := slices.Index(w.KVTypes, f.KVType) // w.KVTypes holds each type once (resolve)
+	i := slices.Index(w.KVTypes, st.kv) // w.KVTypes holds each type once (resolve)
 	if i < 0 {
 		return Shape{}, ErrTooBig
 	}
@@ -1020,10 +1033,7 @@ func Args(s Shape) []string {
 	if s.NCpuMoe > 0 && !s.CPUOnly {
 		a = append(a, "--n-cpu-moe", strconv.Itoa(s.NCpuMoe))
 	}
-	kv := s.KVType
-	if kv == "" {
-		kv = "q4_0"
-	}
+	kv := runKV(s)
 	return append(a, "-ctk", kv, "-ctv", kv)
 }
 

@@ -70,7 +70,7 @@ func adapterByIndex(as []gpusense.Adapter, idx int) (gpusense.Adapter, bool) {
 }
 
 // pickEngine is the adapter the engine runs on: the discrete one with the most dedicated
-// memory; an integrated one only when there is no discrete adapter with memory.
+// memory (of equal cards the emptier); an integrated one only when there is no discrete adapter with memory.
 func pickEngine(as []gpusense.Adapter) (gpusense.Adapter, bool) {
 	var best gpusense.Adapter
 	found := false
@@ -78,8 +78,8 @@ func pickEngine(as []gpusense.Adapter) (gpusense.Adapter, bool) {
 		if a.Integrated || a.Unified || a.DedicatedMiB <= 0 {
 			continue
 		}
-		if !found || a.DedicatedMiB > best.DedicatedMiB {
-			best, found = a, true
+		if !found || a.DedicatedMiB > best.DedicatedMiB || (a.DedicatedMiB == best.DedicatedMiB && a.UsedMiB >= 0 && best.UsedMiB > a.UsedMiB) {
+			best, found = a, true // equal cards: the emptier one
 		}
 	}
 	if found {

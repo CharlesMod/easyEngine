@@ -18,6 +18,13 @@ var (
 		{Index: 1, Vendor: "intel", Name: "Intel(R) Iris(R) Xe Graphics", VRAMTotalMiB: 128, Source: "wmi"}}}
 )
 
+func TestPickEngineEqualCardsTakesTheEmptier(t *testing.T) {
+	as := []gpusense.Adapter{{Index: 0, Vendor: "nvidia", DedicatedMiB: 24576, UsedMiB: 19311}, {Index: 1, Vendor: "nvidia", DedicatedMiB: 24576, UsedMiB: 1127}}
+	if e, ok := pickEngine(as); !ok || e.Index != 1 {
+		t.Fatalf("picked %+v, want adapter 1", e)
+	}
+}
+
 func TestMeasureReserve(t *testing.T) {
 	const e4b = 3121 // an E4B-sized model, MiB
 	ours := gpusense.Process{PID: 50, Adapter: 0, DedicatedMiB: 3000, Ours: true}

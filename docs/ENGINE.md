@@ -387,8 +387,9 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   the failures and crashes in a row, the last error, the seconds to the next try, whether the
   crashes were read as memory, and the ctx of the shape the engine will not return to.
 - **A shape that failed is a ceiling:** a shape that ran out of memory, crashed into a step
-  down, or was shrunk away from is not chosen or grown back to for 10 min (`GrowBackoff`); a
-  grow may then try once more.
+  down, or failed a grow is not chosen or grown back to for 10 min (`GrowBackoff`); a grow may
+  then try once more. A shape shrunk away from because another app took room is not one: it
+  grows back once the app lets go.
 - **Out-of-memory the server survives:** llama-server can fail a request on a CUDA OOM and keep
   running. Its output is watched line by line (the memory patterns of `ParseOOM`, pinned host
   memory fallbacks excepted); out-of-memory lines in two ticks within 60 s (`OOMHold`) step the

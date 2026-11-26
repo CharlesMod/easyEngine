@@ -296,3 +296,25 @@ func TestDrainGivesUpAfterDrainMax(t *testing.T) {
 		t.Fatalf("errors = %v", s.Status().Errors)
 	}
 }
+
+// A shape shrunk away from because another app took room did not fail: once the app lets go the
+// model grows back to it.
+func TestGrowsBackAfterTheAppLetsGo(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	e.InstallFake()
+	cfg := e.Config()
+	cfg.GrowIdle = 200 * time.Millisecond
+	s := e.StartSup(cfg)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	c0 := ctxOf(t, e.Starts()[0])
+	e.SetUsed(16000)
+	e.SetOthers(8000)
+	testkit.WaitFor(t, 10*time.Second, "shrink", func() bool { return len(e.Starts()) >= 2 })
+	e.SetUsed(0)
+	e.SetOthers(0)
+	testkit.WaitFor(t, 15*time.Second, "grown back to the first shape", func() bool {
+		st := s.Status()
+		return st.Phase == "ready" && st.Shape != nil && st.Shape.Slots*st.Shape.CtxPerSlot == c0
+	})
+}

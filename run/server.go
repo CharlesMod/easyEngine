@@ -697,16 +697,15 @@ func (s *Supervisor) growTo(ctx context.Context, srv *server, to fit.Shape) {
 	}
 }
 
-// shrink restarts smaller because the running shape no longer fits. The old shape is a ceiling
-// from then on. If the smaller one fails to load on an out-of-memory it is recorded too and the
-// engine steps down from it (never back up); any other failure retries through the backoff,
-// below the ceiling.
+// shrink restarts smaller because the running shape no longer fits beside the other apps (the
+// old shape did not fail: it grows back once they let go). If the smaller one fails to load on
+// an out-of-memory it is recorded and becomes a ceiling, and the engine steps down from it, never
+// back up; any other failure retries through the backoff and the choose path, which reads the
+// room again.
 func (s *Supervisor) shrink(ctx context.Context, srv *server, to fit.Shape) {
-	old := srv.shape
 	s.setPhase("resizing", fmt.Sprintf("Resizing to %d x %d", to.Slots, to.CtxPerSlot))
 	s.countRestart()
 	s.stopServerLocked()
-	s.setCeiling(srv.key, old, "it no longer fit beside the other apps")
 	cctx, cancel := context.WithCancel(s.root)
 	s.mu.Lock()
 	s.loadCancel = cancel

@@ -14,7 +14,10 @@
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
 //	(every completion request body is saved to <ctl>/lastbody.json)
-//	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU")
+//	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
+//	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
+//	                           first listed device as CUDA0; "none" prints no device)
+//	(starts.log records CUDA_VISIBLE_DEVICES as cvd=)
 package main
 
 import (
@@ -33,8 +36,8 @@ import (
 var withValue = map[string]bool{
 	"-m": true, "-ngl": true, "--n-cpu-moe": true, "-np": true, "-c": true, "-ctk": true, "-ctv": true,
 	"-fa": true, "--cache-reuse": true, "--host": true, "--port": true, "-a": true, "--reasoning": true,
-	"--alias": true,
-	"--temp":  true, "--top-k": true, "--top-p": true, "--min-p": true, "--repeat-penalty": true, "--dry-multiplier": true,
+	"--alias": true, "--device": true, "--split-mode": true,
+	"--temp": true, "--top-k": true, "--top-p": true, "--min-p": true, "--repeat-penalty": true, "--dry-multiplier": true,
 	"--typical": true, "--repeat-last-n": true, "--presence-penalty": true, "--frequency-penalty": true,
 	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
 }
@@ -62,6 +65,8 @@ func helpText(hidden map[string]bool) string {
 		"--no-webui                     disable the Web UI",
 		"--metrics                      enable prometheus compatible metrics endpoint",
 		"--slots                        enable slots monitoring endpoint",
+		"-dev,  --device <dev1,dev2,..> comma-separated list of devices to use for offloading",
+		"-sm,   --split-mode {none,layer,row}  how to split the model across multiple GPUs",
 		"--host HOST                    ip address to listen",
 		"--port PORT                    port to listen",
 		"-a,    --alias STRING          set alias for model name",
@@ -121,7 +126,22 @@ func main() {
 			if d == "" {
 				d = "CUDA0: Fake GPU (16384 MiB, 16000 MiB free)"
 			}
-			fmt.Println("Available devices:\n  " + d)
+			if os.Getenv("CUDA_VISIBLE_DEVICES") != "" {
+				first, _, _ := strings.Cut(d, ";")
+				_, desc, _ := strings.Cut(first, ":")
+				d = "CUDA0:" + desc
+				if p := os.Getenv("FAKELLAMA_DEVICES_PINNED"); p == "none" {
+					d = ""
+				} else if p != "" {
+					d = p
+				}
+			}
+			fmt.Println("Available devices:")
+			for _, l := range strings.Split(d, ";") {
+				if l = strings.TrimSpace(l); l != "" {
+					fmt.Println("  " + l)
+				}
+			}
 			return
 		case "--help", "-h":
 			fmt.Print(helpText(hidden))
@@ -159,7 +179,7 @@ func main() {
 	if ctl != "" {
 		f, err := os.OpenFile(filepath.Join(ctl, "starts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
-			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], strings.Join(args, " "))
+			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), strings.Join(args, " "))
 			f.Close()
 		}
 	}

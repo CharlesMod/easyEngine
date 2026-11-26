@@ -18,6 +18,7 @@ import (
 	"hermesengine/lifecycle"
 	"hermesengine/plan"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 )
 
 type loadCtx struct {
@@ -27,6 +28,7 @@ type loadCtx struct {
 	seed fit.Footprint // the header's seed alone, which Calibrate holds every reading to
 	gpu  probe.GPU
 	hasG bool
+	sum  gpusense.GPUSummary // the reading the room came from: the adapter llama-server is held to
 }
 
 func (s *Supervisor) llamaLog(trunc bool) (*lifecycle.LogSink, error) {
@@ -102,7 +104,7 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
 		s.save()
 	}
-	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG}
+	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG, sum: sn.sum}
 	return lc, room, s.wantsFor(key), nil
 }
 
@@ -212,17 +214,25 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	if p, ok := lc.in.model.Sampler[catalog.ProfileOfficial]; ok {
 		official = &p
 	}
-	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, knownFlags(lc.in.bin, s.cfg.ExtraEnv), official)
+	known := knownFlags(lc.in.bin, s.cfg.ExtraEnv)
+	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, known, official)
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
 	}
-	s.logf("start: %s %s", lc.in.bin, strings.Join(args, " "))
+	pin := resolvePin(lc.in.bin, plan.AccelOf(lc.in.backend), lc.sum, s.cfg.ExtraEnv, known)
+	args = append(args, pin.Args...)
+	env := append(append([]string{}, s.cfg.ExtraEnv...), pin.Env...)
+	s.mu.Lock()
+	s.device = &pin
+	s.mu.Unlock()
+	s.logf("device: %s", pin.Note)
+	s.logf("start: %s%s %s", strings.Join(append(pin.Env, ""), " "), lc.in.bin, strings.Join(args, " "))
 	sink, err := s.llamaLog(false)
 	if err != nil {
 		return launchResult{err: err}
 	}
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
-	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, s.cfg.ExtraEnv), Log: sink})
+	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, env), Log: sink})
 	if err != nil {
 		sink.Close()
 		return launchResult{err: err}

@@ -51,11 +51,14 @@ func Seed(info gguf.Info, kvType string) (fit.Footprint, error) {
 
 // Verdict is one catalog model's answer for this machine.
 type Verdict struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Size       int64     `json:"size"`
-	Fits       string    `json:"fits"` // yes | tight | no
-	Why        string    `json:"why"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Fits string `json:"fits"` // yes | tight | no
+	Why  string `json:"why"`
+	// Limit is what stops a "no" model, one of the Limit* codes ("" when it fits). Why says it
+	// in words; front ends may key on Limit.
+	Limit      string    `json:"limit,omitempty"`
 	Shape      fit.Shape `json:"shape"`
 	EstVRAMMiB int       `json:"est_vram_mib"`
 	EstRAMMiB  int       `json:"est_ram_mib"`
@@ -86,7 +89,21 @@ type PlanResult struct {
 	// GPU is the adapters, the processes on them and the reserve the verdicts were made around
 	// (filled by the supervisor).
 	GPU *gpusense.GPUReport `json:"gpu,omitempty"`
+	// Device is how llama-server is (or would be) held to the planned adapter (PinDevice); the
+	// supervisor replaces the prediction with the installed build's, or the running server's.
+	Device *DevicePin `json:"device,omitempty"`
 }
+
+// Limit codes: what stops a model that does not fit (Verdict.Limit, CustomCheck.Limit).
+const (
+	LimitVRAM   = "vram"              // the card: too little graphics memory free
+	LimitRAM    = "ram"               // system RAM: a CPU-only run, MoE expert layers moved off the card, or a GPU that borrows system memory
+	LimitDisk   = "disk"              // too little free disk for the download
+	LimitDense  = "dense_never_split" // a dense model too big for the card; dense models are never split between card and RAM
+	LimitKVType = "kv_type"           // the cache type asked is unknown
+	LimitModel  = "model"             // the model itself: its header lacks what the planner needs
+	LimitBlock  = "vram_block"        // the card has the memory, but not in one piece large enough
+)
 
 // RoomFor derives the planning room from the probed hardware alone: the GPU with the most
 // memory, all processes counted as others (nothing of ours is running at plan time), the host's
@@ -123,6 +140,8 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 		res.Backend = bs[0].ID
 	}
 	room := RoomForSensed(hw, sum, res.Backend)
+	pin := PinDevice(sum, AccelOf(res.Backend), nil)
+	res.Device = &pin
 	bestYes, bestTight := -1, -1
 	for _, m := range c.Models {
 		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
@@ -148,13 +167,12 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 		sh, err := fit.Choose(fp, rm, w)
 		v.Estimated = room.NoGPU || (m.Footprint == nil && fp.Estimated)
 		switch {
-		case errors.As(err, new(*fit.KVTypeError)):
-			v.Fits, v.Why = "no", err.Error()
 		case err != nil:
-			v.Fits, v.Why = "no", whyNot(fp, room, w)
+			v.Fits = "no"
+			v.Limit, v.Why = whyNot(fp, room, w, err)
 		case !v.Installed && hw.DiskFreeMiB > 0 && int(m.Size/mib)+1024 > hw.DiskFreeMiB:
-			v.Fits, v.Shape = "no", sh
-			v.Why = fmt.Sprintf("needs %d MiB of free disk, %d MiB available", m.Size/mib+1024, hw.DiskFreeMiB)
+			v.Fits, v.Shape, v.Limit = "no", sh, LimitDisk
+			v.Why = fmt.Sprintf("needs %d MiB of free disk for the download, %d MiB available", m.Size/mib+1024, hw.DiskFreeMiB)
 		default:
 			v.Shape, v.EstVRAMMiB, v.EstRAMMiB, v.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 			v.Fits, v.Why = verdictFor(fp, sh, w)
@@ -231,28 +249,82 @@ func verdictFor(fp fit.Footprint, s fit.Shape, w fit.Wants) (string, string) {
 	return "yes", desc + ", all on the GPU"
 }
 
-func whyNot(fp fit.Footprint, room fit.Room, w fit.Wants) string {
+// whyNot says what stops a model Choose refused with err: the limit code and the words. Only
+// fit.ErrTooBig is a matter of room; the core's other refusals (an unknown cache type, a header
+// without what the planner needs) are passed on as they are. For a model too big, the least shape
+// (minimum slots at the floor ctx) is priced: a dense model, or one kept whole, needs it all on
+// the card; an MoE model needs the card to hold at least its non-expert part, and then system
+// RAM for every expert layer the card cannot hold (the fewest moved that the card takes).
+func whyNot(fp fit.Footprint, room fit.Room, w fit.Wants, err error) (string, string) {
+	if errors.As(err, new(*fit.KVTypeError)) {
+		return LimitKVType, err.Error()
+	}
+	if !errors.Is(err, fit.ErrTooBig) {
+		return LimitModel, err.Error()
+	}
 	vram, ram, err := room.Budget()
 	if err != nil {
-		return err.Error()
+		return LimitModel, err.Error()
 	}
 	least := fit.Shape{Slots: w.MinSlots, CtxPerSlot: w.CtxFloor, KVType: w.KVType, CPUOnly: room.NoGPU}
-	if fp.MoE && !room.Unified && !room.NoGPU {
-		least.NCpuMoe = fp.ExpertLayers
+	need := func(n int) (float64, float64, error) {
+		s := least
+		s.NCpuMoe = n
+		return fp.Need(s)
 	}
-	cardNeed, hostNeed, err := fp.Need(least)
+	cardNeed, hostNeed, err := need(0)
 	if err != nil {
-		return err.Error()
+		return LimitModel, err.Error()
 	}
-	if room.NoGPU {
-		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(hostNeed), int(ram))
+	floor := fmt.Sprintf("%d slots x %d ctx", least.Slots, least.CtxPerSlot)
+	if least.Slots == 1 {
+		floor = fmt.Sprintf("1 slot x %d ctx", least.CtxPerSlot)
 	}
-	need, have := cardNeed, int(vram)
-	kind := "dense models cannot be split between card and RAM"
-	if fp.MoE {
-		kind = "even with every expert layer in RAM"
+	vram, ram = max(vram, 0), max(ram, 0)
+	switch {
+	case room.NoGPU:
+		why := "no usable GPU"
+		switch {
+		case room.VRAMTotal > 0 && room.Unified:
+			why = "the integrated GPU is used only by a Vulkan build"
+		case room.VRAMTotal > 0:
+			why = fmt.Sprintf("the card has under %d MiB left after the game's room, too little to use", minUsableVRAM)
+		}
+		return LimitRAM, fmt.Sprintf("needs about %d MiB of system RAM to run on the CPU at %s, %d MiB available after the OS reserve (%s)", ceilMiB(hostNeed), floor, int(ram), why)
+	case room.Unified:
+		return LimitRAM, fmt.Sprintf("needs about %d MiB of the system memory the GPU shares, %d MiB of it free after the game's room and the OS", ceilMiB(cardNeed), int(vram))
+	case !fp.MoE:
+		if cardNeed > vram {
+			return LimitDense, fmt.Sprintf("needs about %d MiB of VRAM, %d MiB free after the game's room; dense models are never split between card and RAM", ceilMiB(cardNeed), int(vram))
+		}
+	case w.Whole:
+		if cardNeed > vram {
+			return LimitVRAM, fmt.Sprintf("needs about %d MiB of VRAM kept whole on the card, %d MiB free after the game's room", ceilMiB(cardNeed), int(vram))
+		}
+	default: // MoE: the fewest expert layers moved that the card can take, and the RAM they need
+		moved := -1
+		for n := 0; n <= fp.ExpertLayers; n++ {
+			c, h, err := need(n)
+			if err != nil {
+				return LimitModel, err.Error()
+			}
+			if c <= vram {
+				moved, cardNeed, hostNeed = n, c, h
+				break
+			}
+			cardNeed = c
+		}
+		if moved < 0 {
+			return LimitVRAM, fmt.Sprintf("needs about %d MiB of VRAM even with every expert layer in system RAM, %d MiB free after the game's room", ceilMiB(cardNeed), int(vram))
+		}
+		if hostNeed > ram {
+			return LimitRAM, fmt.Sprintf("needs about %d MiB of system RAM for the %d of %d expert layers the card cannot hold, %d MiB available after the OS reserve (the card has room for the rest)", ceilMiB(hostNeed), moved, fp.ExpertLayers, int(ram))
+		}
 	}
-	return fmt.Sprintf("needs about %d MiB of VRAM, %d MiB free after the game's room (%s)", ceilMiB(need), have, kind)
+	if room.LargestBlock > 0 {
+		return LimitBlock, fmt.Sprintf("the card has the memory but not in one piece: its largest free block is %d MiB", room.LargestBlock)
+	}
+	return LimitVRAM, fmt.Sprintf("no shape fits the card at %s (%d MiB of VRAM free after the game's room)", floor, int(vram))
 }
 
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }

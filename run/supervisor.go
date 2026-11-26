@@ -98,6 +98,9 @@ type Status struct {
 	// GPU is the adapters and the measured reserve as the watchdog last read them (null before
 	// the first reading); GET /engine/v1/gpu has the processes too.
 	GPU *gpusense.GPUSummary `json:"gpu"`
+	// Device is what llama-server was given to hold it to the planned adapter (null before the
+	// first start): docs/ENGINE.md section 4a.
+	Device *plan.DevicePin `json:"device"`
 }
 
 // Parent is a watched parent process.
@@ -158,6 +161,7 @@ type Supervisor struct {
 	message     string
 	progress    *Progress
 	shape       *ShapeInfo
+	device      *plan.DevicePin // what the last llama-server start was given (resolvePin)
 	errs        []string
 	port        int
 	llamaURL    string
@@ -296,6 +300,10 @@ func (s *Supervisor) Status() Status {
 		g := *s.gpu.sum
 		st.GPU = &g
 	}
+	if s.device != nil {
+		d := *s.device
+		st.Device = &d
+	}
 	return st
 }
 
@@ -419,6 +427,20 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	sn := s.measure(ctx, hw, s.ours.pids())
 	res := plan.PlanSensed(cat, hw, s.wants(), sn.sum, s.modelInstalled)
 	res.GPU = sn.report()
+	s.mu.Lock()
+	running, be := s.device, s.st.Backend
+	if s.shape == nil { // no server up
+		running = nil
+	}
+	s.mu.Unlock()
+	switch {
+	case running != nil: // what the server in use was given
+		d := *running
+		res.Device = &d
+	case be != "": // the installed build's, not the predicted one's
+		d := plan.PinDevice(sn.sum, plan.AccelOf(be), nil)
+		res.Device = &d
+	}
 	s.planCustom(&res, cat, hw, sn)
 	s.fillDisk(&res, cat)
 	return res, nil

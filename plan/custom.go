@@ -37,6 +37,7 @@ type CustomCheck struct {
 	Estimated    bool      `json:"estimated"` // the numbers rest on the header alone
 	Fits         string    `json:"fits,omitempty"`
 	Why          string    `json:"why,omitempty"`
+	Limit        string    `json:"limit,omitempty"` // what stops it when Fits is "no" (the Limit* codes)
 	Shape        fit.Shape `json:"shape"`
 	EstVRAMMiB   int       `json:"est_vram_mib"`
 	EstRAMMiB    int       `json:"est_ram_mib"`
@@ -146,7 +147,10 @@ func CheckCustom(path string, c *catalog.Catalog, room fit.Room, w fit.Wants) Cu
 	w = w.Norm()
 	fp, err := Seed(info, w.KVType)
 	if err != nil {
-		out.Fits, out.Why = "no", err.Error()
+		out.Fits, out.Why, out.Limit = "no", err.Error(), LimitModel
+		if errors.As(err, new(*fit.KVTypeError)) {
+			out.Limit = LimitKVType
+		}
 		return out
 	}
 	m, known := MatchCatalog(c, st.Size())
@@ -162,10 +166,9 @@ func CheckCustom(path string, c *catalog.Catalog, room fit.Room, w fit.Wants) Cu
 	out.Known = known
 	sh, err := fit.Choose(fp, room, w)
 	switch {
-	case errors.As(err, new(*fit.KVTypeError)):
-		out.Fits, out.Why = "no", err.Error()
 	case err != nil:
-		out.Fits, out.Why = "no", whyNot(fp, room, w)
+		out.Fits = "no"
+		out.Limit, out.Why = whyNot(fp, room, w, err)
 	default:
 		out.Shape, out.EstVRAMMiB, out.EstRAMMiB, out.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 		out.Fits, out.Why = verdictFor(fp, sh, w)

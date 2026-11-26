@@ -192,6 +192,30 @@ An empty picture (nothing could be sensed) is read from `Hardware.GPUs`, the car
 standing for the whole card: the numbers are the fixed reserve's, as before sensing. The
 engine's `Config.Sense` hook lets tests inject pictures.
 
+**Held to the planned adapter.** llama-server runs only on E (`plan.PinDevice`, resolved at each
+start by `run.resolvePin`); on its own it would split a model across every card it sees. With one
+GPU adapter, a Metal or a CPU build, nothing is added (its default is that one device). Otherwise:
+
+- CUDA build, E an NVIDIA card with a UUID (nvidia-smi): `CUDA_VISIBLE_DEVICES=<UUID>`. CUDA then
+  shows llama-server that card alone as `CUDA0`, whatever order it would number the cards in
+  (CUDA's default order is fastest first, not nvidia-smi's PCI order, so an index is never
+  guessed). The pin is confirmed by `--list-devices` under it: exactly one CUDA device, else it is
+  dropped and the card matched by name as below. A `CUDA_VISIBLE_DEVICES` already in the engine's
+  environment is the user's and is kept.
+- Otherwise (Vulkan; CUDA without a UUID): `--device <name>` (`Vulkan1`, `CUDA0`), the device in
+  llama-server's own `--list-devices` whose name is E's (case and "(R)"/"(TM)" ignored), else the
+  one whose name holds E's whole name ("... (RADV NAVI23)"), else, where E is the machine's only
+  adapter of its vendor, the only listed device of that vendor. Two equally good candidates (two
+  cards of one model) match none: Vulkan's order is the driver's.
+- A pin adds `--split-mode none`, so nothing spills to another card (each flag only where the
+  build's `--help` knows it).
+
+What could not be matched or confirmed falls back to llama-server's default devices: a start
+never fails for it. `GET status` `device` and `GET plan` `device` say what was given:
+`{adapter, pinned, device, env, args, via: "uuid"|"name"|"", note}`. The plan's is a prediction
+(from the installed build's accelerator, or the catalog's first backend before an install; a
+Vulkan match is only known at launch), replaced by the running server's while one is up.
+
 **Integrated adapters.** An integrated adapter's dedicated figure is never VRAM (WMI reports a
 small or capped `AdapterRAM`). Where E is integrated and the build is `vulkan`, the adapter is a
 pool of system memory like Apple's: `Room.Unified` (no expert offload), capacity
@@ -396,11 +420,11 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, model_params, model_size_class}`; `model_params`/`model_size_class` are in §7b; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, model_params, model_size_class}`; `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7b; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu}` (`gpu` is the `GPUReport` the verdicts were made around); `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, limit, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu, device}` (`gpu` is the `GPUReport` the verdicts were made around; `device` the adapter pin of §4a); `limit`, on a "no", names what stops the model, and `why` says it in words with the figures: `vram` (the card, for an MoE model even with every expert layer in system RAM, or a model kept whole), `ram` (system RAM: a CPU-only run, the expert layers the card cannot hold, or a GPU that borrows system memory), `disk` (the download), `dense_never_split` (a dense model too big for the card: dense models are never split between card and RAM), `vram_block` (no single free block large enough), `kv_type` (an unknown cache type), `model` (the header lacks what the planner needs); the custom file's check carries the same `limit`; `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
 | `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |

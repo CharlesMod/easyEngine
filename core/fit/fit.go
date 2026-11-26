@@ -38,7 +38,7 @@ var ErrCtxTrainUnder = errors.New("fit: the model's trained context is under the
 // costs were priced at (one built from measured numbers), so it cannot be priced at another.
 var ErrNoKVType = errors.New("fit: the footprint names no cache type to price other types from")
 
-// ErrNoWeights means Room.LargestBlock was given and the footprint does not know its weights on
+// ErrNoWeights means Room.LargestBlock was given as a size (above 0) and the footprint does not know its weights on
 // the card (Footprint.WeightsMiB), so its largest single allocation cannot be told.
 var ErrNoWeights = errors.New("fit: the footprint cannot tell its largest allocation (no weights figure)")
 
@@ -199,6 +199,9 @@ type Room struct {
 	Reserve int `json:"reserve"`
 	// LargestBlock is the largest single allocation the card can still give (MiB); a shape's
 	// largest allocation (Footprint.Largest) must fit inside it. 0: not known, not bounded.
+	// Negative: the card was read and has no free block left, so no shape on it can be held and
+	// every entry that bounds a shape by the block answers ErrTooBig (see roomFig.noBlock). Not
+	// read with NoGPU; read with Unified as on any card, the card's own memory being the RAM.
 	LargestBlock int `json:"largest_block"`
 	// Unread names the fields (by their json names) the caller could not read: none is taken as
 	// zero, and every entry that reads a room answers *UnreadError naming the first (settle).
@@ -658,6 +661,9 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 		if len(room.Unread) > 0 {
 			return st, &UnreadError{Field: room.Unread[0]}
 		}
+		// A negative block (none free) is not held to the weights: it bounds every layout on the
+		// card whether or not the footprint knows its weights, so Choose answers it ErrTooBig
+		// (roomFig.noBlock), never ErrNoWeights, after the wants' and figures' own refusals.
 		if w != nil && room.LargestBlock > 0 && !room.NoGPU && fp.WeightsMiB <= 0 {
 			return st, ErrNoWeights
 		}
@@ -771,6 +777,13 @@ func (fp fig) at(t string) (fig, error) {
 	f.c = fp.c
 	return f, err
 }
+
+// noBlock reports whether the card was read and has no free block (Room.LargestBlock negative):
+// then no shape that lays anything on it is held. A NoGPU room has no card and its block is not
+// read. A Unified room is a card like any other here: its block is the largest buffer the GPU can
+// still be given out of the shared memory, and a caller that read none has said that no layout
+// on the GPU can be held, the same fact whether that memory is also the host's or not.
+func (room roomFig) noBlock() bool { return !room.NoGPU && room.LargestBlock < 0 }
 
 // capRoom is the room a cap is measured against: the card's budget, or host RAM with no GPU.
 func (room roomFig) capRoom() int {
@@ -1056,6 +1069,9 @@ func (fp fig) estTPS(n int, scale float64) float64 {
 }
 
 func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed bool) (Shape, error) {
+	if room.noBlock() {
+		return Shape{}, ErrTooBig // no free block on the card: no layout on it holds
+	}
 	block := float64(room.LargestBlock)
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
 		ceil := fp.ctxCeiling(w, slots)
@@ -1068,7 +1084,7 @@ func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed boo
 		}
 		okAt := func(n int) func(int) bool {
 			return func(c int) bool {
-				return fp.vram(slots, c, n) <= budget && (block <= 0 || fp.largest(slots, c, n) <= block)
+				return fp.vram(slots, c, n) <= budget && (block == 0 || fp.largest(slots, c, n) <= block)
 			}
 		}
 		// (1) all on GPU at the largest ctx, never under the floor (a cap may put ceil there).
@@ -1180,6 +1196,8 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 // list, any type; so a shape naming no type under wants at f16 walks down at q4_0) keeps that type
 // to its floor and ends at ErrTooBig there, never moving to a type it was not running. It never
 // plans the room afresh (Choose alone does): the load that failed disproved that plan.
+// A room whose card has no free block (Room.LargestBlock negative) is ErrTooBig at once for a
+// shape on the card: no smaller layout there holds either.
 //
 // The walk is monotone: each step strictly lowers the pair (types left after the shape's in the
 // list, then the predicted memory the shape is sized against, Footprint.need), compared in that
@@ -1193,6 +1211,9 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	w.KVType = st.kv    // every step keeps that type until the move to the next type of the list
+	if !cur.CPUOnly && st.room.noBlock() {
+		return Shape{}, ErrTooBig // no free block on the card: no smaller layout on it holds either
+	}
 	if w.Whole {
 		cur.NCpuMoe = 0
 	}

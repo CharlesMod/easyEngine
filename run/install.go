@@ -270,33 +270,51 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 }
 
 // smokeTest: `--version` must run, and a GPU backend must list its device.
+//
+// Each step has its own time limit, and a generous one: on a fresh Windows install the first run of a CUDA build
+// loads several hundred MB of cuBLAS DLLs that the antivirus scans on first load. In the first Windows test
+// (RTX 3050 laptop, Defender on) that took longer than the old shared 30 s, the kill looked like "exit status 1",
+// and the engine quietly fell back to the much slower Vulkan build. A run later is fast (the scan is cached).
+var smokeVersionTimeout, smokeDevicesTimeout = 60 * time.Second, 180 * time.Second
+
 func smokeTest(ctx context.Context, bin, accel string) error {
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, bin, "--version")
-	cmd.Dir = filepath.Dir(bin)
-	cmd.Env = llamaEnv(bin, nil)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := smokeRun(ctx, smokeVersionTimeout, bin, "--version")
+	if err != nil {
 		if appControlBlocked(err) {
 			return fmt.Errorf("%w (%s)", ErrAppControl, filepath.Base(bin))
 		}
-		return fmt.Errorf("%s --version failed: %v: %s", filepath.Base(bin), err, lastLine(string(out)))
+		return fmt.Errorf("%s --version failed: %v: %s", filepath.Base(bin), err, lastLine(out))
 	}
 	want := map[string]string{"cuda": "cuda", "vulkan": "vulkan", "metal": "metal"}[accel]
 	if want == "" {
 		return nil
 	}
-	cmd = exec.CommandContext(cctx, bin, "--list-devices")
-	cmd.Dir = filepath.Dir(bin)
-	cmd.Env = llamaEnv(bin, nil)
-	out, err := cmd.CombinedOutput()
+	out, err = smokeRun(ctx, smokeDevicesTimeout, bin, "--list-devices")
 	if err != nil {
-		return fmt.Errorf("--list-devices failed: %v", err)
+		if appControlBlocked(err) {
+			return fmt.Errorf("%w (%s)", ErrAppControl, filepath.Base(bin))
+		}
+		return fmt.Errorf("--list-devices failed: %v: %s", err, lastLine(out))
 	}
-	if !strings.Contains(strings.ToLower(string(out)), want) {
+	if !strings.Contains(strings.ToLower(out), want) {
 		return fmt.Errorf("--list-devices shows no %s device", accel)
 	}
 	return nil
+}
+
+// smokeRun runs bin with args under its own time limit; a timeout is reported as one, not as the exit status
+// the kill leaves behind (1 on Windows).
+func smokeRun(ctx context.Context, limit time.Duration, bin string, args ...string) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, bin, args...)
+	cmd.Dir = filepath.Dir(bin)
+	cmd.Env = llamaEnv(bin, nil)
+	b, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() == nil && cctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("timed out after %s", limit)
+	}
+	return string(b), err
 }
 
 func copyFlat(src, dst string) error {

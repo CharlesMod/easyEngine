@@ -566,9 +566,14 @@ taking the engine's downloads, processes or server:
   set (`Footprint.Consts`; nil, as in a footprint built by hand, is the default) and every shape
   priced from it names the set (`Shape.ConstsBackend`, `Shape.ConstsCard`), through JSON, so a
   caller can tell a figure built with a set read elsewhere (a prediction) from one read on its
-  own build and card. `settle` reads the set whole and every price takes its constants from the
-  footprint's own set alone, never mixing two; a set lacking a constant, or its word, is
-  `*ConstError` naming it from every entry that prices, never a zero.
+  own build and card. The seed builds the figures from its set once; every entry then prices the
+  figures alone (the measured retry's runtime is the footprint's own `ScratchMiB`), never a
+  constant read beside them, so no price mixes two sets. The book keeps the set a fixed part was
+  worked out under (`Calib.Consts`; nil, as an older build wrote it, is the default) and
+  `Book.Footprint` lays that fixed part only on a seed of the same set: on another set's seed the
+  seed's own fixed part stands, Predicted, until a reading is taken against it. `settle` reads the
+  set whole; a set lacking a constant, or its word, is `*ConstError` naming it from every entry
+  that prices, never a zero.
 - **The header's facts.** `gguf.ReadHeader(r, size, tensors)` walks the header once and keeps every
   metadata key whose value is an integer of any width (`Value.Int`, `Value.Uint`, its sign kept), a
   bool, a string, or an array of integers or bools of at most `MaxIntArray` (65536) elements; it

@@ -62,15 +62,68 @@ func TestConstsByBuildAndCard(t *testing.T) {
 		t.Errorf("a footprint with no set: %v %v, want the default's", d, err)
 	}
 
-	// The walk down prices the miss with the footprint's own set, never the default's: one runtime
-	// figure of 2000 MiB drops more context than 58.
+	// The walk down prices the miss from the footprint's own figures, which its set built: a seed of
+	// the set whose runtime is 2000 MiB drops more context than one of 58.
 	cur := Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}
-	mine := ref
-	mine.Consts = other.Consts
 	a, err1 := MissRetry(ref, cur, 500, r, game)
-	b, err2 := MissRetry(mine, cur, 500, r, game)
+	b, err2 := MissRetry(other, cur, 500, r, game)
 	if err1 != nil || err2 != nil || b.CtxTotal() >= a.CtxTotal() || b.ConstsCard != other.Consts.Card {
 		t.Errorf("MissRetry with the default %v (%v), with its own set %v (%v)", a, err1, b, err2)
+	}
+	// A set laid by hand on figures another set built moves no price: the figures are what is
+	// priced, every entry alike, so no price takes one constant from each.
+	relabel := ref
+	relabel.Consts = other.Consts
+	c, err := MissRetry(relabel, cur, 500, r, game)
+	if err != nil || c.Slots != a.Slots || c.CtxPerSlot != a.CtxPerSlot || c.NCpuMoe != a.NCpuMoe {
+		t.Errorf("MissRetry on the default's figures under another set's name: %v (%v), the figures give %v", c, err, a)
+	}
+}
+
+// A fixed part the book worked out from a reading is laid only on a seed of the set it was worked
+// out under: on a seed of another set it would take that set's base and vocabulary off a reading
+// priced with the first set's runtime, mask and dequant, and predict for the very shape that was
+// read a figure the reading does not hold. Calibrated under set B, the overlay on a B seed gives
+// back the reading, and the set survives the book's JSON.
+func TestBookOverlaysOnlyItsOwnSet(t *testing.T) {
+	setB := DefaultConsts()
+	setB.Of[RuntimeMiB] = Const{Value: 400, From: "re-read"}
+	setB.Of[MaskMiBPer1k] = Const{Value: 2, From: "re-read"}
+	seedA := seed(refInfo(), "q4_0")
+	seedB, _, err := SeedWith(refInfo(), "q4_0", setB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Shape{Slots: 2, CtxPerSlot: 16384, KVType: "q4_0"}
+	const read = 10626
+
+	var b Book
+	if c, err := b.Calibrate("k", seedA, s, read, stamp); err != nil || !c.Taken() {
+		t.Fatalf("calibrate under the default: %v %v", c, err)
+	}
+	if fp := b.Footprint("k", seedA); fp.Basis != Measured {
+		t.Errorf("the book's fixed part not laid on a seed of its own set: %+v", fp.Basis)
+	}
+	if fp := b.Footprint("k", seedB); fp.Basis != Predicted || fp.FixedMiB != seedB.FixedMiB {
+		v, _, _ := fp.Need(s)
+		t.Errorf("a fixed part worked out under the default laid on a seed of set B: basis %s, %.0f MiB predicted for the shape read as %d", fp.Basis, v, read)
+	}
+
+	var nb Book
+	if c, err := nb.Calibrate("k", seedB, s, read, stamp); err != nil || !c.Taken() {
+		t.Fatalf("calibrate under set B: %v %v", c, err)
+	}
+	var back Book
+	if json.Unmarshal(mustJSON(nb), &back) != nil {
+		t.Fatal("the book did not read back")
+	}
+	fp := back.Footprint("k", seedB)
+	v, _, err := fp.Need(s)
+	if err != nil || fp.Basis != Measured || math.Abs(v-read) > 1e-6 {
+		t.Errorf("calibrated and overlaid under set B: basis %s, %.1f MiB for the shape read as %d (%v)", fp.Basis, v, read, err)
+	}
+	if fp := back.Footprint("k", seedA); fp.Basis != Predicted {
+		t.Errorf("a fixed part worked out under set B laid on a default seed")
 	}
 }
 

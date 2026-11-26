@@ -243,9 +243,12 @@ type Footprint struct {
 	WeightsMiB float64 `json:"weights_mib"`
 	// CtxTrain is the model's trained context from its header; 0 = unknown.
 	CtxTrain int `json:"ctx_train"`
-	// Consts is the set of measured constants the figures were built with and are priced with:
-	// Seed's is DefaultConsts, SeedWith's the one given. nil (a footprint built by hand, or by an
-	// older build) is the default set. A set lacking a constant is *ConstError from every entry.
+	// Consts is the set of measured constants the figures above were built with: Seed's is
+	// DefaultConsts, SeedWith's the one given. nil (a footprint built by hand, or by an older
+	// build) is the default set. Every entry prices the figures alone, never a constant read
+	// beside them, so a price never takes one constant from each of two sets; the set is the
+	// figures' word of where they came from (Shape.ConstsBackend, Shape.ConstsCard) and keys the
+	// book's fixed part (Book.Footprint). A set lacking a constant is *ConstError from every entry.
 	Consts *Consts `json:"consts,omitempty"`
 }
 
@@ -538,6 +541,30 @@ type fig struct {
 type constFig struct {
 	backend, card                                           string
 	base, vocab, runtime, mask, dequant, offload, expertRAM float64
+}
+
+// sameSet reports whether two sets hold the same build, card and constants (nil is the default
+// set); a word of where a reading came from does not change a price, so it is not compared.
+func sameSet(a, b *Consts) bool {
+	d := DefaultConsts()
+	if a == nil {
+		a = &d
+	}
+	if b == nil {
+		b = &d
+	}
+	return a.Backend == b.Backend && a.Card == b.Card &&
+		maps.EqualFunc(a.Of, b.Of, func(x, y Const) bool { return x.Value == y.Value })
+}
+
+// cloneSet is a copy of a set sharing no map with it: a book handed to a writer keeps its own.
+func cloneSet(c *Consts) *Consts {
+	if c == nil {
+		return nil
+	}
+	n := *c
+	n.Of = maps.Clone(c.Of)
+	return &n
 }
 
 // readConsts reads a set whole: nil is the default set, and a set lacking a constant (or its word
@@ -1043,7 +1070,7 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
 	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
-		drop := int(math.Ceil((float64(failedBufMiB) + f.c.runtime) / (perTok * float64(cur.Slots))))
+		drop := int(math.Ceil((float64(failedBufMiB) + f.ScratchMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}
 	cap := byBuf
@@ -1203,6 +1230,9 @@ type Calib struct {
 	// Readings is the card memory each shape that came up held, one per shape, whether or not
 	// its reading was taken for the fixed part (Book.Mark).
 	Readings []Reading `json:"readings,omitempty"`
+	// Consts is the set of constants of the seed FixedMiB was worked out against (the reading less
+	// that seed's other figures); nil, as an older build wrote it, is the default set.
+	Consts *Consts `json:"consts,omitempty"`
 }
 
 // CapLift is what a cap was measured under: the room (Room.Budget, or Room.RAMBudget for a run
@@ -1253,13 +1283,16 @@ func BookKey(modelSHA, gpuName, backendID string) string {
 }
 
 // Footprint overlays what the book knows (the fixed load from a reading taken, marked Measured;
-// the runtime-OOM cap) on a seed.
+// the runtime-OOM cap) on a seed. The fixed load is laid only on a seed of the set of constants it
+// was worked out under (Calib.Consts): on another set's seed it would join one set's fixed part to
+// the other's figures, and predict for the very shape read a figure the reading does not hold.
+// There the seed's fixed part stands, Predicted, until a reading is taken against it.
 func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if b == nil {
 		return seed
 	}
 	if e, ok := b.Entries[key]; ok {
-		if e.FixedMiB > 0 {
+		if e.FixedMiB > 0 && sameSet(e.Consts, seed.Consts) {
 			seed.FixedMiB = e.FixedMiB
 			seed.Basis = Measured
 		}
@@ -1374,6 +1407,7 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 	e.Readings = append(rs, Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB})
 	if c.Taken() {
 		e.FixedMiB = c.ImpliedFixedMiB
+		e.Consts = cloneSet(seed.Consts)
 		e.Loads++
 	}
 	e.Updated = now

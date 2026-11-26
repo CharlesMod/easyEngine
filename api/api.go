@@ -150,6 +150,28 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, 200, hw)
 		}
+	case "gpu":
+		if need("GET") {
+			rep, err := a.S.GPUReport(ctx, r.URL.Query().Get("refresh") == "1")
+			if err != nil {
+				fail(w, 500, err.Error())
+				return
+			}
+			writeJSON(w, 200, rep)
+		}
+	case "host":
+		if need("POST") {
+			var in run.HostSet
+			if err := decode(r, &in); err != nil {
+				fail(w, 400, "body must be {\"pid\": n, \"adapter\": {\"name\", \"vendor_id\", \"memory_mib\"}, \"reserve_mib\": n}")
+				return
+			}
+			if err := a.S.SetHost(in); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}
 	case "plan":
 		if need("GET") {
 			p, err := a.S.Plan(ctx)

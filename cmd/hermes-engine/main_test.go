@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"hermesengine/lifecycle"
+	"hermesengine/probe/gpusense"
 )
 
 // Serve mode with stdout and stderr as pipes whose read end is closed (the game
@@ -95,5 +96,28 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "engine.lock")); err == nil {
 		t.Fatal("lock left behind")
+	}
+}
+
+func TestFormatGPU(t *testing.T) {
+	rep := gpusense.GPUReport{
+		GPUSummary: gpusense.GPUSummary{
+			Adapters: []gpusense.Adapter{
+				{Index: 0, Vendor: "nvidia", Name: "RTX 3050", DedicatedMiB: 4096, UsedMiB: 1300},
+				{Index: 1, Vendor: "intel", Name: "Iris Xe", DedicatedMiB: 128, SharedMiB: 8000, UsedMiB: -1, Integrated: true}},
+			EngineAdapter: 0, HostAdapter: 1, HostIntegrated: "yes",
+			Reserve:         gpusense.Reserve{OthersMiB: 1300, OthersBasis: "processes", HostBasis: "other-adapter", MarginMiB: 512, TotalMiB: 4096},
+			FreeForModelMiB: 2284, OthersNote: "Other apps are using 1.3 GB of your graphics card"},
+		Processes: []gpusense.Process{{PID: 9, Name: "game", Adapter: 1, DedicatedMiB: 300, Host: true}},
+		Sources:   map[string]string{"dxgi": "ok", "pdh": "no counters"},
+	}
+	out := formatGPU(rep)
+	for _, want := range []string{"[engine]", "[host]", "integrated", "pid 9 game on adapter 1", "(host)", "others 1300 MiB (processes)", "host 0 MiB (other-adapter)", "free for the model: 2.2 GB", "Other apps are using", "source pdh: no counters"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "source dxgi") {
+		t.Errorf("a source that is ok is not listed:\n%s", out)
 	}
 }

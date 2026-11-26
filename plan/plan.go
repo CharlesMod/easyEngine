@@ -185,7 +185,7 @@ const cpuComfort = 0.6
 // whose need stays within cpuComfort of the free RAM, not the best-quality one. The verdicts are
 // marked Estimated.
 func cpuOnlyPick(vs []Verdict, room fit.Room) string {
-	free := float64(room.RAMAvail - fit.OSReserveMiB)
+	free := room.RAMBudget()
 	best, bestComfy := -1, -1
 	for i, v := range vs {
 		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
@@ -229,7 +229,7 @@ func verdictFor(fp fit.Footprint, s fit.Shape, w fit.Wants) (string, string) {
 func whyNot(fp fit.Footprint, room fit.Room, w fit.Wants) string {
 	if room.NoGPU {
 		need := fp.HostRAM(w.MinSlots, w.CtxFloor)
-		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(need), room.RAMAvail-fit.OSReserveMiB)
+		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(need), int(room.RAMBudget()))
 	}
 	need := fp.VRAM(w.MinSlots, w.CtxFloor, 0)
 	if fp.MoE && !room.Unified {

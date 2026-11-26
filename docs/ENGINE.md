@@ -189,6 +189,22 @@ loop lives in `run`.
   profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
   loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.
 
+### Wants and room another program may state
+
+Every field below is new to the core's `Wants` or `Room`, and its zero value is the engine's own
+behaviour exactly, so `plan`, `run` and the game profile set none of them.
+
+| Field | Set | Unset |
+|---|---|---|
+| `Wants.Whole` (`whole`) | No layer and no expert off the card, for a dense or a MoE model, from `Choose`, `MissRetry`, `StepDown` and `Grow` (step 3 below is skipped; `StepDown` never moves an expert). Where only a split shape fits, `ErrTooBig`. | Expert layers may move to RAM. |
+| `Wants.KVTypes` (`kv_types`) | The cache types, best first. The shape takes the first type at which the most ctx asked (`CtxMax`, under the book's cap) fits at `Slots`; where no type does, the last type with the most ctx that fits down to the floor, then fewer slots; under that, `ErrTooBig`. Each type is priced from the footprint, never tried: the footprint names the type it was seeded at (`Footprint.KVType`), the per-token cache scales with the bytes per element, and the f16 expansion of the widest layer (`DequantPerTokenMiB`) is added for a quantised type and taken off for f16, bf16 and f32. `Seed` and `SeedFromBytes` fill both; a footprint built from measured numbers (`plan.FromMeasured`) names no type and gets `ErrNoKVType`. `KVType` is then not read; `MissRetry` and `StepDown` keep the current shape's type. A type is chosen before ctx and experts: without `Whole`, f16 with experts in RAM comes before q4_0 with none. `Grow` counts a better type alone as no growth. | `KVType` alone, the footprint as given. |
+| `Wants.CtxFromModel` (`ctx_from_model`) | `CtxMax` is the model's trained context (`Footprint.CtxTrain`, which `Seed` takes from the header's `<arch>.context_length`, `gguf.Info.CtxTrain`); a floor above it, or unset, comes down to min(8192, trained). Where the header did not say it, `ErrNoCtxTrain`, never a guess. | `CtxMax` as given. |
+| `Room.Reserve` (`reserve`) | Host RAM kept for the OS when experts move or a run is CPU-only; negative is none. | `OSReserveMiB` (2048). |
+| `Room.Margin` (`margin`) | The VRAM left free; negative is none. | 0 is `DefaultMargin(VRAMTotal)` (the engine's callers fill that value already). |
+| `Room.LargestBlock` (`largest_block`) | The largest single allocation the card can still give. A shape's largest allocation (`Footprint.Largest`) must fit inside it: the greatest of the weights left on the card (`Footprint.WeightsMiB` less the moved expert layers), the cache (full-attention, sliding-window and recurrent state counted as one) and the compute buffers (the fixed load beyond the weights plus the scratch that grows with ctx), each taken as one allocation. A footprint with no `WeightsMiB` (measured numbers) gets `ErrNoWeights`. Not read for a CPU-only room. | Not bounded. |
+| `Room.NoGPU` with `RAMAvail` | A pool that is one node of a processor's memory: no card, whatever the VRAM fields say; CPU-only shapes sized against `RAMAvail`, that node's free memory, less the reserve, and nothing else. | (as before) |
+| `Room.Unread` (`unread`) | The json names of fields the caller could not read. None is taken as zero: `Choose`, `MissRetry` and `StepDown` answer `*UnreadError` naming the first, and `Grow` does not grow. | Every field was read. |
+
 ### Decode speed floor, and CPU-only
 
 `Wants.MinTPS` (default 20 tok/s per stream; negative turns it off) outranks max ctx: step 3
@@ -490,7 +506,13 @@ taking the engine's downloads, processes or server:
 
 - Module `github.com/CharlesMod/easyEngine/core` in `core/`, with its own `go 1.23` line and **no
   `require` at all**. Packages: `core/fit` (Seed, SeedFromBytes, Choose, MissRetry, StepDown,
-  Grow, Args, the Book) and `core/gguf` (Parse and Info).
+  Grow, Args, the Book) and `core/gguf` (Parse and Info, with the trained context).
+- **What another program may ask beyond a game.** Whole (no layer or expert off the card), the
+  cache's types best first, the model's own trained context as the most, and the room as given
+  (the host's reserve, the margin, the largest free block, a processor node as the pool, and a
+  field marked unread): §5, "Wants and room another program may state". Unset, each is the
+  engine's own behaviour; each refusal is a typed error (`ErrTooBig`, `ErrNoCtxTrain`,
+  `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`).
 - **What it must never do.** Its non-test code imports only pure standard-library packages
   (`errors`, `fmt`, `math`, `sort`, `strconv`, `strings`, `io`, `bufio`, `bytes`,
   `encoding/binary`, `slices`, `maps`, and `time` as a type only): never `os`, `os/exec`, `net`,

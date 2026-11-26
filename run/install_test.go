@@ -53,6 +53,7 @@ func wheel(t *testing.T, version string) []byte {
 
 const fakeUV = `#!/bin/sh
 echo "$*" >> "$FAKE_UV_LOG"
+echo "pref=$UV_PYTHON_PREFERENCE" >> "$FAKE_UV_LOG"
 case "$1" in
   --version) echo "uv 0.0.0-fake" ;;
   venv)  # uv venv --python 3.12 DIR
@@ -203,6 +204,11 @@ func TestInstallJob(t *testing.T) {
 		}
 		if strings.HasPrefix(l, "pip ") {
 			pipLine = l
+		}
+	}
+	for i, l := range uv { // venv and pip run with our own Python only, never one found on PATH
+		if (strings.HasPrefix(l, "venv ") || strings.HasPrefix(l, "pip ")) && (i+1 >= len(uv) || uv[i+1] != "pref=only-managed") {
+			t.Fatalf("uv %q ran without UV_PYTHON_PREFERENCE=only-managed: %v", l, uv)
 		}
 	}
 	if !strings.Contains(venvLine, "--python 3.12") || !strings.Contains(pipLine, "install --python") || !strings.Contains(pipLine, "hello_agent-0.1.0") {

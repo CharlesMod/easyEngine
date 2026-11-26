@@ -415,6 +415,10 @@ func (s *Supervisor) ensureAgent(ctx context.Context, cat *catalog.Catalog) erro
 	env := []string{
 		"UV_CACHE_DIR=" + filepath.Join(s.dir, "runtime", "uv-cache"),
 		"UV_PYTHON_INSTALL_DIR=" + filepath.Join(s.dir, "runtime", "python"),
+		// Always our own Python under runtime\python, never one the player happens to have installed
+		// (seen on Windows: uv picked a user's Python312 from PATH), so every machine gets the same agent
+		// and removing the data dir removes all of it.
+		"UV_PYTHON_PREFERENCE=only-managed",
 	}
 	if err := s.runCmd(ctx, env, uv, "venv", "--python", ag.Python, venv); err != nil {
 		return err

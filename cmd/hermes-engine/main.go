@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"hermesengine/dirs"
 	"hermesengine/lifecycle"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 	"hermesengine/run"
 )
 
@@ -45,6 +47,7 @@ func usage() {
   hermes-engine setup   [--profile F]
   hermes-engine probe
   hermes-engine plan    [--profile F]
+  hermes-engine gpu     [--profile F] [--host-pid N] [--json]
   hermes-engine install --model ID [--yes]
   hermes-engine import  PATH
   hermes-engine status | stop
@@ -68,6 +71,8 @@ func main() {
 		code = cmdProbe()
 	case "plan":
 		code = cmdPlan(args)
+	case "gpu":
+		code = cmdGPU(args)
 	case "install":
 		code = cmdInstall(args)
 	case "import":
@@ -395,4 +400,137 @@ func cmdStop() int {
 	}
 	fmt.Fprintln(os.Stderr, "engine did not stop in 10 s")
 	return 1
+}
+
+// cmdGPU prints the adapters, the processes holding memory on them and the reserve the engine
+// plans around. With an engine running it asks that engine (which knows its own server's pid);
+// otherwise it senses here.
+func cmdGPU(args []string) int {
+	fs := newFlags("gpu")
+	profile := fs.String("profile", "", "game profile file")
+	hostPID := fs.Int("host-pid", 0, "the host app's pid (default: the profile's)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var rep gpusense.GPUReport
+	if port, ok := enginePort(); ok {
+		base := fmt.Sprintf("http://127.0.0.1:%d/engine/v1/", port)
+		if *hostPID > 0 {
+			body := strings.NewReader(fmt.Sprintf(`{"pid": %d}`, *hostPID))
+			req, _ := http.NewRequest("POST", base+"host", body)
+			req.Header.Set("X-Hermes-Engine", "1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				fmt.Fprintln(os.Stderr, "host:", resp.Status)
+				return 1
+			}
+		}
+		resp, err := http.Get(base + "gpu?refresh=1")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&rep) != nil {
+			fmt.Fprintln(os.Stderr, "gpu: the engine did not answer with a report:", resp.Status)
+			return 1
+		}
+	} else {
+		s, err := supervisor(*profile, true)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer s.Shutdown()
+		if *hostPID > 0 {
+			if err := s.SetHost(run.HostSet{PID: *hostPID}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		}
+		if rep, err = s.GPUReport(ctx, true); err != nil {
+			fmt.Fprintln(os.Stderr, "gpu:", err)
+			return 1
+		}
+	}
+	if *asJSON {
+		return printJSON(rep)
+	}
+	fmt.Print(formatGPU(rep))
+	return 0
+}
+
+func gb(mib int) string { return fmt.Sprintf("%.1f GB", float64(mib)/1024) }
+
+func formatGPU(r gpusense.GPUReport) string {
+	var b strings.Builder
+	if len(r.Adapters) == 0 {
+		b.WriteString("No graphics adapter found.\n")
+	}
+	for _, a := range r.Adapters {
+		kind := "discrete"
+		switch {
+		case a.Unified:
+			kind = "unified memory"
+		case a.Integrated:
+			kind = "integrated"
+		}
+		role := ""
+		if a.Index == r.EngineAdapter {
+			role += " [engine]"
+		}
+		if a.Index == r.HostAdapter {
+			role += " [host]"
+		}
+		used := "used unknown"
+		if a.UsedMiB >= 0 {
+			used = fmt.Sprintf("%d MiB used", a.UsedMiB)
+		}
+		fmt.Fprintf(&b, "adapter %d: %s (%s, %s) %d MiB dedicated, %d MiB shared, %s%s\n", a.Index, a.Name, a.Vendor, kind, a.DedicatedMiB, a.SharedMiB, used, role)
+	}
+	if len(r.Processes) > 0 {
+		b.WriteString("processes:\n")
+	}
+	for _, p := range r.Processes {
+		tag := ""
+		if p.Ours {
+			tag = " (engine)"
+		} else if p.Host {
+			tag = " (host)"
+		}
+		name := p.Name
+		if name == "" {
+			name = "?"
+		}
+		fmt.Fprintf(&b, "  pid %d %s on adapter %d: %d MiB dedicated, %d MiB shared%s\n", p.PID, name, p.Adapter, p.DedicatedMiB, p.SharedMiB, tag)
+	}
+	if r.EngineAdapter < 0 {
+		b.WriteString("engine: CPU (no usable adapter)\n")
+	} else {
+		x := r.Reserve
+		fmt.Fprintf(&b, "reserve: others %d MiB (%s), host %d MiB (%s), margin %d MiB, of %d MiB\n", x.OthersMiB, x.OthersBasis, x.HostMiB, x.HostBasis, x.MarginMiB, x.TotalMiB)
+		fmt.Fprintf(&b, "free for the model: %s (%d MiB)\n", gb(r.FreeForModelMiB), r.FreeForModelMiB)
+	}
+	if r.OthersNote != "" {
+		b.WriteString(r.OthersNote + "\n")
+	}
+	var keys []string
+	for k := range r.Sources {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if r.Sources[k] != "ok" {
+			fmt.Fprintf(&b, "source %s: %s\n", k, r.Sources[k])
+		}
+	}
+	return b.String()
 }

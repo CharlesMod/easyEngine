@@ -156,7 +156,44 @@ for any vendor. Every source is behind an interface with a fake for tests.
 
 `probe.Others(gpu)` = VRAM used by processes that are not ours (total used minus our
 llama-server's own use, from `nvidia-smi --query-compute-apps` when available, else from the
-calibration book).
+calibration book). It is the fallback now: the reserve is measured from the sensed adapters.
+
+### 4a. The GPU sense and the measured reserve (`probe/gpusense`, `plan/reserve.go`)
+
+`gpusense.Sense` reads every adapter (`Adapter`: vendor, PCI vendor id, dedicated and shared
+memory, used memory card-wide, integrated, unified, LUID/PCI/UUID) and, per process, what it
+holds on which adapter (`Process`: pid, name, adapter, dedicated and shared MiB, `ours`, `host`).
+A source that is missing degrades the picture and never fails it (`Picture.Sources`).
+
+`plan.MeasureReserve(picture, hardware, host, estimate)` turns a picture into the reserve the
+room is built from. The engine runs on one adapter **E**: the discrete one with the most
+dedicated memory; an integrated one only when there is no discrete adapter.
+
+| Part | Rule |
+|---|---|
+| `others` | what processes on E hold that are neither the engine's own nor the host's (basis `processes`); with no process listed on E, the card's used memory less ours (`card`); on a pooled adapter (below) the memory the rest of the system holds (`card`) |
+| `host` | 0 when the host renders on another adapter (`other-adapter`); else the larger of what the host measurably holds on E and the estimate (`measured` when above it, else `estimate`); an unknown host adapter holds the estimate |
+| `margin` | `fit.DefaultMargin`, unchanged |
+
+The host's adapter is where its pid holds memory (the most), else the one the profile or
+`POST host` names (matched by vendor id and name, case-insensitive substring either way), else
+unknown. The estimate is the profile's `game_reserve_mib`, or `reserve_mib` of the last `POST
+host`. The result is a `GPUSummary` (adapters, `engine_adapter` (-1 = CPU), `host_adapter` (-1
+unknown), `host_integrated` yes/no/unknown, the `reserve`, `free_for_model_mib` = capacity less
+others, host and margin, and `others_note` when others hold 256 MiB or more: "Other apps are
+using 1.2 GB of your graphics card"). The note is information only: the engine never stops, asks
+to close or touches another program.
+
+An empty picture (nothing could be sensed) is read from `Hardware.GPUs`, the card's used memory
+standing for the whole card: the numbers are the fixed reserve's, as before sensing. The
+engine's `Config.Sense` hook lets tests inject pictures.
+
+**Integrated adapters.** An integrated adapter's dedicated figure is never VRAM (WMI reports a
+small or capped `AdapterRAM`). Where E is integrated and the build is `vulkan`, the adapter is a
+pool of system memory like Apple's: `Room.Unified` (no expert offload), capacity
+`min(dedicated + shared, 70 % of RAM)` (shared unknown: half the RAM), others = the pool less the
+free RAM. Any other build runs on the CPU. From `Hardware.GPUs` alone an Intel GPU that is not an
+Arc, and AMD's plain "Radeon Graphics", count as integrated.
 
 ## 5. The ctx balancer (`core/fit`, `plan`)
 
@@ -232,9 +269,11 @@ loop lives in `run`.
   reads a newer book with all four fields it knew (Go's decoder skips the rest) and drops the new
   ones when it writes; a newer build reads an older book as a book with no lifts and no
   readings: its caps stand as before until the first `LetGo` records what lifts them. `TestBookJSONBothWays` holds both.
-- **Room:** `budget = VRAM total - others - game_reserve - margin`. `game_reserve` comes from the
-  profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
-  loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.
+- **Room:** `budget = VRAM total - others - game_reserve - margin`, with `others` and
+  `game_reserve` (the host's share) measured from the sensed adapters (§4a): the game's own use
+  once it is measured, its estimate (the profile's `game_reserve_mib`; HermesVoice sends 1500)
+  before, and none when it renders on another adapter than the engine's. `margin` = max(512 MiB,
+  4 % of total), never a guessed fit target.
 
 ### Wants and room another program may state
 
@@ -307,13 +346,17 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   at the measured smaller shape (`miss_retry()`); a second failure steps the shape down one
   notch and is recorded.
 - **Runtime OOM** lowers the stored cap for that (model, device) so the next start is smaller.
-- **Make room for the game:** every 5 s read `others`. If free VRAM drops below the margin
-  (the player loaded a heavy save), restart at a smaller shape **when idle** (no slot
-  processing on two checks, from `/slots`); never in the middle of a line. The game's room
-  wins over ctx.
+- **Make room for the game:** every 5 s sense the adapters and measure the reserve (§4a; the
+  status `gpu` is refreshed by this tick). If the model's memory (`Footprint.Need` of the running
+  shape) no longer fits the budget the reserve leaves (the player loaded a heavy save), restart
+  at a smaller shape **when idle** (no slot processing on two checks, from `/slots`); never in
+  the middle of a line. The card's used memory is not the test: it holds the engine's own server
+  too, and read alone would shrink the model with nothing else on the card. A change reshapes
+  the model only when **held**: two consecutive reads of the reserve (others plus host) agree
+  within 64 MiB. Other programs are never touched. The game's room wins over ctx.
 - **Grow back when idle:** if measured room allows at least one more step (ctx or one fewer
-  CPU-MoE layer) and the server has been idle for 60 s, restart at the bigger shape. If that
-  fails, restart at the old shape.
+  CPU-MoE layer), the reserve is held and the server has been idle for 60 s, restart at the
+  bigger shape. If that fails, restart at the old shape.
 - **Health watchdog:** `/health` every 5 s; 6 misses in a row → restart.
 
 ## 6. Lifetime
@@ -349,9 +392,11 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler}`; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu}`; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
+| `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes}`; `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu}` (`gpu` is the `GPUReport` the verdicts were made around); `disk_need_bytes` is 0 for an installed model, else its size minus a partial download plus the engine's 512 MiB headroom; `disk_free_bytes` is -1 when unknown |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
 | `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |
@@ -541,6 +586,8 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
   "slots": 3, "min_slots": 1,
   "ctx_per_slot": {"max": 65536, "floor": 8192},
   "game_reserve_mib": 1500,
+  "host_pid": 12345,
+  "host_adapter": {"name": "Intel(R) Iris(R) Xe Graphics", "vendor_id": 32902, "memory_mib": 128},
   "samplers": {"cold": {"temperature": 0.2, "top_k": 20}},
   "agent": {
     "id": "hermesvoice-agent",
@@ -551,6 +598,13 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
   }
 }
 ```
+
+`game_reserve_mib` is the host's estimated GPU use before it has any; once the host's measured
+use is above it, the measurement wins (§4a). `host_pid` is the host app's process id (omitted or
+0: the pid of `POST /engine/v1/host`, else the first `--parent-pid`); `host_adapter` is the
+adapter it renders on, when it knows (optional): with it the engine reserves nothing on its own
+adapter when the host is elsewhere, as on a laptop whose game runs on the integrated GPU. A
+`POST /engine/v1/host` overrides both at run time.
 
 The engine installs the agent wheel into `runtime/venvs/<agent.id>` with the pinned `uv`
 (`uv venv --python 3.12`, `uv pip install <wheel>`; reinstall when the wheel's sha256
@@ -573,6 +627,7 @@ hermes-engine serve   --profile F --parent-pid P [--port N] [--linger D]
 hermes-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed
 hermes-engine probe                         prints Hardware as JSON
 hermes-engine plan    [--profile F]         prints the plan as JSON
+hermes-engine gpu     [--profile F] [--host-pid N] [--json]   adapters, processes, reserve and free memory (§4a); asks a running engine, else senses here
 hermes-engine install --model ID [--yes]    headless install with a text progress bar
 hermes-engine import  PATH
 hermes-engine status | stop

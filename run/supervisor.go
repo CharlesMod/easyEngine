@@ -21,6 +21,7 @@ import (
 	"hermesengine/lifecycle"
 	"hermesengine/plan"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 )
 
 // ErrBusy means an install job already runs.
@@ -90,6 +91,9 @@ type Status struct {
 	Custom    *CustomInfo `json:"custom"`
 	// Previous is the model the last switch replaced; its file is still on disk (run/switch.go).
 	Previous *PreviousInfo `json:"previous"`
+	// GPU is the adapters and the measured reserve as the watchdog last read them (null before
+	// the first reading); GET /engine/v1/gpu has the processes too.
+	GPU *gpusense.GPUSummary `json:"gpu"`
 }
 
 // Parent is a watched parent process.
@@ -131,6 +135,8 @@ type server struct {
 	idleSince time.Time
 	nextGrow  time.Time
 	measured  int
+	// prevReserve is the last tick's reserve (others plus the host's share, MiB), -1 before one.
+	prevReserve int
 }
 
 // Supervisor owns the children and the state.
@@ -174,6 +180,8 @@ type Supervisor struct {
 
 	opMu sync.Mutex
 	srv  *server
+	ours ourPID // srv's pid, for readers that do not hold opMu
+	gpu  gpuState
 
 	agent agentMgr
 	wg    sync.WaitGroup
@@ -280,6 +288,10 @@ func (s *Supervisor) Status() Status {
 	st.Sampler = s.samplerLocked()
 	s.customStatusLocked(&st)
 	st.Previous = s.previousLocked()
+	if s.gpu.sum != nil {
+		g := *s.gpu.sum
+		st.GPU = &g
+	}
 	return st
 }
 
@@ -400,8 +412,10 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	if err != nil {
 		return plan.PlanResult{}, err
 	}
-	res := plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
-	s.planCustom(&res, cat, hw)
+	sn := s.measure(ctx, hw, s.ours.pids())
+	res := plan.PlanSensed(cat, hw, s.wants(), sn.sum, s.modelInstalled)
+	res.GPU = sn.report()
+	s.planCustom(&res, cat, hw, sn)
 	s.fillDisk(&res, cat)
 	return res, nil
 }
@@ -664,6 +678,7 @@ func (s *Supervisor) wake() { s.Wake() }
 func (s *Supervisor) stopServerLocked() {
 	srv := s.srv
 	s.srv = nil
+	s.ours.set(0)
 	if srv == nil {
 		return
 	}

@@ -34,3 +34,28 @@ type Picture struct {
 	Processes []Process         `json:"processes"`
 	Sources   map[string]string `json:"sources"` // source name -> "ok" | error text; missing sources degrade, never fail
 }
+
+type Reserve struct {
+	OthersMiB   int    `json:"others_mib"`
+	OthersBasis string `json:"others_basis"` // "processes"|"card"|"none"
+	HostMiB     int    `json:"host_mib"`
+	HostBasis   string `json:"host_basis"` // "measured"|"estimate"|"other-adapter"|"none"
+	MarginMiB   int    `json:"margin_mib"`
+	TotalMiB    int    `json:"total_mib"`
+}
+
+type GPUSummary struct {
+	Adapters        []Adapter `json:"adapters"`
+	EngineAdapter   int       `json:"engine_adapter"`  // -1 = CPU
+	HostAdapter     int       `json:"host_adapter"`    // -1 = unknown
+	HostIntegrated  string    `json:"host_integrated"` // "yes"|"no"|"unknown"
+	Reserve         Reserve   `json:"reserve"`
+	FreeForModelMiB int       `json:"free_for_model_mib"`    // dedicated(E) - others - host - margin, >=0
+	OthersNote      string    `json:"others_note,omitempty"` // e.g. "Other apps are using 1.2 GB of your graphics card"
+}
+
+type GPUReport struct {
+	GPUSummary
+	Processes []Process         `json:"processes"`
+	Sources   map[string]string `json:"sources"`
+}

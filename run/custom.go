@@ -120,18 +120,18 @@ func (s *Supervisor) customStatusLocked(st *Status) {
 }
 
 // customRoom is the planning room for a custom check: the probed hardware, nothing of ours.
-func (s *Supervisor) planRoom(hw probe.Hardware) fit.Room {
-	return plan.RoomFor(hw, s.cfg.Profile.GameReserveMiB)
+func (s *Supervisor) planRoom(hw probe.Hardware, sn sensed) fit.Room {
+	return plan.RoomForSensed(hw, sn.sum, s.backendNow())
 }
 
-func (s *Supervisor) planCustom(res *plan.PlanResult, cat *catalog.Catalog, hw probe.Hardware) {
+func (s *Supervisor) planCustom(res *plan.PlanResult, cat *catalog.Catalog, hw probe.Hardware, sn sensed) {
 	s.mu.Lock()
 	c := s.st.Custom
 	s.mu.Unlock()
 	if c == nil {
 		return
 	}
-	ck := plan.CheckCustom(c.Path, cat, s.planRoom(hw), s.wants())
+	ck := plan.CheckCustom(c.Path, cat, s.planRoom(hw, sn), s.wants())
 	res.Custom = &ck
 }
 
@@ -142,7 +142,8 @@ func (s *Supervisor) CheckCustom(ctx context.Context, path string) (plan.CustomC
 		return plan.CustomCheck{}, err
 	}
 	cat, _ := s.catalog()
-	return plan.CheckCustom(path, cat, s.planRoom(hw), s.wants()), nil
+	sn := s.measure(ctx, hw, s.ours.pids())
+	return plan.CheckCustom(path, cat, s.planRoom(hw, sn), s.wants()), nil
 }
 
 // UseCustom selects the file at path and loads it in the background. The file is validated first

@@ -16,6 +16,7 @@ import (
 
 	"hermesengine/catalog"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 )
 
 const (
@@ -82,38 +83,18 @@ type PlanResult struct {
 	Custom *CustomCheck `json:"custom"`
 	// DiskFreeBytes is the free space at the data dir; -1 when unknown (filled by the supervisor).
 	DiskFreeBytes int64 `json:"disk_free_bytes"`
+	// GPU is the adapters, the processes on them and the reserve the verdicts were made around
+	// (filled by the supervisor).
+	GPU *gpusense.GPUReport `json:"gpu,omitempty"`
 }
 
-// RoomFor derives the planning room from the probed hardware: the GPU with the most memory,
-// all processes counted as others (nothing of ours is running at plan time).
+// RoomFor derives the planning room from the probed hardware alone: the GPU with the most
+// memory, all processes counted as others (nothing of ours is running at plan time), the host's
+// room the given estimate. It is RoomForSensed over an empty picture; callers that sense the
+// adapters use MeasureReserve and RoomForSensed.
 func RoomFor(hw probe.Hardware, gameReserve int) fit.Room {
-	r := fit.Room{GameReserve: gameReserve, RAMAvail: hw.RAMAvailMiB}
-	best := -1
-	for i, g := range hw.GPUs {
-		if g.VRAMTotalMiB > 0 && (best < 0 || g.VRAMTotalMiB > hw.GPUs[best].VRAMTotalMiB) {
-			best = i
-		}
-	}
-	if best < 0 {
-		r.NoGPU = true
-		return r
-	}
-	g := hw.GPUs[best]
-	r.GPUName = g.Name
-	r.VRAMTotal = g.VRAMTotalMiB
-	r.Margin = fit.DefaultMargin(g.VRAMTotalMiB)
-	if g.UnifiedMemory {
-		r.Unified = true
-		if o := g.VRAMTotalMiB - hw.RAMAvailMiB; o > 0 { // what the rest of the system already holds
-			r.Others = o
-		}
-	} else {
-		r.Others = g.VRAMUsedMiB
-	}
-	if v, _, err := r.Budget(); err == nil && int(v) < minUsableVRAM {
-		r.NoGPU = true // too little card to be worth using next to the game
-	}
-	return r
+	sum, _ := MeasureReserve(gpusense.Picture{}, hw, HostInfo{}, gameReserve)
+	return RoomForSensed(hw, sum, "vulkan")
 }
 
 // Plan answers, for every catalog model, whether it fits hw and in what shape, and recommends
@@ -122,15 +103,26 @@ func Plan(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, gameReserve int, i
 	return PlanWith(c, hw, w, gameReserve, installed, nil)
 }
 
+// PlanSensed is Plan over a measured reserve (MeasureReserve) in place of the fixed one.
+func PlanSensed(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpusense.GPUSummary, installed func(catalog.Model) bool) PlanResult {
+	return PlanSensedWith(c, hw, w, sum, installed, nil)
+}
+
 // PlanWith is Plan with a header source: for models whose file is on disk, info returns the
 // GGUF Info so the footprint is exact instead of size-guessed.
 func PlanWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, gameReserve int, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool)) PlanResult {
+	sum, _ := MeasureReserve(gpusense.Picture{}, hw, HostInfo{}, gameReserve)
+	return PlanSensedWith(c, hw, w, sum, installed, info)
+}
+
+// PlanSensedWith is PlanWith over a measured reserve.
+func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpusense.GPUSummary, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool)) PlanResult {
 	w = w.Norm()
-	room := RoomFor(hw, gameReserve)
 	var res PlanResult
 	if bs := c.Backends(hw); len(bs) > 0 {
 		res.Backend = bs[0].ID
 	}
+	room := RoomForSensed(hw, sum, res.Backend)
 	bestYes, bestTight := -1, -1
 	for _, m := range c.Models {
 		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}

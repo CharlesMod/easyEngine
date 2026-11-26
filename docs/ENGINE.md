@@ -205,7 +205,7 @@ loop lives in `run`.
   stays predicted. The engine logs the whole answer.
 - **A cap names what lifts it.** `Book.LowerCap(key, fp, failed, ctxTotal, room, build, now)`
   keeps beside every cap it lowers a `CapLift` (`cap_lift`): the room it was measured under
-  (`Room.Budget`, or `RAMBudget` with no GPU), the miss (the memory `fp` predicts the failed
+  (`Room.Budget`: the card's, or the host's with no GPU), the miss (the memory `fp` predicts the failed
   shape needs above the same slots at `ctxTotal`; 0 where that cannot be told, as when the walk
   kept the ctx and moved experts) and the engine build. `Book.LetGo(key, room, build)`, with the
   room and build as they stand now, lets the cap go where the room is larger by more than the
@@ -220,9 +220,10 @@ loop lives in `run`.
   archive installed under it (`backends/<id>/.installed`), so a new llama.cpp build under the
   same id lets the cap go; another id is another book key altogether. The engine calls `LetGo`
   each time it reads the book for a start.
-- **An unknown cache type is refused.** `Seed`, `SeedFromBytes`, `KVBytes`, `Choose` (`KVType`
-  or any of `KVTypes`), `MissRetry` and `StepDown` (also the current shape's type) and pricing at
-  another type answer `*fit.KVTypeError` naming it, never a price; `Grow` does not grow. The
+- **An unknown cache type is refused.** `Seed`, `SeedFromBytes`, `KVBytes`, and every entry that
+  prices memory (`Choose`, `MissRetry`, `StepDown`, `Grow`, `Book.Calibrate`, `Book.LowerCap`,
+  `Footprint.Need`, `Footprint.Largest`), for a type in the wants, in `KVTypes` or in a shape,
+  answer `*fit.KVTypeError` naming it, never a price, and the book records nothing. The
   nine names (`f32`, `f16`, `bf16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`) price as
   before and `""` is still `q4_0`. `plan`'s verdict for such a type says so.
 - **state.json both ways.** `Calib` keeps `fixed_mib`, `cap_ctx_total`, `loads` and `updated`
@@ -243,13 +244,13 @@ behaviour exactly, so `plan`, `run` and the game profile set none of them.
 | Field | Set | Unset |
 |---|---|---|
 | `Wants.Whole` (`whole`) | No layer and no expert off the card, for a dense or a MoE model, from `Choose`, `MissRetry`, `StepDown` and `Grow` (step 3 below is skipped; `StepDown` never moves an expert). Where only a split shape fits, `ErrTooBig`. | Expert layers may move to RAM. |
-| `Wants.KVTypes` (`kv_types`) | The cache types, best first. The shape takes the first type at which the most ctx asked (`CtxMax`, under the book's cap) fits at `Slots`; where no type does, the last type with the most ctx that fits down to the floor, then fewer slots; under that, `ErrTooBig`. Each type is priced from the footprint, never tried: the footprint names the type it was seeded at (`Footprint.KVType`), the per-token cache scales with the bytes per element, and the f16 expansion of the widest layer (`DequantPerTokenMiB`) is added for a quantised type and taken off for f16, bf16 and f32. `Seed` and `SeedFromBytes` fill both; a footprint built from measured numbers (`plan.FromMeasured`) names no type and gets `ErrNoKVType`. `KVType` is then not read. The list is taken once wherever it is read: each type at its first place, repeats and empty names dropped. `MissRetry` and `StepDown` keep the current shape's type until its floor at `MinSlots`; there `StepDown` (and `MissRetry` through it) moves to the next type in the list with the largest shape that needs no more memory than the one that failed (predicted at its type) and is never better than it (no more slots, no more ctx per slot); where none fits there, on to the type after; `ErrTooBig` comes only at the last type's floor. Only `Choose` plans the room afresh. The walk down is monotone: each step lowers the pair (types left after the shape's, then its predicted memory), so it ends for any list; the one step that does not lower it is the first expert layer moved to RAM where a layer weighs less than `MoESchedMiB`, and those moves are bounded by the expert layers. A type is chosen before ctx and experts: without `Whole`, f16 with experts in RAM comes before q4_0 with none. `Grow` counts a better type alone as no growth. | `KVType` alone, the footprint as given. |
+| `Wants.KVTypes` (`kv_types`) | The cache types, best first. The shape takes the first type at which the most ctx asked (`CtxMax`, under the book's cap) fits at `Slots`; where no type does, the last type with the most ctx that fits down to the floor, then fewer slots; under that, `ErrTooBig`. Each type is priced from the footprint, never tried: the footprint names the type it was seeded at (`Footprint.KVType`), the per-token cache scales with the bytes per element, and the f16 expansion of the widest layer (`DequantPerTokenMiB`) is added for a quantised type and taken off for f16, bf16 and f32. `Seed` and `SeedFromBytes` fill both; a footprint built from measured numbers (`plan.FromMeasured`) names no type and gets `ErrNoKVType`. `KVType` is then not read. The list is taken once wherever it is read: each type at its first place, repeats and empty names dropped. `MissRetry` and `StepDown` keep the current shape's type until its floor at `MinSlots`; there `StepDown` (and `MissRetry` through it) moves to the next type in the list with the largest shape that needs no more memory than the one that failed (predicted at its type) and is never better than it (no more slots, no more ctx per slot); where none fits there, on to the type after; `ErrTooBig` comes only at the last type's floor. Only `Choose` plans the room afresh. The walk down is monotone: each step lowers the pair (types left after the shape's, then its predicted memory), so it ends for any list; the one step that does not lower it is the first expert layer moved to RAM where a layer weighs less than `MoESchedMiB`, and those moves are bounded by the expert layers. A type is chosen before ctx and experts: without `Whole`, f16 with experts in RAM comes before q4_0 with none. `Grow` counts a better type alone as no growth. | `KVType` alone: the footprint priced at it (or at a shape's own type), as given where it names no type. |
 | `Wants.CtxFromModel` (`ctx_from_model`) | `CtxMax` is the model's trained context (`Footprint.CtxTrain`, which `Seed` takes from the header's `<arch>.context_length`, `gguf.Info.CtxTrain`); a floor above it, or unset, comes down to min(8192, trained). Where the header did not say it, `ErrNoCtxTrain`, never a guess; where it says less than the least context per slot (1,024), `ErrCtxTrainUnder`, never a shape above it. `MissRetry` and `StepDown` answer exactly as with that number named in `CtxMax`. | `CtxMax` as given. |
 | `Room.Reserve` (`reserve`) | Host RAM kept for the OS when experts move or a run is CPU-only; negative is none. | `OSReserveMiB` (2048). |
 | `Room.Margin` (`margin`) | The VRAM left free; negative is none. | 0 is `DefaultMargin(VRAMTotal)` (the engine's callers fill that value already). |
 | `Room.LargestBlock` (`largest_block`) | The largest single allocation the card can still give. A shape's largest allocation (`Footprint.Largest`) must fit inside it: the greatest of the weights left on the card (`Footprint.WeightsMiB` less the moved expert layers), the cache (full-attention, sliding-window and recurrent state counted as one) and the compute buffers (the fixed load beyond the weights plus the scratch that grows with ctx), each taken as one allocation. A footprint with no `WeightsMiB` (measured numbers) gets `ErrNoWeights`. Not read for a CPU-only room. | Not bounded. |
 | `Room.NoGPU` with `RAMAvail` | A pool that is one node of a processor's memory: no card, whatever the VRAM fields say; CPU-only shapes sized against `RAMAvail`, that node's free memory, less the reserve, and nothing else. | (as before) |
-| `Room.Unread` (`unread`) | The json names of fields the caller could not read. None is taken as zero: `Choose`, `MissRetry` and `StepDown` answer `*UnreadError` naming the first, and `Grow` does not grow. | Every field was read. |
+| `Room.Unread` (`unread`) | The json names of fields the caller could not read. None is taken as zero: every entry that reads a room (`Choose`, `MissRetry`, `StepDown`, `Grow`, `Book.LowerCap`, `Book.LetGo`, `Room.Budget`) answers `*UnreadError` naming the first; no cap is let go or lowered and no room is recorded. | Every field was read. |
 
 ### Decode speed floor, and CPU-only
 
@@ -560,6 +561,22 @@ taking the engine's downloads, processes or server:
   field marked unread): §5, "Wants and room another program may state". Unset, each is the
   engine's own behaviour; each refusal is a typed error (`ErrTooBig`, `ErrNoCtxTrain`, `ErrCtxTrainUnder`,
   `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`, `*KVTypeError`).
+- **One checked place.** Every exported entry of `core/fit` that prices memory or reads a room
+  hands its footprint, shape, room and wants to one unexported function, `settle`, before it
+  prices anything, and takes every number from what it answers: the footprint priced at the
+  shape's own cache type (a shape's `""` is the wants' type, else q4_0; with no shape, the wants'
+  type; a footprint naming no type is taken as given), the room's budgets, the wants resolved.
+  It refuses, in this order: a room field marked unread (`*UnreadError`), a largest block the
+  footprint cannot be held to (`ErrNoWeights`, where wants are planned), wants it cannot resolve
+  (`ErrNoCtxTrain`, `ErrCtxTrainUnder`, `*KVTypeError`), a shape's unknown type
+  (`*KVTypeError`), a type the footprint cannot be priced at (`ErrNoKVType`). A `Footprint` and a
+  `Room` themselves answer no price and no budget; the entries that do are `Choose`, `MissRetry`,
+  `StepDown`, `Grow` (each refuses all five), `Book.Calibrate` and `Footprint.Need` and
+  `Footprint.Largest` (a shape's type, the footprint's), `Book.LowerCap` (the room and the
+  shape's type), `Book.LetGo` and `Room.Budget` (the room). `TestEntriesTableIsComplete` reads the
+  package's source and fails on an exported function or method with no row in the table that
+  `TestEveryEntryRefusesAlike` feeds an unread field, an unknown type in the wants, the list and a
+  shape, and a shape at a type not the seed's.
 - **What it says it knows.** Every memory figure is marked predicted or measured, a calibration
   answers what it did with a reading and by how much the seed is off, a cap carries the room and
   build it was measured under and is let go by `Book.LetGo`, and an unknown cache type is a typed

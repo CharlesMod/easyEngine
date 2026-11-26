@@ -124,12 +124,16 @@ func Check(w io.Writer, rows []Row, seed Seeder) (map[string][]Err, error) {
 			seen[r.Model] = true
 			order = append(order, r.Model)
 		}
-		e := Err{Pred: fp.VRAM(r.Slots, r.CtxPerSlot, r.NCpuMoe), Meas: r.VRAMUsed}
+		pred, predRAM, err := fp.Need(fit.Shape{Slots: r.Slots, CtxPerSlot: r.CtxPerSlot, NCpuMoe: r.NCpuMoe, KVType: r.KV})
+		if err != nil {
+			return nil, err
+		}
+		e := Err{Pred: pred, Meas: r.VRAMUsed}
 		byModel[r.Model] = append(byModel[r.Model], e)
 		ramCols := fmt.Sprintf("%8s %8s %7s", "-", "-", "-")
 		if r.NCpuMoe > 0 {
 			if b, ok := base[key(r)]; ok {
-				pr, me := fp.ExpertRAM(r.NCpuMoe), r.RSSUsed-b
+				pr, me := predRAM, r.RSSUsed-b
 				ramCols = fmt.Sprintf("%8.0f %8.0f %+7.0f", pr, me, pr-me)
 			}
 		}

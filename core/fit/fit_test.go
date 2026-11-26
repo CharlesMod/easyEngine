@@ -203,8 +203,8 @@ func TestChooseTable(t *testing.T) {
 			t.Errorf("%s: ctx %d not aligned or over max", c.name, s.CtxPerSlot)
 		}
 		if !s.CPUOnly {
-			if float64(s.VRAMMiB) > c.room.Budget()+1 {
-				t.Errorf("%s: vram %d over budget %.0f", c.name, s.VRAMMiB, c.room.Budget())
+			if float64(s.VRAMMiB) > vramBudget(c.room)+1 {
+				t.Errorf("%s: vram %d over budget %.0f", c.name, s.VRAMMiB, vramBudget(c.room))
 			}
 		}
 		if c.fp.MoE == false && s.NCpuMoe != 0 {
@@ -233,7 +233,7 @@ func TestChooseOrderCtxBeforeExpertsBeforeSlots(t *testing.T) {
 	// equal ctx: the fewer CPU layers wins
 	if s.NCpuMoe > 1 {
 		lower := ref.vram(3, s.CtxPerSlot, s.NCpuMoe-1)
-		if lower <= r.Budget() {
+		if lower <= vramBudget(r) {
 			t.Errorf("a smaller n-cpu-moe also fits: %v", s)
 		}
 	}
@@ -345,11 +345,11 @@ func TestStepDownAndMissRetryAndGrow(t *testing.T) {
 
 	// Grow: bigger room offers a bigger shape; same room does not
 	small, _ := Choose(ref, room(16303, 5000, 24000), game)
-	if g, ok := Grow(ref, small, room(16303, 1255, 24000), game); !ok || !better(g, small) {
+	if g, ok, _ := Grow(ref, small, room(16303, 1255, 24000), game); !ok || !better(g, small) {
 		t.Errorf("grow: %v %v", g, ok)
 	}
 	best, _ := Choose(ref, room(16303, 1255, 24000), game)
-	if g, ok := Grow(ref, best, room(16303, 1255, 24000), game); ok {
+	if g, ok, _ := Grow(ref, best, room(16303, 1255, 24000), game); ok {
 		t.Errorf("grow at best: %v", g)
 	}
 }
@@ -360,7 +360,7 @@ func TestBook(t *testing.T) {
 	var b Book
 	key := BookKey("sha", "RTX 5080", "cuda-linux-x64")
 	// within +-15 %: accepted, and the footprint now carries the measured fixed load
-	if !b.Calibrate(key, ref, shape, 12500, stamp).Taken() {
+	if !taken(b.Calibrate(key, ref, shape, 12500, stamp)) {
 		t.Fatal("12500 should calibrate")
 	}
 	fp := b.Footprint(key, ref)
@@ -368,7 +368,7 @@ func TestBook(t *testing.T) {
 		t.Errorf("calibrated model predicts %.0f, measured 12500", fp.vram(3, 65536, 0))
 	}
 	// a wild reading (others changed during load) is refused and changes nothing
-	if b.Calibrate(key, ref, shape, 16000, stamp).Taken() || b.Calibrate(key, ref, shape, 8000, stamp).Taken() {
+	if taken(b.Calibrate(key, ref, shape, 16000, stamp)) || taken(b.Calibrate(key, ref, shape, 8000, stamp)) {
 		t.Error("out-of-range reading accepted")
 	}
 	if got := b.Footprint(key, ref).FixedMiB; math.Abs(got-fp.FixedMiB) > 1e-9 {
@@ -397,7 +397,7 @@ func TestBook(t *testing.T) {
 		t.Error("nil book")
 	}
 	// CPU-only runs never calibrate a GPU fixed load
-	if b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000, stamp).Taken() {
+	if taken(b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000, stamp)) {
 		t.Error("cpu-only calibrated")
 	}
 }
@@ -409,7 +409,7 @@ func TestCalibrateWithExpertsOnCPU(t *testing.T) {
 	truth.FixedMiB += 150 // the real fixed load is 150 MiB above the seed
 	measured := int(truth.vram(3, 32768, 10))
 	var b Book
-	if !b.Calibrate("k", ref, sh, measured, stamp).Taken() {
+	if !taken(b.Calibrate("k", ref, sh, measured, stamp)) {
 		t.Fatal("not accepted")
 	}
 	if got := b.Entries["k"].FixedMiB; math.Abs(got-truth.FixedMiB) > 1 {

@@ -103,7 +103,7 @@ func RoomFor(hw probe.Hardware, gameReserve int) fit.Room {
 	} else {
 		r.Others = g.VRAMUsedMiB
 	}
-	if int(r.Budget()) < minUsableVRAM {
+	if v, _, err := r.Budget(); err == nil && int(v) < minUsableVRAM {
 		r.NoGPU = true // too little card to be worth using next to the game
 	}
 	return r
@@ -191,7 +191,7 @@ const cpuComfort = 0.6
 // whose need stays within cpuComfort of the free RAM, not the best-quality one. The verdicts are
 // marked Estimated.
 func cpuOnlyPick(vs []Verdict, room fit.Room) string {
-	free := room.RAMBudget()
+	_, free, _ := room.Budget() // RoomFor's room: every field read
 	best, bestComfy := -1, -1
 	for i, v := range vs {
 		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
@@ -233,15 +233,22 @@ func verdictFor(fp fit.Footprint, s fit.Shape, w fit.Wants) (string, string) {
 }
 
 func whyNot(fp fit.Footprint, room fit.Room, w fit.Wants) string {
+	vram, ram, err := room.Budget()
+	if err != nil {
+		return err.Error()
+	}
+	least := fit.Shape{Slots: w.MinSlots, CtxPerSlot: w.CtxFloor, KVType: w.KVType, CPUOnly: room.NoGPU}
+	if fp.MoE && !room.Unified && !room.NoGPU {
+		least.NCpuMoe = fp.ExpertLayers
+	}
+	cardNeed, hostNeed, err := fp.Need(least)
+	if err != nil {
+		return err.Error()
+	}
 	if room.NoGPU {
-		need := fp.HostRAM(w.MinSlots, w.CtxFloor)
-		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(need), int(room.RAMBudget()))
+		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(hostNeed), int(ram))
 	}
-	need := fp.VRAM(w.MinSlots, w.CtxFloor, 0)
-	if fp.MoE && !room.Unified {
-		need = fp.VRAM(w.MinSlots, w.CtxFloor, fp.ExpertLayers)
-	}
-	have := int(room.Budget())
+	need, have := cardNeed, int(vram)
 	kind := "dense models cannot be split between card and RAM"
 	if fp.MoE {
 		kind = "even with every expert layer in RAM"

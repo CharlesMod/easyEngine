@@ -102,7 +102,7 @@ func TestCalibrationSaysWhatItDid(t *testing.T) {
 	for _, c := range cases {
 		var b Book
 		if c.before > 0 {
-			if got := b.Calibrate("k", c.seed, c.s, int(c.before), stamp); !got.Taken() {
+			if got, _ := b.Calibrate("k", c.seed, c.s, int(c.before), stamp); !got.Taken() {
 				t.Fatalf("%s: the first reading %v", c.name, got)
 			}
 		}
@@ -110,7 +110,7 @@ func TestCalibrationSaysWhatItDid(t *testing.T) {
 		if c.overlay {
 			sd = b.Footprint("k", c.seed)
 		}
-		got := b.Calibrate("k", sd, c.s, c.measured, stamp)
+		got, _ := b.Calibrate("k", sd, c.s, c.measured, stamp)
 		wantSeed := c.seed.FixedMiB
 		if c.overlay {
 			wantSeed = 0
@@ -165,18 +165,18 @@ func TestCapNamesWhatLiftsIt(t *testing.T) {
 			e.Lift = nil
 			b.Entries["k"] = e
 			// The first LetGo records what the older book did not.
-			if stands, l := b.LetGo("k", at, "cuda@b1"); !stands || l == nil || l.RoomMiB != int(at.Budget()) || l.Build != "cuda@b1" || l.MissMiB != 0 {
+			if stands, l, _ := b.LetGo("k", at, "cuda@b1"); !stands || l == nil || l.RoomMiB != int(vramBudget(at)) || l.Build != "cuda@b1" || l.MissMiB != 0 {
 				t.Fatalf("%s: the first LetGo of an older cap: %v %+v", c.name, stands, l)
 			}
 		}
 		lift := b.Entries["k"].Lift
-		if lift == nil || lift.RoomMiB != int(at.Budget()) || lift.Build != "cuda@b1" || lift.MissMiB < 0 ||
+		if lift == nil || lift.RoomMiB != int(vramBudget(at)) || lift.Build != "cuda@b1" || lift.MissMiB < 0 ||
 			(c.ctxTotal == 150000 && !c.old && lift.MissMiB <= 0) || (c.ctxTotal == 196608 && lift.MissMiB != 0) {
 			t.Fatalf("%s: lift %+v", c.name, lift)
 		}
 		now := at
 		now.Others -= c.grow(lift.MissMiB)
-		stands, l := b.LetGo("k", now, c.build)
+		stands, l, _ := b.LetGo("k", now, c.build)
 		cap := b.Footprint("k", ref).CapCtxTotal
 		if stands != c.stands || (stands && cap != c.ctxTotal) || (!stands && cap != 0) {
 			t.Errorf("%s: stands %v cap %d", c.name, stands, cap)
@@ -186,7 +186,7 @@ func TestCapNamesWhatLiftsIt(t *testing.T) {
 		}
 	}
 	var b Book
-	if stands, l := b.LetGo("k", at, "cuda@b1"); stands || l != nil {
+	if stands, l, _ := b.LetGo("k", at, "cuda@b1"); stands || l != nil {
 		t.Error("no cap, yet one stands")
 	}
 
@@ -210,7 +210,7 @@ func TestCapNamesWhatLiftsIt(t *testing.T) {
 		b.LowerCap("k", ref, failed, 150000, at, "cuda@b1", stamp)
 		missA := b.Entries["k"].Lift.MissMiB
 		b.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 49152, KVType: "q4_0"}, 98304, small, "cuda@b1", stamp)
-		stands, l := b.LetGo("k", c.now(missA), c.build)
+		stands, l, _ := b.LetGo("k", c.now(missA), c.build)
 		got := b.Footprint("k", ref).CapCtxTotal
 		if got != c.cap || stands != (c.cap > 0) {
 			t.Errorf("%s: stands %v cap %d, want %d", c.name, stands, got, c.cap)
@@ -284,7 +284,7 @@ func TestBookJSONBothWays(t *testing.T) {
 	if fp.FixedMiB != 11900.5 || fp.CapCtxTotal != 150000 || fp.Basis != Measured {
 		t.Errorf("old book read as %+v", fp)
 	}
-	if stands, _ := b.LetGo("k", room(16303, 0, 24000), "another"); !stands {
+	if stands, _, _ := b.LetGo("k", room(16303, 0, 24000), "another"); !stands {
 		t.Error("an old cap was let go by its first LetGo: it recorded nothing to measure a change against")
 	}
 

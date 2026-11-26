@@ -220,6 +220,9 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 		{name: "an expansion above the compute that holds it", applies: func(e entry) bool { return e.fp && !e.name }, mod: func(f *feed) {
 			f.fp.DequantPerTokenMiB = f.fp.ComputePerTokenMiB + 0.01
 		}, badFigure: "DequantPerTokenMiB", keepsBook: true},
+		{name: "a per-token figure not a number", applies: func(e entry) bool { return e.fp && !e.name }, mod: func(f *feed) {
+			f.fp.PerTokenMiB = math.NaN()
+		}, badFigure: "PerTokenMiB", keepsBook: true},
 		{name: "unknown type name", applies: func(e entry) bool { return e.name }, mod: func(f *feed) { f.kv = "q3_k" }, unknownType: "q3_k"},
 		{name: "a shape at a type not the seed's", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = f16; f.w.KVType = "f16" }, priced: true},
 		// A shape naming no type runs at the default (Args): every entry prices it there, with

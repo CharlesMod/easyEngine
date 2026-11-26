@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -244,47 +245,107 @@ func TestIncoherentFiguresRefused(t *testing.T) {
 			t.Errorf("%v at %s: priced %.1f card, %.1f host (%v), want the expansion refused", s, s.KVType, v, r, err)
 		}
 	}
-	f16 := seed(denseInfo(), "f16")
-	f16.DequantPerTokenMiB = -0.01
-	if _, _, err := f16.Need(shapes[0]); !errors.As(err, new(*FigureError)) {
-		t.Errorf("figures at f16 with the expansion below zero: %v, want refused", err)
+	host := Shape{Slots: 1, CtxPerSlot: 4096, KVType: "q4_0", CPUOnly: true}
+	cases := []struct {
+		name string
+		kv   string // the type the figures are held at; "" measured
+		mod  func(fp *Footprint)
+		bad  string
+	}{
+		{"f16, expansion below zero", "f16", func(fp *Footprint) { fp.DequantPerTokenMiB = -0.01 }, "DequantPerTokenMiB"},
+		{"expansion not a number", "q4_0", func(fp *Footprint) { fp.DequantPerTokenMiB = math.NaN() }, "DequantPerTokenMiB"},
+		{"compute and expansion infinite", "q4_0", func(fp *Footprint) {
+			fp.ComputePerTokenMiB, fp.DequantPerTokenMiB = math.Inf(1), math.Inf(1)
+		}, "ComputePerTokenMiB"},
+		{"cache below zero", "q4_0", func(fp *Footprint) { fp.PerTokenMiB = -0.01 }, "PerTokenMiB"},
+		{"sliding-window cache infinite", "q4_0", func(fp *Footprint) { fp.SWAPerTokenMiB = math.Inf(1) }, "SWAPerTokenMiB"},
+		{"measured, compute below zero", "", func(fp *Footprint) { fp.ComputePerTokenMiB = -0.01 }, "ComputePerTokenMiB"},
+		{"measured, cache not a number", "", func(fp *Footprint) { fp.PerTokenMiB = math.NaN() }, "PerTokenMiB"},
+	}
+	for _, c := range cases {
+		fp := seed(denseInfo(), "q4_0")
+		if c.kv != "" {
+			fp = seed(denseInfo(), c.kv)
+		} else {
+			fp.KVType = ""
+		}
+		c.mod(&fp)
+		s := host
+		if c.kv == "" {
+			s.KVType = ""
+		}
+		v, r, err := fp.Need(s)
+		var fe *FigureError
+		if !errors.As(err, &fe) || fe.Name != c.bad {
+			t.Errorf("%s: priced %.1f card, %.1f host (%v), want %s refused", c.name, v, r, err, c.bad)
+		}
 	}
 }
 
-// No producer makes figures settle refuses: every seed at every type, carried through JSON, the
-// book's overlay and a calibration's corrected fixed part, prices at every type, on a card and not.
+// No producer makes figures settle refuses: every seed at every type, from the default constants
+// and from sets with each changed (halved, doubled, zero), with no type (measured) as well;
+// corrected by a calibration far over and far under, carried through the book's overlay and JSON;
+// priced at every type it can be, on a card and not.
 func TestProducersMakeCoherentFigures(t *testing.T) {
 	types := []string{"f16", "q8_0", "q4_0"}
-	var fps []Footprint
-	for _, in := range []gguf.Info{refInfo(), denseInfo(), hybridInfo()} {
-		for _, kv := range types {
-			fps = append(fps, seed(in, kv))
+	sets := []Consts{DefaultConsts()}
+	for _, n := range constNames {
+		for _, k := range []float64{0.5, 2, 0} {
+			c := DefaultConsts()
+			c.Of = maps.Clone(c.Of)
+			v := c.Of[n]
+			v.Value *= k
+			c.Of[n] = v
+			sets = append(sets, c)
 		}
 	}
-	for _, kv := range types {
-		for _, moe := range []bool{false, true} {
-			fp, err := SeedFromBytes(10<<30, moe, kv)
-			if err != nil {
-				t.Fatal(err)
+	var fps []Footprint
+	for _, c := range sets {
+		for _, in := range []gguf.Info{refInfo(), denseInfo(), hybridInfo()} {
+			for _, kv := range types {
+				fp, _, err := SeedWith(in, kv, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fps = append(fps, fp)
 			}
-			fps = append(fps, fp)
 		}
+		for _, kv := range types {
+			for _, moe := range []bool{false, true} {
+				fp, err := SeedFromBytesWith(10<<30, moe, kv, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fps = append(fps, fp)
+			}
+		}
+	}
+	for _, fp := range fps { // the range is the seeds alone
+		m := fp
+		m.KVType = "" // the same numbers, taken as measured
+		fps = append(fps, m)
 	}
 	for i, fp := range fps {
-		b := &Book{}
-		s := Shape{Slots: 1, CtxPerSlot: 8192, KVType: fp.KVType}
-		if _, err := b.Calibrate("k", fp, s, int(fp.need(s))+300, stamp); err != nil {
-			t.Fatalf("%d: calibrate: %v", i, err)
-		}
-		raw, _ := json.Marshal(b.Footprint("k", fp))
-		var back Footprint
-		if err := json.Unmarshal(raw, &back); err != nil {
-			t.Fatal(err)
-		}
-		for _, kv := range types {
-			for _, cpu := range []bool{false, true} {
-				if _, _, err := back.Need(Shape{Slots: 1, CtxPerSlot: 65536, KVType: kv, CPUOnly: cpu}); err != nil {
-					t.Errorf("%d seeded at %s, at %s CPU-only %v: %v", i, fp.KVType, kv, cpu, err)
+		for _, off := range []int{-8000, 300, 60000} {
+			b := &Book{}
+			s := Shape{Slots: 1, CtxPerSlot: 8192, KVType: fp.KVType}
+			if _, err := b.Calibrate("k", fp, s, max(1, int(fp.need(s))+off), stamp); err != nil {
+				t.Fatalf("%d: calibrate: %v", i, err)
+			}
+			raw, _ := json.Marshal(b.Footprint("k", fp))
+			var back Footprint
+			if err := json.Unmarshal(raw, &back); err != nil {
+				t.Fatal(err)
+			}
+			at := types
+			if fp.KVType == "" {
+				at = []string{""}
+			}
+			for _, kv := range at {
+				for _, cpu := range []bool{false, true} {
+					if _, _, err := back.Need(Shape{Slots: 1, CtxPerSlot: 65536, KVType: kv, CPUOnly: cpu}); err != nil {
+						t.Errorf("%d seeded at %q, off %d, at %s CPU-only %v: %v", i, fp.KVType, off, kv, cpu, err)
+					}
 				}
 			}
 		}

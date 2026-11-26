@@ -708,23 +708,25 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 }
 
 // coherent refuses figures no footprint can hold. The invariant, which price keeps at every type:
-// the expansion is not below zero, and the compute less the expansion it holds (all of it at a
-// quantised type, none at another) is not below zero. Figures that name no type (measured
-// numbers) are taken as given: they are never priced at another type, nor the expansion read.
-// Only settle calls it.
+// each per-token figure a price is made from (cache, sliding-window cache, compute, expansion) is a
+// finite number not below zero, with or without a type; and for figures held at a quantised type
+// the expansion is not above the compute that holds it (at another type the compute holds none of
+// it). Zero is a model with no such term. It prices nothing; only settle calls it.
 func coherent(fp Footprint) error {
-	if fp.KVType == "" {
-		return nil
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"PerTokenMiB", fp.PerTokenMiB}, {"SWAPerTokenMiB", fp.SWAPerTokenMiB},
+		{"ComputePerTokenMiB", fp.ComputePerTokenMiB}, {"DequantPerTokenMiB", fp.DequantPerTokenMiB}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) {
+			return &FigureError{Name: f.name, Rule: "is not a finite number"}
+		}
+		if f.v < 0 {
+			return &FigureError{Name: f.name, Rule: "is below zero: a token never costs less than none"}
+		}
 	}
-	compute := fp.ComputePerTokenMiB
-	if fp.DequantPerTokenMiB < 0 {
-		return &FigureError{Name: "DequantPerTokenMiB", Rule: "is below zero: the f16 expansion of a quantised cache is never negative"}
-	}
-	if quantised(fp.KVType) && fp.DequantPerTokenMiB > compute {
+	if fp.KVType != "" && quantised(fp.KVType) && fp.DequantPerTokenMiB > fp.ComputePerTokenMiB {
 		return &FigureError{Name: "DequantPerTokenMiB", Rule: "is above ComputePerTokenMiB: at a quantised type the compute holds the expansion"}
-	}
-	if compute < 0 {
-		return &FigureError{Name: "ComputePerTokenMiB", Rule: "is below zero: the compute that grows with ctx is never negative"}
 	}
 	return nil
 }

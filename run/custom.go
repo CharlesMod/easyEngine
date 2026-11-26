@@ -173,10 +173,7 @@ func (s *Supervisor) UseCustom(path string) error {
 		s.mu.Unlock()
 		return ErrBusy
 	}
-	if s.st.Backend == "" {
-		s.mu.Unlock()
-		return errors.New("no engine backend is installed yet")
-	}
+	needBackend := s.st.Backend == ""
 	if s.st.Model != customID && s.st.Model != "" {
 		s.st.CustomPrev = s.st.Model
 	}
@@ -185,14 +182,58 @@ func (s *Supervisor) UseCustom(path string) error {
 	s.userStopped = false
 	ext := s.st.Mode == "external"
 	lc := s.loadCancel
+	var jctx context.Context
+	if needBackend {
+		// A fresh machine: install the backend and the agent only (no catalog model), then serve.
+		var cancel context.CancelFunc
+		jctx, cancel = context.WithCancel(s.root)
+		s.jobRunning, s.jobCancel = true, cancel
+	}
 	s.mu.Unlock()
 	s.save()
 	if lc != nil {
 		lc()
 	}
+	if needBackend {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			err := s.installBackendOnly(jctx)
+			s.endJob(jctx, err, "Install")
+		}()
+		return nil
+	}
 	if !ext {
 		go s.reloadSelected()
 	}
+	return nil
+}
+
+// installBackendOnly is runInstall without a model: llama.cpp and the agent. endJob then settles
+// and starts the selected (custom) file.
+func (s *Supervisor) installBackendOnly(ctx context.Context) error {
+	cat, err := s.catalog()
+	if err != nil {
+		return err
+	}
+	hw, err := s.Hardware(ctx, false)
+	if err != nil {
+		return err
+	}
+	s.setPhase("downloading", "Installing the model server")
+	be, err := s.ensureBackend(ctx, cat, hw, "")
+	if err != nil {
+		return err
+	}
+	if s.cfg.Profile.Agent != nil && s.cfg.Profile.Agent.Wheel != "" {
+		if err := s.ensureAgent(ctx, cat); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.st.Backend = be
+	s.mu.Unlock()
+	s.save()
 	return nil
 }
 

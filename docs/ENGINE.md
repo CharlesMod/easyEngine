@@ -465,6 +465,10 @@ The engine can serve a local GGUF file in place. The file is never copied, moved
 - `POST custom/use {path}` -> 202 `{started:true}` | 400 `{error}` | 409 (an install job runs). Saves
   `state.custom = {path, name, size, mtime}` and `state.model = "custom"` (the catalog model it
   replaced is kept as `custom_prev`), stops the running server and loads the file in the background.
+  On a machine with no backend yet it first runs an install job for llama.cpp and the agent only (no
+  catalog model, no starter download), reported in status phase/progress like a normal install and
+  answering 409 while another job runs; when the job ends the file is served. An engine restart with
+  `state.model = "custom"` and a backend resumes serving the file.
 - `POST custom/clear {}` -> 200. Forgets the file; the `custom_prev` model serves again when installed,
   else `not_installed`.
 

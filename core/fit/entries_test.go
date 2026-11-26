@@ -100,7 +100,9 @@ var entries = map[string]entry{
 			return 0, 0, err
 		}
 		ft, _ := f.fp.atType(runs(f.s))
-		miss := math.Ceil(ft.kvAt(f.s.Slots, f.s.CtxPerSlot) - ft.kvAt(f.s.Slots, ctx/f.s.Slots))
+		under := f.s
+		under.CtxPerSlot = ctx / f.s.Slots
+		miss := math.Ceil(ft.need(f.s) - ft.need(under))
 		return float64(f.book.Entries["k"].Lift.MissMiB), miss, nil
 	}},
 	"Book.LetGo": {room: true, call: func(f feed) (float64, float64, error) {
@@ -119,6 +121,9 @@ var entries = map[string]entry{
 	"Footprint.Largest": {shape: true, fp: true, call: func(f feed) (float64, float64, error) {
 		v, err := f.fp.Largest(f.s)
 		ft, _ := f.fp.atType(runs(f.s))
+		if f.s.CPUOnly {
+			return v, 0, err // nothing on the card
+		}
 		return v, ft.largest(f.s.Slots, f.s.CtxPerSlot, f.s.NCpuMoe), err
 	}},
 	"Seed": {name: true, call: func(f feed) (float64, float64, error) { _, _, err := Seed(refInfo(), f.kv); return 0, 0, err }},

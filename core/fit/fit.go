@@ -237,7 +237,8 @@ type Footprint struct {
 	// KVType is the cache type the per-token terms are priced at; "" when they cannot be priced
 	// at another (measured numbers). DequantPerTokenMiB is the part of ComputePerTokenMiB a
 	// quantised cache adds on a card (the f16 expansion of the widest layer), whatever KVType is;
-	// a CPU-only shape is priced without it (fig.allHost), and the figures always keep it.
+	// a shape that lays nothing on a card is priced without it (fig.perToken), and the figures
+	// always keep it.
 	KVType             string  `json:"kv_type"`
 	DequantPerTokenMiB float64 `json:"dequant_per_token_mib"`
 	// WeightsMiB is the weights on the card with no expert moved (one allocation); 0 = unknown.
@@ -738,9 +739,24 @@ func (room roomFig) capRoom() int {
 	return int(room.budget)
 }
 
-// kvAt returns the KV cache MiB for a layout.
-func (fp fig) kvAt(slots, ctxPerSlot int) float64 {
-	kv := (fp.PerTokenMiB+fp.ComputePerTokenMiB)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
+// perToken is the price in MiB of one token of total context for a shape, cpuOnly where it lays
+// nothing on a card: the full-attention cache, and the compute scratch that grows with ctx. It is
+// the one place that price is said; every price, rate and count of tokens takes it from here. A
+// quantised cache's f16 expansion is laid only on a card, so a CPU-only shape is priced without it;
+// measured figures (no type) are taken as given. It must never alter the figures, which keep the
+// term for any card shape priced from them.
+func (fp fig) perToken(cpuOnly bool) (cache, compute float64) {
+	compute = fp.ComputePerTokenMiB
+	if cpuOnly && fp.KVType != "" && quantised(fp.KVType) {
+		compute -= fp.DequantPerTokenMiB
+	}
+	return fp.PerTokenMiB, compute
+}
+
+// kvAt returns the KV cache MiB for a layout, cpuOnly where it lays nothing on a card.
+func (fp fig) kvAt(slots, ctxPerSlot int, cpuOnly bool) float64 {
+	cache, compute := fp.perToken(cpuOnly)
+	kv := (cache+compute)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
 		if fp.SWAWindow > 0 && fp.SWAWindow < w {
@@ -753,7 +769,7 @@ func (fp fig) kvAt(slots, ctxPerSlot int) float64 {
 
 // vram is the GPU use of a layout with nCpuMoe expert layers moved to RAM.
 func (fp fig) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
-	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
+	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot, false) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
 	if nCpuMoe > 0 {
 		v += fp.MoESchedMiB
 	}
@@ -763,11 +779,13 @@ func (fp fig) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
 // largest is the largest single allocation on the card of a layout, each of these taken as one
 // allocation: the weights left on the card, the cache (full-attention, sliding-window and
 // recurrent state together) and the compute buffers (the fixed load beyond the weights plus the
-// scratch that grows with ctx). It needs WeightsMiB.
+// scratch that grows with ctx). It needs WeightsMiB, and prices a card layout only.
 func (fp fig) largest(slots, ctxPerSlot, nCpuMoe int) float64 {
 	weights := fp.WeightsMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
-	cache := fp.kvAt(slots, ctxPerSlot) - fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
-	compute := math.Max(fp.FixedMiB-fp.WeightsMiB, 0) + fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
+	_, grows := fp.perToken(false)
+	scratch := grows * float64(slots*ctxPerSlot)
+	cache := fp.kvAt(slots, ctxPerSlot, false) - scratch
+	compute := math.Max(fp.FixedMiB-fp.WeightsMiB, 0) + scratch
 	return math.Max(weights, math.Max(cache, compute))
 }
 
@@ -780,16 +798,9 @@ func (fp fig) expertRAM(nCpuMoe int) float64 {
 	return per * float64(nCpuMoe)
 }
 
-// allHost is the RAM use of a CPU-only run. Such a run lays nothing on a card, and only a card
-// lays the f16 expansion of a quantised cache, so it is left out here, for the shape priced: this
-// is the one place that decides it. It must never alter the figures, which keep the term for any
-// card shape priced from them; measured figures (no type) are taken as given.
+// allHost is the RAM use of a CPU-only run, which lays nothing on a card.
 func (fp fig) allHost(slots, ctxPerSlot int) float64 {
-	h := fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
-	if fp.KVType != "" && quantised(fp.KVType) {
-		h -= fp.DequantPerTokenMiB * float64(slots*ctxPerSlot)
-	}
-	return h
+	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot, true) + fp.ScratchMiB
 }
 
 // Need is the predicted memory in MiB of shape s, priced at its own cache type: card memory and
@@ -808,8 +819,9 @@ func (fp Footprint) Need(s Shape) (vram, ram float64, err error) {
 }
 
 // Largest is the predicted largest single allocation in MiB of shape s on the card (see
-// Room.LargestBlock), priced at its own cache type; ErrNoWeights where the footprint does not
-// know its weights, and settle's refusals.
+// Room.LargestBlock), priced at its own cache type; none (0) for a CPU-only shape, which lays
+// nothing on the card; ErrNoWeights where the footprint does not know its weights, and settle's
+// refusals.
 func (fp Footprint) Largest(s Shape) (float64, error) {
 	st, err := settle(&fp, &s, nil, nil)
 	if err != nil {
@@ -817,6 +829,9 @@ func (fp Footprint) Largest(s Shape) (float64, error) {
 	}
 	if fp.WeightsMiB <= 0 {
 		return 0, ErrNoWeights
+	}
+	if s.CPUOnly {
+		return 0, nil
 	}
 	return st.fp.largest(s.Slots, s.CtxPerSlot, s.NCpuMoe), nil
 }
@@ -1077,7 +1092,8 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	}
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
-	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
+	cache, compute := f.perToken(cur.CPUOnly)
+	if perTok := cache + compute; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
 		drop := int(math.Ceil((float64(failedBufMiB) + f.ScratchMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}

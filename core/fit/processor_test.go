@@ -1,7 +1,13 @@
 package fit
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/CharlesMod/easyEngine/core/gguf"
@@ -76,7 +82,7 @@ func TestProcessorPricesNoExpansion(t *testing.T) {
 // The figures a caller holds or gets back always keep the expansion: only the pricing of a shape
 // that lays nothing on a card leaves it out. So in a card room every card shape an entry answers,
 // whatever shape it was walked from (a CPU-only one included), needs exactly what Need says of
-// that shape, and what the core answered before a processor's pricing was mended.
+// that shape, to the MiB the figures price it at.
 func TestCardShapeFromCPUOnlyKeepsExpansion(t *testing.T) {
 	dense := seed(denseInfo(), "q4_0")
 	card := Room{VRAMTotal: 24576, GameReserve: 1500, Margin: DefaultMargin(24576), RAMAvail: 32000}
@@ -141,6 +147,77 @@ func TestEveryCardShapePricesAsNeed(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// A re-plan after a miss bounds the ctx to drop by the failed buffer over the price of a token, and
+// that price is the one Need gives the shape that failed: from a CPU-only shape, the slope of its
+// host memory, with no f16 expansion in it.
+func TestMissRetryFromHostShapePricesAsNeed(t *testing.T) {
+	fp := seed(hybridInfo(), "q4_0")
+	cur := Shape{Slots: 1, CtxPerSlot: 262144, KVType: "q4_0", CPUOnly: true}
+	under := cur
+	under.CtxPerSlot = 131072
+	_, hi, err1 := fp.Need(cur)
+	_, lo, err2 := fp.Need(under)
+	if err1 != nil || err2 != nil {
+		t.Fatal(err1, err2)
+	}
+	slope := (hi - lo) / float64(cur.CtxPerSlot-under.CtxPerSlot)
+	drop := int(math.Ceil((1000 + fp.ScratchMiB) / slope))
+	w := Wants{Slots: 1, MinSlots: 1, CtxMax: 262144, CtxFloor: 8192, KVType: "q4_0"}
+	s, err := MissRetry(fp, cur, 1000, Room{NoGPU: true, RAMAvail: 64000}, w)
+	if want := alignDown(cur.CtxPerSlot - drop); err != nil || !s.CPUOnly || s.CtxPerSlot != want {
+		t.Errorf("answered %v (%v); a slope of %.5f MiB a token drops %d tokens, so 1x%d", s, err, slope, drop, want)
+	}
+}
+
+// A shape that lays nothing on a card has no allocation on it: its largest block there is none.
+func TestLargestOfHostShapeIsNone(t *testing.T) {
+	fp := seed(hybridInfo(), "q4_0")
+	for _, kv := range []string{"f16", "q8_0", "q4_0"} {
+		if v, err := fp.Largest(Shape{Slots: 1, CtxPerSlot: 65536, KVType: kv, CPUOnly: true}); err != nil || v != 0 {
+			t.Errorf("%s CPU-only: largest block on the card %.1f MiB (%v), want none", kv, v, err)
+		}
+	}
+}
+
+// The price of a token for a shape is said in one place, fig.perToken: the per-token terms that
+// differ between a card and a processor are read only there, by price (which prices the figures
+// at a type) and by the seeds that write them. A second spelling would price a shape apart from
+// Need. This reads the package's non-test source and fails on any other reading.
+func TestOnePriceOfAToken(t *testing.T) {
+	allowed := map[string]bool{"perToken": true, "price": true,
+		"Seed": true, "SeedWith": true, "SeedFromBytes": true, "SeedFromBytesWith": true}
+	terms := map[string]bool{"ComputePerTokenMiB": true, "DequantPerTokenMiB": true}
+	paths, _ := filepath.Glob("*.go")
+	fset := token.NewFileSet()
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, p, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && allowed[fn.Name.Name] {
+				continue
+			}
+			if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.TYPE {
+				continue // the fields' own declaration
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && terms[id.Name] {
+					t.Errorf("%s reads %s outside fig.perToken", fset.Position(id.Pos()), id.Name)
+				}
+				return true
+			})
 		}
 	}
 }

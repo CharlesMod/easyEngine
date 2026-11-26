@@ -29,6 +29,7 @@ type CustomCheck struct {
 	Size         int64     `json:"size"`
 	Arch         string    `json:"arch,omitempty"`
 	Params       int64     `json:"params"`
+	SizeClass    string    `json:"size_class"` // "small" (< 8e9 params), "large", "" unknown
 	CtxTrain     int       `json:"ctx_train"`
 	Quant        string    `json:"quant,omitempty"`
 	MoE          bool      `json:"moe"`
@@ -138,13 +139,8 @@ func CheckCustom(path string, c *catalog.Catalog, room fit.Room, w fit.Wants) Cu
 	out.Arch, out.CtxTrain, out.MoE = info.Arch, info.CtxTrain, info.NExpert > 0
 	out.Quant = QuantName(f)
 	_, out.ChatTemplate = f.ChatTemplate()
-	for _, t := range f.Tensors {
-		n := int64(1)
-		for _, d := range t.Dims {
-			n *= int64(d)
-		}
-		out.Params += n
-	}
+	out.Params = f.ParamCount()
+	out.SizeClass = gguf.SizeClass(out.Params)
 	out.OK = true
 
 	w = w.Norm()

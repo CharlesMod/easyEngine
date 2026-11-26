@@ -38,7 +38,7 @@ var ErrCtxTrainUnder = errors.New("fit: the model's trained context is under the
 // costs were priced at (one built from measured numbers), so it cannot be priced at another.
 var ErrNoKVType = errors.New("fit: the footprint names no cache type to price other types from")
 
-// ErrNoWeights means Room.LargestBlock was given and the footprint does not know its weights on
+// ErrNoWeights means Room.LargestBlock was given as a size (above 0) and the footprint does not know its weights on
 // the card (Footprint.WeightsMiB), so its largest single allocation cannot be told.
 var ErrNoWeights = errors.New("fit: the footprint cannot tell its largest allocation (no weights figure)")
 

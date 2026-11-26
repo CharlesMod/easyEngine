@@ -1,13 +1,20 @@
 // Package gguf reads the header, metadata and tensor table of a GGUF file (v2/v3). It never
 // reads tensor data, so a 10 GB model is described from the first few hundred KiB.
 //
+// One walk of the header makes one reading (ReadHeader, File): every metadata key with an integer,
+// bool, string or short integer array value, the tensor table where asked, and the chat
+// template; Info is derived from that reading. A header it cannot read whole is a typed error,
+// never a guess, a value cut to fit, or an allocation of what the header merely claims.
+//
 // It is part of the sizing core (docs/ENGINE.md section 13): it reads from an io.Reader the
-// caller opened (Parse) and must never open a file itself, import os, or import a package of
-// the engine's root module. The engine's plan.ReadInfo opens a path and calls Parse.
+// caller opened and a size the caller gives, and must never open a file itself, import os, or
+// import a package of the engine's root module. The engine's plan.ReadInfo opens a path and
+// calls Parse.
 package gguf
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -112,20 +119,144 @@ var typeSize = map[uint32][2]int64{
 	29: {256, 56}, 30: {1, 2}, 34: {256, 54}, 35: {256, 66}, 39: {32, 17},
 }
 
+// Bounds of the reading. A header past them is refused (ErrPastSize), never cut to fit.
+const (
+	// MaxString is the longest string the reader takes, in bytes (a chat template is a few KiB).
+	MaxString = 1 << 28
+	// MaxIntArray is the most elements an array of integers or bools may have and be kept: enough
+	// for any per-layer figure. A longer one (a vocabulary's token types) is walked past.
+	MaxIntArray = 1 << 16
+	maxCount    = 1 << 20 // keys, and tensors
+	maxRank     = 8
+)
+
+// The reader's refusals. Each is wrapped with where it was met (a key or a tensor by its index);
+// errors.Is tells them apart.
+var (
+	// ErrMagic: the stream does not begin with the GGUF magic.
+	ErrMagic = errors.New("gguf: bad magic (not a GGUF file)")
+	// ErrCut: the stream ended inside the header.
+	ErrCut = errors.New("gguf: the header is cut short")
+	// ErrPastSize: a length or count reaches past the size given, or past the reader's bounds.
+	ErrPastSize = errors.New("gguf: a length past the size given")
+	// ErrMalformed: a value type the format does not have, a nested array, or a tensor of more
+	// than eight dimensions.
+	ErrMalformed = errors.New("gguf: malformed header")
+	// ErrNoTensors: Info was asked of a reading made without the tensor table.
+	ErrNoTensors = errors.New("gguf: the tensor table was not read")
+)
+
+// VersionError is a GGUF version the reader does not know (it knows 2 and 3).
+type VersionError struct{ Version uint32 }
+
+func (e *VersionError) Error() string { return fmt.Sprintf("gguf: unsupported version %d", e.Version) }
+
+// Kind is what a kept metadata value holds.
+type Kind uint8
+
+const (
+	KindInt    Kind = iota + 1 // an integer of any width: Bits, read with Int or Uint
+	KindBool                   // Bits is 0 or 1
+	KindString                 // Str
+	KindInts                   // an array of integers or bools of at most MaxIntArray elements: Arr
+)
+
+// Value is one kept metadata value as the header holds it.
+type Value struct {
+	Kind Kind
+	// Type is the header's own type id of the value, or of an array's elements (0 uint8, 1 int8,
+	// 2 uint16, 3 int16, 4 uint32, 5 int32, 7 bool, 8 string, 10 uint64, 11 int64): its width and sign.
+	Type uint32
+	// Bits is an integer or bool widened to 64 bits: sign-extended where Type is signed.
+	Bits uint64
+	Str  string
+	// Arr is an array's elements, each widened as Bits is.
+	Arr []uint64
+}
+
+// Signed reports whether the value's type (or its elements') is a signed integer.
+func (v Value) Signed() bool {
+	switch kind(v.Type) {
+	case kI8, kI16, kI32, kI64:
+		return true
+	}
+	return false
+}
+
+// Int is an integer or bool value as an int64, false for another kind or a uint64 past the range.
+func (v Value) Int() (int64, bool) {
+	if v.Kind != KindInt && v.Kind != KindBool {
+		return 0, false
+	}
+	if !v.Signed() && v.Bits > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(v.Bits), true
+}
+
+// Uint is an integer or bool value as a uint64, false for another kind or a negative value.
+func (v Value) Uint() (uint64, bool) {
+	if v.Kind != KindInt && v.Kind != KindBool {
+		return 0, false
+	}
+	if v.Signed() && int64(v.Bits) < 0 {
+		return 0, false
+	}
+	return v.Bits, true
+}
+
+// number is v as Info reads it: an integer or bool as a float64.
+func (v Value) number() (float64, bool) {
+	if v.Kind != KindInt && v.Kind != KindBool {
+		return 0, false
+	}
+	if v.Signed() {
+		return float64(int64(v.Bits)), true
+	}
+	return float64(v.Bits), true
+}
+
 type reader struct {
-	r   *bufio.Reader
-	err error
+	r    *bufio.Reader
+	pos  int64
+	size int64 // the size given; 0 or less: the lengths are held to the reader's bounds alone
+	err  error
+}
+
+// fits refuses a read of n more bytes past the size given (ErrPastSize).
+func (rd *reader) fits(n uint64) bool {
+	if rd.err != nil {
+		return false
+	}
+	if rd.size > 0 && (rd.pos > rd.size || n > uint64(rd.size-rd.pos)) {
+		rd.err = fmt.Errorf("%w: %d bytes at %d of %d", ErrPastSize, n, rd.pos, rd.size)
+		return false
+	}
+	return true
+}
+
+// past refuses an array of n elements that no size could hold.
+func (rd *reader) past(n uint64) {
+	rd.err = fmt.Errorf("%w: an array of %d elements", ErrPastSize, n)
+}
+
+func (rd *reader) cut(err error) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		err = ErrCut
+	}
+	rd.err = err
 }
 
 func (rd *reader) bytes(n int) []byte {
-	if rd.err != nil {
+	if !rd.fits(uint64(n)) {
 		return nil
 	}
 	b := make([]byte, n)
 	if _, err := io.ReadFull(rd.r, b); err != nil {
-		rd.err = err
+		rd.cut(err)
 		return nil
 	}
+	rd.pos += int64(n)
 	return b
 }
 func (rd *reader) u32() uint32 {
@@ -142,160 +273,199 @@ func (rd *reader) u64() uint64 {
 	}
 	return binary.LittleEndian.Uint64(b)
 }
-func (rd *reader) discard(n int64) {
-	if rd.err != nil {
+func (rd *reader) discard(n uint64) {
+	if !rd.fits(n) {
 		return
 	}
 	for n > 0 {
-		step := n
-		if step > math.MaxInt32 {
-			step = math.MaxInt32
-		}
+		step := min(n, math.MaxInt32)
 		d, err := rd.r.Discard(int(step))
-		n -= int64(d)
+		n -= uint64(d)
+		rd.pos += int64(d)
 		if err != nil {
-			rd.err = err
+			rd.cut(err)
 			return
 		}
 	}
 }
+
+// str reads a string whole. A long one is read as it arrives, so a header that claims more than
+// the stream holds allocates what arrived, not what it claimed.
 func (rd *reader) str() string {
 	n := rd.u64()
 	if rd.err != nil {
 		return ""
 	}
-	if n > 1<<28 {
-		rd.err = fmt.Errorf("gguf: string of %d bytes is implausible", n)
+	if n > MaxString {
+		rd.err = fmt.Errorf("%w: a string of %d bytes, past the reader's %d", ErrPastSize, n, MaxString)
 		return ""
 	}
-	return string(rd.bytes(int(n)))
-}
-
-// value reads a metadata value. Strings are kept (short ones only matter); numeric and bool
-// arrays up to 65536 elements are kept as []float64; other arrays are skipped.
-func (rd *reader) value(t kind) any {
-	switch t {
-	case kStr:
-		return rd.str()
-	case kArr:
-		et := kind(rd.u32())
-		n := rd.u64()
-		if rd.err != nil {
-			return nil
-		}
-		if et == kStr {
-			for i := uint64(0); i < n && rd.err == nil; i++ {
-				l := rd.u64()
-				rd.discard(int64(l))
-			}
-			return nil
-		}
-		if et == kArr {
-			rd.err = errors.New("gguf: nested arrays are not supported")
-			return nil
-		}
-		sz, ok := kindSize[et]
-		if !ok {
-			rd.err = fmt.Errorf("gguf: unknown array element type %d", et)
-			return nil
-		}
-		if n > 65536 {
-			rd.discard(int64(n) * int64(sz))
-			return nil
-		}
-		out := make([]float64, 0, n)
-		for i := uint64(0); i < n && rd.err == nil; i++ {
-			out = append(out, rd.scalar(et))
-		}
-		return out
-	default:
-		if _, ok := kindSize[t]; !ok {
-			rd.err = fmt.Errorf("gguf: unknown value type %d", t)
-			return nil
-		}
-		return rd.scalar(t)
+	if n <= 1<<16 {
+		return string(rd.bytes(int(n)))
 	}
+	if !rd.fits(n) {
+		return ""
+	}
+	var b bytes.Buffer
+	got, err := io.CopyN(&b, rd.r, int64(n))
+	rd.pos += got
+	if err != nil {
+		rd.cut(err)
+		return ""
+	}
+	return b.String()
 }
 
-func (rd *reader) scalar(t kind) float64 {
+// int reads one integer or bool of type t, widened (sign-extended where t is signed).
+func (rd *reader) int(t kind) uint64 {
 	b := rd.bytes(kindSize[t])
 	if b == nil {
 		return 0
 	}
 	switch t {
 	case kU8, kBool:
-		return float64(b[0])
+		return uint64(b[0])
 	case kI8:
-		return float64(int8(b[0]))
+		return uint64(int64(int8(b[0])))
 	case kU16:
-		return float64(binary.LittleEndian.Uint16(b))
+		return uint64(binary.LittleEndian.Uint16(b))
 	case kI16:
-		return float64(int16(binary.LittleEndian.Uint16(b)))
+		return uint64(int64(int16(binary.LittleEndian.Uint16(b))))
 	case kU32:
-		return float64(binary.LittleEndian.Uint32(b))
+		return uint64(binary.LittleEndian.Uint32(b))
 	case kI32:
-		return float64(int32(binary.LittleEndian.Uint32(b)))
-	case kF32:
-		return float64(math.Float32frombits(binary.LittleEndian.Uint32(b)))
-	case kU64:
-		return float64(binary.LittleEndian.Uint64(b))
-	case kI64:
-		return float64(int64(binary.LittleEndian.Uint64(b)))
-	case kF64:
-		return math.Float64frombits(binary.LittleEndian.Uint64(b))
+		return uint64(int64(int32(binary.LittleEndian.Uint32(b))))
 	}
-	return 0
+	return binary.LittleEndian.Uint64(b) // kU64, kI64
 }
 
-// File is the parsed header.
+func integer(t kind) bool { _, ok := kindSize[t]; return ok && t != kF32 && t != kF64 }
+
+// value reads one metadata value of type t, and false where it was walked past: a float, an
+// array of strings or floats, an integer array longer than MaxIntArray.
+func (rd *reader) value(t kind) (Value, bool) {
+	switch {
+	case t == kStr:
+		return Value{Kind: KindString, Type: uint32(t), Str: rd.str()}, true
+	case t == kBool:
+		return Value{Kind: KindBool, Type: uint32(t), Bits: rd.int(t)}, true
+	case integer(t):
+		return Value{Kind: KindInt, Type: uint32(t), Bits: rd.int(t)}, true
+	case t == kF32 || t == kF64:
+		rd.discard(uint64(kindSize[t]))
+		return Value{}, false
+	case t != kArr:
+		rd.err = fmt.Errorf("%w: value type %d", ErrMalformed, t)
+		return Value{}, false
+	}
+	et := kind(rd.u32())
+	n := rd.u64()
+	if rd.err != nil {
+		return Value{}, false
+	}
+	switch {
+	case et == kArr:
+		rd.err = fmt.Errorf("%w: a nested array", ErrMalformed)
+	case et == kStr:
+		if n > math.MaxUint64/8 {
+			rd.past(n)
+		} else if rd.fits(n * 8) { // each string is at least its length
+			for i := uint64(0); i < n && rd.err == nil; i++ {
+				rd.discard(rd.u64())
+			}
+		}
+	case kindSize[et] == 0:
+		rd.err = fmt.Errorf("%w: array element type %d", ErrMalformed, et)
+	case n > math.MaxUint64/8:
+		rd.past(n)
+	case !rd.fits(n * uint64(kindSize[et])): // past the size: fits has said so
+	case !integer(et) || n > MaxIntArray:
+		rd.discard(n * uint64(kindSize[et]))
+	default:
+		v := Value{Kind: KindInts, Type: uint32(et), Arr: make([]uint64, 0, n)}
+		for i := uint64(0); i < n && rd.err == nil; i++ {
+			v.Arr = append(v.Arr, rd.int(et))
+		}
+		return v, true
+	}
+	return Value{}, false
+}
+
+// File is one reading of a header: what Info, the chat template and every caller's own facts
+// are taken from.
 type File struct {
-	Version  uint32
-	KV       map[string]any // string, float64 (all numbers and bools), or []float64
+	Version uint32
+	// Meta is every metadata key whose value is an integer of any width, a bool, a string, or an
+	// array of integers or bools of at most MaxIntArray elements.
+	Meta map[string]Value
+	// Passed is how many values were walked past: floats, arrays of strings or floats, and
+	// integer arrays longer than MaxIntArray.
+	Passed int
+	// Tensors is the tensor table, where it was asked for (nil otherwise).
 	Tensors  []Tensor
 	FileSize int64
+	tensors  bool // whether the tensor table was read
 }
 
-// Parse reads the header, metadata and tensor table from r. fileSize is used to size the
-// last tensor when its type is not in the size table.
-func Parse(r io.Reader, fileSize int64) (*File, error) {
-	rd := &reader{r: bufio.NewReaderSize(r, 1<<20)}
+// ReadHeader reads a GGUF header (v2, v3) from r, a stream at the file's start, and size, the
+// file's size in bytes: the metadata always, the tensor table where tensors is true. It never
+// reads past the tensor table. A header cut short is ErrCut, a wrong magic ErrMagic, an unknown
+// version *VersionError, a length or count past size (or the reader's bounds) ErrPastSize, a type
+// the format does not have ErrMalformed; it never allocates more than the stream gave.
+func ReadHeader(r io.Reader, size int64, tensors bool) (*File, error) {
+	rd := &reader{r: bufio.NewReaderSize(r, 1<<20), size: size}
 	if m := rd.u32(); rd.err != nil || m != ggufMagic {
 		if rd.err != nil {
-			return nil, fmt.Errorf("gguf: %w", rd.err)
+			return nil, rd.err
 		}
-		return nil, errors.New("gguf: bad magic (not a GGUF file)")
+		return nil, ErrMagic
 	}
-	f := &File{KV: map[string]any{}, FileSize: fileSize}
+	f := &File{Meta: map[string]Value{}, FileSize: size, tensors: tensors}
 	f.Version = rd.u32()
+	if rd.err != nil {
+		return nil, rd.err
+	}
 	if f.Version < 2 || f.Version > 3 {
-		return nil, fmt.Errorf("gguf: unsupported version %d", f.Version)
+		return nil, &VersionError{Version: f.Version}
 	}
 	nt, nkv := rd.u64(), rd.u64()
 	if rd.err != nil {
-		return nil, fmt.Errorf("gguf: %w", rd.err)
+		return nil, rd.err
 	}
-	if nt > 1<<20 || nkv > 1<<20 {
-		return nil, fmt.Errorf("gguf: implausible counts (%d tensors, %d keys)", nt, nkv)
+	// A key is at least its length, its type and one byte; a tensor its length, rank, type and offset.
+	if nt > maxCount || nkv > maxCount || !rd.fits(nkv*13) {
+		return nil, fmt.Errorf("%w: %d tensors, %d keys", ErrPastSize, nt, nkv)
 	}
 	for i := uint64(0); i < nkv; i++ {
 		k := rd.str()
 		t := kind(rd.u32())
-		v := rd.value(t)
+		if rd.err != nil {
+			return nil, fmt.Errorf("gguf: metadata %d: %w", i, rd.err)
+		}
+		v, kept := rd.value(t)
 		if rd.err != nil {
 			return nil, fmt.Errorf("gguf: metadata %d (%q): %w", i, k, rd.err)
 		}
-		if v != nil {
-			f.KV[k] = v
+		if kept {
+			f.Meta[k] = v
+		} else {
+			f.Passed++
 		}
+	}
+	if !tensors {
+		return f, nil
+	}
+	if !rd.fits(nt * 24) {
+		return nil, fmt.Errorf("%w: %d tensors", ErrPastSize, nt)
 	}
 	for i := uint64(0); i < nt; i++ {
 		var t Tensor
 		t.Name = rd.str()
 		nd := rd.u32()
-		if nd > 8 {
-			return nil, fmt.Errorf("gguf: tensor %q has %d dims", t.Name, nd)
+		if rd.err == nil && nd > maxRank {
+			return nil, fmt.Errorf("gguf: tensor %q: %w: %d dimensions", t.Name, ErrMalformed, nd)
 		}
-		for d := uint32(0); d < nd; d++ {
+		for d := uint32(0); d < nd && rd.err == nil; d++ {
 			t.Dims = append(t.Dims, rd.u64())
 		}
 		t.Type = rd.u32()
@@ -307,6 +477,34 @@ func Parse(r io.Reader, fileSize int64) (*File, error) {
 	}
 	f.sizeTensors()
 	return f, nil
+}
+
+// Parse is ReadHeader with the tensor table: what Info needs. fileSize also sizes the last tensor
+// where its type is not in the size table.
+func Parse(r io.Reader, fileSize int64) (*File, error) { return ReadHeader(r, fileSize, true) }
+
+// ChatTemplate is the model's chat template (tokenizer.chat_template) exactly as the header holds
+// it, and false where the header has none.
+func (f *File) ChatTemplate() (string, bool) {
+	v, ok := f.Meta["tokenizer.chat_template"]
+	return v.Str, ok && v.Kind == KindString
+}
+
+// ChatTemplates is the header's named templates (tokenizer.chat_template.<name>) by name; nil
+// where it has none.
+func (f *File) ChatTemplates() map[string]string {
+	var out map[string]string
+	for k, v := range f.Meta {
+		name, ok := strings.CutPrefix(k, "tokenizer.chat_template.")
+		if !ok || v.Kind != KindString {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = v.Str
+	}
+	return out
 }
 
 // sizeTensors fills Tensor.Bytes from the type table; unknown types take the gap to the next
@@ -342,29 +540,29 @@ func (f *File) sizeTensors() {
 	}
 }
 
-func (f *File) num(key string) (float64, bool) {
-	v, ok := f.KV[key]
-	if !ok {
-		return 0, false
-	}
-	n, ok := v.(float64)
-	return n, ok
-}
+func (f *File) num(key string) (float64, bool) { return f.Meta[key].number() }
 
 func (f *File) arr(key string) ([]float64, bool) {
-	v, ok := f.KV[key]
-	if !ok {
+	v, ok := f.Meta[key]
+	if !ok || v.Kind != KindInts {
 		return nil, false
 	}
-	a, ok := v.([]float64)
-	return a, ok
+	out := make([]float64, len(v.Arr))
+	for i, x := range v.Arr {
+		out[i], _ = Value{Kind: KindInt, Type: v.Type, Bits: x}.number()
+	}
+	return out, true
 }
 
-// Info derives the planner's view of the model.
+// Info derives the planner's view of the model from the reading, which must hold the tensor
+// table (ErrNoTensors).
 func (f *File) Info() (Info, error) {
 	var in Info
-	a, ok := f.KV["general.architecture"].(string)
-	if !ok || a == "" {
+	if !f.tensors {
+		return in, ErrNoTensors
+	}
+	a := f.Meta["general.architecture"].Str
+	if a == "" {
 		return in, errors.New("gguf: no general.architecture")
 	}
 	in.Arch = a

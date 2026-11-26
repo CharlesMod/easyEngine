@@ -54,6 +54,13 @@ type KVTypeError struct{ Name string }
 
 func (e *KVTypeError) Error() string { return fmt.Sprintf("fit: unknown cache type %q", e.Name) }
 
+// FigureError means a footprint's per-token figure (Name) is one no footprint can hold (Rule): a
+// price from it would fall as ctx grows. It is never clamped and never priced; figures that hold
+// lift it.
+type FigureError struct{ Name, Rule string }
+
+func (e *FigureError) Error() string { return "fit: the footprint's " + e.Name + " " + e.Rule }
+
 // Basis says where a memory figure came from. Predicted: worked out from the header's seed and
 // the constants above (or from the seed corrected where the book took a reading). Measured: read
 // from a load of this model, card and backend that came up. "" is not said: a figure built by hand.
@@ -236,7 +243,9 @@ type Footprint struct {
 
 	// KVType is the cache type the per-token terms are priced at; "" when they cannot be priced
 	// at another (measured numbers). DequantPerTokenMiB is the part of ComputePerTokenMiB a
-	// quantised cache adds (the f16 expansion of the widest layer), whatever KVType is.
+	// quantised cache adds on a card (the f16 expansion of the widest layer), whatever KVType is;
+	// a shape that lays nothing on a card is priced without it (fig.perToken), and the figures
+	// always keep it.
 	KVType             string  `json:"kv_type"`
 	DequantPerTokenMiB float64 `json:"dequant_per_token_mib"`
 	// WeightsMiB is the weights on the card with no expert moved (one allocation); 0 = unknown.
@@ -627,8 +636,9 @@ func runKV(s Shape) string {
 // (*UnreadError naming the first: never taken as zero); with wants, a largest block the
 // footprint cannot be held to (ErrNoWeights); wants it cannot resolve (ErrNoCtxTrain,
 // ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
-// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError); a
-// footprint whose set of constants lacks one (*ConstError: nil is the default set).
+// price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError);
+// figures no footprint can hold (*FigureError, see coherent); a footprint whose set of constants
+// lacks one (*ConstError: nil is the default set).
 //
 // The figures are priced at the type the shape runs at where a shape is given (runKV: a shape's
 // "" is the default q4_0, with or without wants, as Args renders it), else at the wants' (the
@@ -687,11 +697,38 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	if err != nil {
 		return st, err
 	}
+	if err := coherent(*fp); err != nil {
+		return st, err
+	}
 	if f.c, err = readConsts(fp.Consts); err != nil {
 		return st, err
 	}
 	st.fp = f
 	return st, nil
+}
+
+// coherent refuses figures no footprint can hold. The invariant, which price keeps at every type:
+// each per-token figure a price is made from (cache, sliding-window cache, compute, expansion) is a
+// finite number not below zero, with or without a type; and for figures held at a quantised type
+// the expansion is not above the compute that holds it (at another type the compute holds none of
+// it). Zero is a model with no such term. It prices nothing; only settle calls it.
+func coherent(fp Footprint) error {
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"PerTokenMiB", fp.PerTokenMiB}, {"SWAPerTokenMiB", fp.SWAPerTokenMiB},
+		{"ComputePerTokenMiB", fp.ComputePerTokenMiB}, {"DequantPerTokenMiB", fp.DequantPerTokenMiB}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) {
+			return &FigureError{Name: f.name, Rule: "is not a finite number"}
+		}
+		if f.v < 0 {
+			return &FigureError{Name: f.name, Rule: "is below zero: a token never costs less than none"}
+		}
+	}
+	if fp.KVType != "" && quantised(fp.KVType) && fp.DequantPerTokenMiB > fp.ComputePerTokenMiB {
+		return &FigureError{Name: "DequantPerTokenMiB", Rule: "is above ComputePerTokenMiB: at a quantised type the compute holds the expansion"}
+	}
+	return nil
 }
 
 // price is fp priced at cache type t: the per-token cache scales with the bytes per element and
@@ -737,9 +774,24 @@ func (room roomFig) capRoom() int {
 	return int(room.budget)
 }
 
-// kvAt returns the KV cache MiB for a layout.
-func (fp fig) kvAt(slots, ctxPerSlot int) float64 {
-	kv := (fp.PerTokenMiB+fp.ComputePerTokenMiB)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
+// perToken is the price in MiB of one token of total context for a shape, cpuOnly where it lays
+// nothing on a card: the full-attention cache, and the compute scratch that grows with ctx. It is
+// the one place that price is said; every price, rate and count of tokens takes it from here. A
+// quantised cache's f16 expansion is laid only on a card, so a CPU-only shape is priced without it;
+// measured figures (no type) are taken as given. It must never alter the figures, which keep the
+// term for any card shape priced from them.
+func (fp fig) perToken(cpuOnly bool) (cache, compute float64) {
+	compute = fp.ComputePerTokenMiB
+	if cpuOnly && fp.KVType != "" && quantised(fp.KVType) {
+		compute -= fp.DequantPerTokenMiB
+	}
+	return fp.PerTokenMiB, compute
+}
+
+// kvAt returns the KV cache MiB for a layout, cpuOnly where it lays nothing on a card.
+func (fp fig) kvAt(slots, ctxPerSlot int, cpuOnly bool) float64 {
+	cache, compute := fp.perToken(cpuOnly)
+	kv := (cache+compute)*float64(slots*ctxPerSlot) + fp.StatePerSlotMiB*float64(slots)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
 		if fp.SWAWindow > 0 && fp.SWAWindow < w {
@@ -752,7 +804,7 @@ func (fp fig) kvAt(slots, ctxPerSlot int) float64 {
 
 // vram is the GPU use of a layout with nCpuMoe expert layers moved to RAM.
 func (fp fig) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
-	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
+	v := fp.FixedMiB + fp.kvAt(slots, ctxPerSlot, false) + fp.ScratchMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
 	if nCpuMoe > 0 {
 		v += fp.MoESchedMiB
 	}
@@ -762,11 +814,13 @@ func (fp fig) vram(slots, ctxPerSlot, nCpuMoe int) float64 {
 // largest is the largest single allocation on the card of a layout, each of these taken as one
 // allocation: the weights left on the card, the cache (full-attention, sliding-window and
 // recurrent state together) and the compute buffers (the fixed load beyond the weights plus the
-// scratch that grows with ctx). It needs WeightsMiB.
+// scratch that grows with ctx). It needs WeightsMiB, and prices a card layout only.
 func (fp fig) largest(slots, ctxPerSlot, nCpuMoe int) float64 {
 	weights := fp.WeightsMiB - fp.ExpertMiBPerLayer*float64(nCpuMoe)
-	cache := fp.kvAt(slots, ctxPerSlot) - fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
-	compute := math.Max(fp.FixedMiB-fp.WeightsMiB, 0) + fp.ComputePerTokenMiB*float64(slots*ctxPerSlot)
+	_, grows := fp.perToken(false)
+	scratch := grows * float64(slots*ctxPerSlot)
+	cache := fp.kvAt(slots, ctxPerSlot, false) - scratch
+	compute := math.Max(fp.FixedMiB-fp.WeightsMiB, 0) + scratch
 	return math.Max(weights, math.Max(cache, compute))
 }
 
@@ -779,9 +833,9 @@ func (fp fig) expertRAM(nCpuMoe int) float64 {
 	return per * float64(nCpuMoe)
 }
 
-// allHost is the RAM use of a CPU-only run.
+// allHost is the RAM use of a CPU-only run, which lays nothing on a card.
 func (fp fig) allHost(slots, ctxPerSlot int) float64 {
-	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
+	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot, true) + fp.ScratchMiB
 }
 
 // Need is the predicted memory in MiB of shape s, priced at its own cache type: card memory and
@@ -800,8 +854,9 @@ func (fp Footprint) Need(s Shape) (vram, ram float64, err error) {
 }
 
 // Largest is the predicted largest single allocation in MiB of shape s on the card (see
-// Room.LargestBlock), priced at its own cache type; ErrNoWeights where the footprint does not
-// know its weights, and settle's refusals.
+// Room.LargestBlock), priced at its own cache type; none (0) for a CPU-only shape, which lays
+// nothing on the card; ErrNoWeights where the footprint does not know its weights, and settle's
+// refusals.
 func (fp Footprint) Largest(s Shape) (float64, error) {
 	st, err := settle(&fp, &s, nil, nil)
 	if err != nil {
@@ -809,6 +864,9 @@ func (fp Footprint) Largest(s Shape) (float64, error) {
 	}
 	if fp.WeightsMiB <= 0 {
 		return 0, ErrNoWeights
+	}
+	if s.CPUOnly {
+		return 0, nil
 	}
 	return st.fp.largest(s.Slots, s.CtxPerSlot, s.NCpuMoe), nil
 }
@@ -1069,7 +1127,8 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	}
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
-	if perTok := f.PerTokenMiB + f.ComputePerTokenMiB; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
+	cache, compute := f.perToken(cur.CPUOnly)
+	if perTok := cache + compute; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
 		drop := int(math.Ceil((float64(failedBufMiB) + f.ScratchMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
 	}
@@ -1446,7 +1505,9 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 		e.CapCtxTotal = ctxTotal
 		miss := 0
 		if failed.Slots > 0 {
-			miss = max(0, ceilMiB(f.kvAt(failed.Slots, failed.CtxPerSlot)-f.kvAt(failed.Slots, ctxTotal/failed.Slots)))
+			under := failed
+			under.CtxPerSlot = ctxTotal / failed.Slots
+			miss = max(0, ceilMiB(f.need(failed)-f.need(under)))
 		}
 		e.Lift = &CapLift{RoomMiB: rm.capRoom(), MissMiB: miss, NoGPU: rm.NoGPU, Build: build}
 	}

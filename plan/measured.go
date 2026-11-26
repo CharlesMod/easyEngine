@@ -1,10 +1,28 @@
-package fit
+package plan
 
 import (
 	"sort"
+	"strings"
+
+	"github.com/CharlesMod/easyEngine/core/fit"
 
 	"hermesengine/catalog"
 )
+
+// OtherHardwareSpeed is the fraction of the measured decode speed the planner assumes on a GPU
+// that is not the one the curve was measured on. Decode is memory-bandwidth bound: common 8-12 GB
+// cards have 30-45 % of an RTX 5080's bandwidth and the host's RAM may be slower too, so half
+// is the conservative guess (a faster card only gets a better result than planned).
+const OtherHardwareSpeed = 0.5
+
+// SpeedScaleFor is the Room.SpeedScale for a GPU: 1 on the card the footprint was measured on,
+// else OtherHardwareSpeed.
+func SpeedScaleFor(gpuName string, m *catalog.Footprint) float64 {
+	if m != nil && gpuName != "" && strings.EqualFold(strings.TrimSpace(gpuName), strings.TrimSpace(m.MeasuredOn.GPU)) {
+		return 1
+	}
+	return OtherHardwareSpeed
+}
 
 // interp reads a per-KV-type measured value at bytes-per-element b: exact for a measured type,
 // else linear between the nearest measured types (past the ends: the nearest segment's slope,
@@ -16,13 +34,13 @@ func interp(byKV map[string]float64, kvType string) float64 {
 	type pt struct{ b, v float64 }
 	var p []pt
 	for k, v := range byKV {
-		p = append(p, pt{kvBytes(k), v})
+		p = append(p, pt{fit.KVBytes(k), v})
 	}
 	if len(p) == 0 {
 		return 0
 	}
 	sort.Slice(p, func(i, j int) bool { return p[i].b < p[j].b })
-	b := kvBytes(kvType)
+	b := fit.KVBytes(kvType)
 	if len(p) == 1 {
 		return p[0].v
 	}
@@ -45,11 +63,11 @@ func interp(byKV map[string]float64, kvType string) float64 {
 // Footprint for one KV type. The measured per-slot cost already contains the sliding-window cache
 // and recurrent state, and the per-ctx slope already contains the compute scratch, so only
 // those measured numbers are used.
-func FromMeasured(m *catalog.Footprint, kvType string) Footprint {
+func FromMeasured(m *catalog.Footprint, kvType string) fit.Footprint {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
-	fp := Footprint{
+	fp := fit.Footprint{
 		FixedMiB:        m.FixedMiB,
 		HostMiB:         m.HostMiB,
 		PerTokenMiB:     interp(m.MiBPer1kCtx, kvType) / 1024,
@@ -64,7 +82,7 @@ func FromMeasured(m *catalog.Footprint, kvType string) Footprint {
 		fp.MoESchedMiB = m.MoESchedMiB
 	}
 	if len(m.TPSByNCpuMoe) > 0 {
-		fp.TPS = &TPSCurve{Points: append([]catalog.TPSPoint(nil), m.TPSByNCpuMoe...)}
+		fp.TPS = &fit.TPSCurve{Points: append([]fit.TPSPoint(nil), m.TPSByNCpuMoe...)}
 	}
 	return fp
 }

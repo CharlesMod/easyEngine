@@ -16,9 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 	"hermesengine/lifecycle"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -376,16 +377,16 @@ func (s *Supervisor) wantsFor(key string) fit.Wants {
 }
 
 // Plan is GET /engine/v1/plan.
-func (s *Supervisor) Plan(ctx context.Context) (fit.PlanResult, error) {
+func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	hw, err := s.Hardware(ctx, false)
 	if err != nil {
-		return fit.PlanResult{}, err
+		return plan.PlanResult{}, err
 	}
 	cat, err := s.catalog()
 	if err != nil {
-		return fit.PlanResult{}, err
+		return plan.PlanResult{}, err
 	}
-	return fit.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
+	return plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
 }
 
 func (s *Supervisor) modelPath(m catalog.Model) string { return filepath.Join(s.dir, "models", m.File) }

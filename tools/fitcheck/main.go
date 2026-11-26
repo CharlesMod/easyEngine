@@ -18,9 +18,10 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/core/gguf"
 	"hermesengine/catalog"
-	"hermesengine/fit"
-	"hermesengine/gguf"
+	"hermesengine/plan"
 )
 
 // Row is one measured run.
@@ -90,13 +91,13 @@ func headerSeeder(modelsDir string, cat *catalog.Catalog) Seeder {
 				return fit.Footprint{}, fmt.Errorf("model %q is not in the catalog", model)
 			}
 			var err error
-			in, err = gguf.Read(filepath.Join(modelsDir, m.File))
+			in, err = plan.ReadInfo(filepath.Join(modelsDir, m.File))
 			if err != nil {
 				return fit.Footprint{}, err
 			}
 			infos[model] = in
 		}
-		return fit.Seed(in, kv), nil
+		return plan.Seed(in, kv), nil
 	}
 }
 

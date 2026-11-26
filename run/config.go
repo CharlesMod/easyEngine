@@ -10,10 +10,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
-	"hermesengine/gguf"
 	"hermesengine/lifecycle"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -182,12 +182,12 @@ func (c *Config) defaults() {
 }
 
 func defaultSeed(m catalog.Model, modelPath, kv string) (fit.Footprint, error) {
-	if info, err := gguf.Read(modelPath); err == nil {
-		fp := fit.Seed(info, kv)
+	if info, err := plan.ReadInfo(modelPath); err == nil {
+		fp := plan.Seed(info, kv)
 		if m.Footprint != nil { // the header gives the sizes, the measurement the speed curve
-			fp.TPS = fit.FromMeasured(m.Footprint, kv).TPS
+			fp.TPS = plan.FromMeasured(m.Footprint, kv).TPS
 		}
 		return fp, nil
 	}
-	return fit.SeedFromSize(m, kv), nil
+	return plan.SeedFromSize(m, kv), nil
 }

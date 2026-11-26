@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 )
 
 var helpCache sync.Map // bin path -> map[string]bool

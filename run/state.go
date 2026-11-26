@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"hermesengine/fit"
+	"github.com/CharlesMod/easyEngine/core/fit"
 )
 
 // External is the player's own OpenAI-compatible endpoint.
@@ -26,11 +26,11 @@ type State struct {
 	Model         string `json:"model"`
 	Backend       string `json:"backend"`
 	// Target is the model a first run is still upgrading to while a smaller starter serves (run/starter.go).
-	Target string   `json:"target,omitempty"`
+	Target string `json:"target,omitempty"`
 	// StarterOwned is the starter model this engine downloaded only to bridge a first run. It is
 	// deleted once the target serves; a model that was already on disk is never deleted.
-	StarterOwned string `json:"starter_owned,omitempty"`
-	Book   fit.Book `json:"book"`
+	StarterOwned string   `json:"starter_owned,omitempty"`
+	Book         fit.Book `json:"book"`
 }
 
 func (s *State) defaults() {

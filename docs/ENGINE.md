@@ -14,7 +14,8 @@ any OpenAI-compatible endpoint as the alternative, with a Test light.
 ## 1. What it is
 
 One native Go binary, `hermes-engine` (this repo, Go module `hermesengine`, Go 1.27,
-toolchain at `~/.local/go/bin/go`). Cross-compiled for `linux-amd64`, `windows-amd64`,
+toolchain at `~/.local/go/bin/go`; its sizing core is a nested module at Go 1.23 that other
+programs import, §13). Cross-compiled for `linux-amd64`, `windows-amd64`,
 `darwin-arm64` and `darwin-amd64`; no cgo. Not PyInstaller (AV false positives).
 
 It does four jobs:
@@ -103,7 +104,7 @@ wins when its `version` is higher.
 - A model with an empty `url` is **import-only** (`hermes-engine import <path>` copies or
   hard-links a local file after checking its sha256). The mechanism stays for future models
   that are not public. gemma4-rp-maxxed is public on Hugging Face (`cmod/gemma4-rp-maxxed-GGUF`)
-  and downloads like any other entry; `fit.Verdict.import_only` is true only for entries
+  and downloads like any other entry; `plan.Verdict.import_only` is true only for entries
   without a `url`.
 - The KV cost follows the architecture: MLA models (bailingmoe3) cache one latent per token
   (`kv_lora_rank + rope dims`, no V) on their full-attention layers; linear-attention/SSM layers
@@ -157,9 +158,11 @@ for any vendor. Every source is behind an interface with a fake for tests.
 llama-server's own use, from `nvidia-smi --query-compute-apps` when available, else from the
 calibration book).
 
-## 5. The ctx balancer (`fit`)
+## 5. The ctx balancer (`core/fit`, `plan`)
 
-A generic port of the hive's measure-then-try launcher
+The footprint, the room and the choice of a shape are the sizing core's `fit` (§13); the
+verdicts over the whole catalog, the room built from the probe and the speed scale are the
+engine's `plan`. A generic port of the hive's measure-then-try launcher
 (`~/hive-mind/serve/bin/hive-mind-llm-run`, design in
 `~/.local/share/sprinter-llm/WORKLOG-adaptive-ctx.md`), with the machine-specific constants
 replaced by numbers from the GGUF header and a calibration book. Pure functions; the runtime
@@ -185,6 +188,22 @@ loop lives in `run`.
 - **Room:** `budget = VRAM total - others - game_reserve - margin`. `game_reserve` comes from the
   profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
   loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.
+
+### Wants and room another program may state
+
+Every field below is new to the core's `Wants` or `Room`, and its zero value is the engine's own
+behaviour exactly, so `plan`, `run` and the game profile set none of them.
+
+| Field | Set | Unset |
+|---|---|---|
+| `Wants.Whole` (`whole`) | No layer and no expert off the card, for a dense or a MoE model, from `Choose`, `MissRetry`, `StepDown` and `Grow` (step 3 below is skipped; `StepDown` never moves an expert). Where only a split shape fits, `ErrTooBig`. | Expert layers may move to RAM. |
+| `Wants.KVTypes` (`kv_types`) | The cache types, best first. The shape takes the first type at which the most ctx asked (`CtxMax`, under the book's cap) fits at `Slots`; where no type does, the last type with the most ctx that fits down to the floor, then fewer slots; under that, `ErrTooBig`. Each type is priced from the footprint, never tried: the footprint names the type it was seeded at (`Footprint.KVType`), the per-token cache scales with the bytes per element, and the f16 expansion of the widest layer (`DequantPerTokenMiB`) is added for a quantised type and taken off for f16, bf16 and f32. `Seed` and `SeedFromBytes` fill both; a footprint built from measured numbers (`plan.FromMeasured`) names no type and gets `ErrNoKVType`. `KVType` is then not read. The list is taken once wherever it is read: each type at its first place, repeats and empty names dropped. `MissRetry` and `StepDown` keep the current shape's type until its floor at `MinSlots`; there `StepDown` (and `MissRetry` through it) moves to the next type in the list with the largest shape that needs no more memory than the one that failed (predicted at its type) and is never better than it (no more slots, no more ctx per slot); where none fits there, on to the type after; `ErrTooBig` comes only at the last type's floor. Only `Choose` plans the room afresh. The walk down is monotone: each step lowers the pair (types left after the shape's, then its predicted memory), so it ends for any list; the one step that does not lower it is the first expert layer moved to RAM where a layer weighs less than `MoESchedMiB`, and those moves are bounded by the expert layers. A type is chosen before ctx and experts: without `Whole`, f16 with experts in RAM comes before q4_0 with none. `Grow` counts a better type alone as no growth. | `KVType` alone, the footprint as given. |
+| `Wants.CtxFromModel` (`ctx_from_model`) | `CtxMax` is the model's trained context (`Footprint.CtxTrain`, which `Seed` takes from the header's `<arch>.context_length`, `gguf.Info.CtxTrain`); a floor above it, or unset, comes down to min(8192, trained). Where the header did not say it, `ErrNoCtxTrain`, never a guess; where it says less than the least context per slot (1,024), `ErrCtxTrainUnder`, never a shape above it. `MissRetry` and `StepDown` answer exactly as with that number named in `CtxMax`. | `CtxMax` as given. |
+| `Room.Reserve` (`reserve`) | Host RAM kept for the OS when experts move or a run is CPU-only; negative is none. | `OSReserveMiB` (2048). |
+| `Room.Margin` (`margin`) | The VRAM left free; negative is none. | 0 is `DefaultMargin(VRAMTotal)` (the engine's callers fill that value already). |
+| `Room.LargestBlock` (`largest_block`) | The largest single allocation the card can still give. A shape's largest allocation (`Footprint.Largest`) must fit inside it: the greatest of the weights left on the card (`Footprint.WeightsMiB` less the moved expert layers), the cache (full-attention, sliding-window and recurrent state counted as one) and the compute buffers (the fixed load beyond the weights plus the scratch that grows with ctx), each taken as one allocation. A footprint with no `WeightsMiB` (measured numbers) gets `ErrNoWeights`. Not read for a CPU-only room. | Not bounded. |
+| `Room.NoGPU` with `RAMAvail` | A pool that is one node of a processor's memory: no card, whatever the VRAM fields say; CPU-only shapes sized against `RAMAvail`, that node's free memory, less the reserve, and nothing else. | (as before) |
+| `Room.Unread` (`unread`) | The json names of fields the caller could not read. None is taken as zero: `Choose`, `MissRetry` and `StepDown` answer `*UnreadError` naming the first, and `Grow` does not grow. | Every field was read. |
 
 ### Decode speed floor, and CPU-only
 
@@ -462,6 +481,9 @@ hermes-engine version
   reports `/health` 503→200, can be told to OOM at load or at run time and to be busy on
   `/slots`. Lifecycle tests: parent death stops children; second `serve` attaches; stale pids
   killed.
+- The sizing core (`core/`) is its own module, so the root's `go test ./...` does not reach it:
+  `./core-check.sh` (run first by `build.sh`) tests it, and builds and vets it for Linux,
+  Windows and macOS, at its own go line (§13).
 - A purity test: no source file contains `rimworld`/`RimWorld`/`pawn`/`colon`
   (case-insensitive), as the agent core's test does.
 - `Mod.Tests`: EngineClient against a fake engine; launcher binary choice per platform; profile
@@ -475,3 +497,55 @@ hermes-engine version
 
 - Signing and notarising the binaries (needs the keeper's certificates); a tray icon; Player2 as a provider; Steam
   launch-option wrappers.
+
+## 13. The sizing core (`core/`)
+
+The footprint model, the shape chooser, the calibration book and the GGUF header reader are a
+Go module of their own, so another program can size a model exactly as the engine does without
+taking the engine's downloads, processes or server:
+
+- Module `github.com/CharlesMod/easyEngine/core` in `core/`, with its own `go 1.23` line and **no
+  `require` at all**. Packages: `core/fit` (Seed, SeedFromBytes, Choose, MissRetry, StepDown,
+  Grow, Args, the Book) and `core/gguf` (Parse and Info, with the trained context).
+- **What another program may ask beyond a game.** Whole (no layer or expert off the card), the
+  cache's types best first, the model's own trained context as the most, and the room as given
+  (the host's reserve, the margin, the largest free block, a processor node as the pool, and a
+  field marked unread): §5, "Wants and room another program may state". Unset, each is the
+  engine's own behaviour; each refusal is a typed error (`ErrTooBig`, `ErrNoCtxTrain`, `ErrCtxTrainUnder`,
+  `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`).
+- **What it must never do.** Its non-test code imports only pure standard-library packages
+  (`errors`, `fmt`, `math`, `sort`, `strconv`, `strings`, `io`, `bufio`, `bytes`,
+  `encoding/binary`, `slices`, `maps`, and `time` as a type only): never `os`, `os/exec`, `net`,
+  `syscall`, `unsafe`, `log`, and never a package of the engine's root module. It never reads the
+  clock or arms a timer (`Book.Calibrate` and `Book.LowerCap` take the stamp from the caller),
+  never logs (`fit.Seed` returns its notes beside the footprint), and never opens a file or
+  runs a process (`gguf.Parse` takes an `io.Reader` and the file's size). `core/fit`'s
+  `TestCoreStaysPure` reads the core's own source and `go.mod` and fails on any of these, on a
+  raised go line, and on a `require`.
+- **Checked at Go 1.23.** `./core-check.sh` (run first by `build.sh`) refuses a go line other
+  than 1.23, runs the core's tests, and builds and vets it with `GOOS` set to `linux`, `windows`
+  and `darwin`. vet's `stdversion` check reports a standard-library call newer than the go line
+  even on a newer toolchain. It never fetches a toolchain (`GOTOOLCHAIN=local`).
+- **What left `fit` and `gguf`, and where it went.** The engine's package `plan` holds the
+  planner of a whole catalog (`Plan`, `PlanWith`, `PlanResult`, `Verdict`, `RoomFor`, the
+  CPU-only pick, the 2048 MiB least usable card), the footprint from a catalog's measured block
+  (`FromMeasured`, `SeedFromSize`, which falls back to the core's `SeedFromBytes`), the speed
+  scale (`SpeedScaleFor`, `OtherHardwareSpeed`), `Seed` (the core's, with its notes logged) and
+  `ReadInfo`, which opens a model file and hands it to `gguf.Parse`. `catalog.TPSPoint` is the
+  core's `fit.TPSPoint`, so `catalog.json` decodes as before. `run`, `tools/fitcheck` and
+  `internal/testkit` import the core by its path; `catalog`, `probe` and `dirs` stay outside it.
+- **In this repository** the root requires the core and points the requirement at the
+  directory (`go.mod`: `require github.com/CharlesMod/easyEngine/core v0.1.0` and
+  `replace github.com/CharlesMod/easyEngine/core => ./core`), so a plain checkout builds offline
+  with no `go.sum` line for it. The root's `./...` does not include
+  `core/`. Because of the `replace`, the engine itself is built from a checkout (`build.sh`), not
+  with `go install` of the root module.
+- **Tagging.** A version of the core is a tag with the directory as its prefix:
+  `git tag core/v0.1.0 && git push origin core/v0.1.0` (the tag names a commit whose `core/` is
+  that version; v0 and v1 take no `/vN` suffix in the path). Keep the root's `require` line on
+  the newest tag. A change to the core is made here, under the core's tests, and tagged; every
+  program that moves its own requirement then has it.
+- **Another program** requires it as any module: `require github.com/CharlesMod/easyEngine/core
+  v0.1.0` (its `go.sum` gets the module's hash on the first fetch), imports
+  `github.com/CharlesMod/easyEngine/core/fit` and `.../core/gguf`, and needs only Go 1.23. With
+  the module cache filled once (or a vendor directory), it builds with no network.

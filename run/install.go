@@ -204,6 +204,9 @@ func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw
 				return "", ctx.Err()
 			}
 			s.addError("backend %s: %v", a.ID, err)
+			if errors.Is(err, ErrAppControl) {
+				return "", err // every build from this release is blocked alike: don't fetch the others
+			}
 			last = err
 			continue
 		}
@@ -225,6 +228,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 		if err := fetch.Unpack(arch, dir); err != nil {
 			return err
 		}
+		os.Remove(arch) // unpacked: the archive is only dead weight (hundreds of MB)
 		for _, x := range a.Extra {
 			ea, ok := cat.Asset(x)
 			if !ok {
@@ -239,6 +243,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 			if err := fetch.Unpack(earch, tmp); err != nil {
 				return err
 			}
+			os.Remove(earch)
 			bin := findServer(dir)
 			if bin == "" {
 				return errors.New("llama-server not found in the unpacked backend")
@@ -272,6 +277,9 @@ func smokeTest(ctx context.Context, bin, accel string) error {
 	cmd.Dir = filepath.Dir(bin)
 	cmd.Env = llamaEnv(bin, nil)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if appControlBlocked(err) {
+			return fmt.Errorf("%w (%s)", ErrAppControl, filepath.Base(bin))
+		}
 		return fmt.Errorf("%s --version failed: %v: %s", filepath.Base(bin), err, lastLine(string(out)))
 	}
 	want := map[string]string{"cuda": "cuda", "vulkan": "vulkan", "metal": "metal"}[accel]

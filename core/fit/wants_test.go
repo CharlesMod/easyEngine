@@ -318,3 +318,67 @@ func TestWalkDownIsMonotone(t *testing.T) {
 		}
 	}
 }
+
+// A card read and found to have no free block (Room.LargestBlock negative) holds no shape on it:
+// every entry that bounds a shape by the block answers ErrTooBig, whatever the cache type and
+// whether or not the footprint knows its weights. 0 is still not known (a shape as before), and
+// with no GPU the block is not read.
+func TestNoFreeBlockHoldsNothing(t *testing.T) {
+	ref := seed(refInfo(), "q4_0")
+	noWeights := ref
+	noWeights.WeightsMiB = 0
+	card := room(16303, 1255, 24000)
+	none := card
+	none.LargestBlock = -1
+	unified := none
+	unified.Unified = true
+	cpu := Room{NoGPU: true, RAMAvail: 24000}
+	cpuNone := cpu
+	cpuNone.LargestBlock = -1
+	at := func(kv string) Wants { w := game; w.KVType = kv; return w }
+	types := game
+	types.KVTypes = []string{"f16", "q8_0", "q4_0"}
+	onCard := Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}
+	cpuCur, _ := Choose(ref, cpu, game)
+	cpuStep, _ := StepDown(ref, cpuCur, cpu, game)
+	grow := func(s Shape, _ bool, err error) (Shape, error) { return s, err }
+
+	cases := []struct {
+		name string
+		call func() (Shape, error)
+		err  error  // errors.Is target; nil: a shape
+		want *Shape // where set, the shape answered
+	}{
+		{"Choose at f16", func() (Shape, error) { return Choose(seed(refInfo(), "f16"), none, at("f16")) }, ErrTooBig, nil},
+		{"Choose at q8_0", func() (Shape, error) { return Choose(seed(refInfo(), "q8_0"), none, at("q8_0")) }, ErrTooBig, nil},
+		{"Choose at q4_0", func() (Shape, error) { return Choose(ref, none, game) }, ErrTooBig, nil},
+		{"Choose through KVTypes", func() (Shape, error) { return Choose(ref, none, types) }, ErrTooBig, nil},
+		{"Choose, no weights: too big, not no-weights", func() (Shape, error) { return Choose(noWeights, none, game) }, ErrTooBig, nil},
+		{"Choose, Unified: the card is read the same", func() (Shape, error) { return Choose(ref, unified, game) }, ErrTooBig, nil},
+		{"Choose, block 0: not known, a shape", func() (Shape, error) { return Choose(ref, card, game) }, nil, nil},
+		{"Choose, no GPU: the block not read", func() (Shape, error) { return Choose(ref, cpuNone, game) }, nil, &cpuCur},
+		{"MissRetry", func() (Shape, error) { return MissRetry(ref, onCard, 900, none, game) }, ErrTooBig, nil},
+		{"StepDown from a shape on the card", func() (Shape, error) { return StepDown(ref, onCard, none, game) }, ErrTooBig, nil},
+		{"StepDown through KVTypes", func() (Shape, error) {
+			return StepDown(ref, Shape{Slots: 1, CtxPerSlot: 8192, KVType: "f16"}, none, types)
+		}, ErrTooBig, nil},
+		{"StepDown, no GPU: the block not read", func() (Shape, error) { return StepDown(ref, cpuCur, cpuNone, game) }, nil, &cpuStep},
+		{"Grow", func() (Shape, error) { return grow(Grow(ref, onCard, none, game)) }, ErrTooBig, nil},
+	}
+	for _, c := range cases {
+		s, err := c.call()
+		switch {
+		case c.err != nil:
+			if !errors.Is(err, c.err) {
+				t.Errorf("%s: want %v, got %v (%v)", c.name, c.err, err, s)
+			}
+		case err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.want != nil && s != *c.want:
+			t.Errorf("%s: got %v, want %v", c.name, s, *c.want)
+		}
+	}
+	if !cpuCur.CPUOnly || !cpuStep.CPUOnly {
+		t.Errorf("no GPU: want CPU-only shapes, got %v and %v", cpuCur, cpuStep)
+	}
+}

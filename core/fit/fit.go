@@ -1096,8 +1096,10 @@ type Reading struct {
 	VRAMMiB    int    `json:"vram_mib"`
 }
 
+// of is whether the reading was taken from this shape. A cache type is compared as the type it
+// runs at (runKV), so a shape that names none and one that names the default are one shape.
 func (r Reading) of(s Shape) bool {
-	return !s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot && r.NCpuMoe == s.NCpuMoe && r.KVType == s.KVType
+	return !s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot && r.NCpuMoe == s.NCpuMoe && runKV(Shape{KVType: r.KVType}) == runKV(s)
 }
 
 // Book is the calibration book kept in state.json.

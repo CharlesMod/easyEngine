@@ -322,3 +322,28 @@ func TestBookJSONBothWays(t *testing.T) {
 		t.Errorf("the newer reader saw %+v of %+v", r, e)
 	}
 }
+
+// A shape that names no cache type and one that names the default are one shape to the book: a
+// reading taken from either marks both, and the book keeps one reading for them, not two.
+func TestAReadingOfTheDefaultTypeIsOneShape(t *testing.T) {
+	ref := seed(refInfo(), "q4_0")
+	unnamed := Shape{Slots: 1, CtxPerSlot: 16384}
+	named := Shape{Slots: 1, CtxPerSlot: 16384, KVType: "q4_0"}
+	vram, _, err := ref.Need(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := int(vram + 0.5)
+	b := &Book{}
+	for _, s := range []Shape{unnamed, named} {
+		if c, err := b.Calibrate("k", ref, s, read, stamp); !taken(c, err) {
+			t.Fatalf("reading of %+v not taken: %+v %v", s, c, err)
+		}
+	}
+	if n := len(b.Entries["k"].Readings); n != 1 {
+		t.Errorf("the book holds %d readings of one shape; want 1", n)
+	}
+	if a, c := b.Mark("k", unnamed), b.Mark("k", named); a.VRAMBasis != c.VRAMBasis || a.VRAMMiB != c.VRAMMiB {
+		t.Errorf("marked two ways: unnamed %+v, named %+v", a, c)
+	}
+}

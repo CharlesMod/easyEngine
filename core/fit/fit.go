@@ -28,6 +28,10 @@ var ErrTooBig = errors.New("fit: model does not fit this machine")
 // (its header did not say it, or it was not built from a header). It is never guessed.
 var ErrNoCtxTrain = errors.New("fit: the model's trained context is not known")
 
+// ErrCtxTrainUnder means Wants.CtxFromModel was asked and the model's trained context is under
+// the core's least context per slot (1024 tokens): no shape is planned above what it was trained for.
+var ErrCtxTrainUnder = errors.New("fit: the model's trained context is under the least context per slot (1024)")
+
 // ErrNoKVType means Wants.KVTypes was given and the footprint says no cache type its per-token
 // costs were priced at (one built from measured numbers), so it cannot be priced at another.
 var ErrNoKVType = errors.New("fit: the footprint names no cache type to price other types from")
@@ -533,6 +537,9 @@ func (fp Footprint) resolve(w Wants) (Wants, error) {
 		if fp.CtxTrain <= 0 {
 			return w, ErrNoCtxTrain
 		}
+		if fp.CtxTrain < alignTokens {
+			return w, ErrCtxTrainUnder
+		}
 		w.CtxMax = fp.CtxTrain
 		if w.CtxFloor <= 0 || w.CtxFloor > fp.CtxTrain {
 			w.CtxFloor = min(8192, fp.CtxTrain)
@@ -728,6 +735,7 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 		cap = w.CtxFloor
 	}
 	w2 := w
+	w2.CtxFromModel = false // w is resolved: CtxMax already holds the trained context, and the cap must stand
 	if cap < w2.CtxMax {
 		w2.CtxMax = cap
 	}

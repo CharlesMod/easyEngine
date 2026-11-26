@@ -60,6 +60,7 @@ func TestWantsAndRoomTable(t *testing.T) {
 		// 3. the model's own most context
 		{name: "most ctx from the model: 32k trained", fp: trained(ref, 32768), room: room(16303, 1255, 24000), w: fromModel, want: want{3, 32768, 0, "q4_0", false}},
 		{name: "most ctx from the model: trained under the floor, the floor follows it", fp: trained(ref, 4096), room: room(16303, 1255, 24000), w: fromModel, want: want{3, 4096, 0, "q4_0", false}},
+		{name: "most ctx from the model: trained under the core's least ctx (1024)", fp: trained(ref, 512), room: room(16303, 1255, 24000), w: fromModel, err: ErrCtxTrainUnder},
 		{name: "most ctx from the model: the header does not say it", fp: ref, room: room(16303, 1255, 24000), w: fromModel, err: ErrNoCtxTrain},
 		// 4. the room as given
 		{name: "no GPU, 12000 free: today's 2048 reserve leaves too little", fp: ref, room: Room{NoGPU: true, RAMAvail: 12000}, w: game, err: ErrTooBig},
@@ -155,5 +156,39 @@ func TestWholeNeverSplits(t *testing.T) {
 				t.Errorf("whole walk on %d MiB ended at %v", vram, cur)
 			}
 		}
+	}
+}
+
+// Asking the model for its most context is the same as naming that number: MissRetry and
+// StepDown give the same shape either way, and a trained context under the core's least is
+// refused by each, never planned above what the model was trained for.
+func TestCtxFromModelIsTheNamedNumber(t *testing.T) {
+	fp := seed(refInfo(), "q4_0")
+	fp.CtxTrain = 65536
+	named, asked := game, game
+	named.CtxMax = 65536
+	asked.CtxFromModel = true
+	r := room(16303, 1255, 24000)
+	cur, err := Choose(fp, r, named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, e1 := MissRetry(fp, cur, 2000, r, named)
+	m2, e2 := MissRetry(fp, cur, 2000, r, asked)
+	if m1 != m2 || e1 != e2 {
+		t.Errorf("MissRetry: named %v %v, from the model %v %v", m1, e1, m2, e2)
+	}
+	d1, e1 := StepDown(fp, cur, r, named)
+	d2, e2 := StepDown(fp, cur, r, asked)
+	if d1 != d2 || e1 != e2 {
+		t.Errorf("StepDown: named %v %v, from the model %v %v", d1, e1, d2, e2)
+	}
+	fp.CtxTrain = 512
+	small := Shape{Slots: 1, CtxPerSlot: 1024, KVType: "q4_0"}
+	if s, err := MissRetry(fp, small, 2000, r, asked); !errors.Is(err, ErrCtxTrainUnder) {
+		t.Errorf("MissRetry at 512 trained: %v %v", s, err)
+	}
+	if s, err := StepDown(fp, small, r, asked); !errors.Is(err, ErrCtxTrainUnder) {
+		t.Errorf("StepDown at 512 trained: %v %v", s, err)
 	}
 }

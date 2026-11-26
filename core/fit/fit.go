@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -531,6 +532,27 @@ func (room Room) check(fp Footprint) error {
 	return nil
 }
 
+// kvTypes is a list of cache types taken once: each type at its first place, repeats and empty
+// names dropped. Every reading of Wants.KVTypes goes through it (resolve).
+func kvTypes(list []string) []string {
+	var types []string
+	for _, t := range list {
+		if t != "" && !slices.Contains(types, t) {
+			types = append(types, t)
+		}
+	}
+	return types
+}
+
+// need is the predicted memory a shape is sized against: card memory, or host memory for a
+// CPU-only shape. fp must be priced at s's cache type.
+func (fp Footprint) need(s Shape) float64 {
+	if s.CPUOnly {
+		return fp.allHost(s.Slots, s.CtxPerSlot)
+	}
+	return fp.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe)
+}
+
 // resolve fills the wants from the footprint (the trained context) and then every default.
 func (fp Footprint) resolve(w Wants) (Wants, error) {
 	if w.CtxFromModel {
@@ -546,15 +568,9 @@ func (fp Footprint) resolve(w Wants) (Wants, error) {
 		}
 	}
 	w = w.Norm()
-	var types []string // an empty name in the list is no type
-	for _, t := range w.KVTypes {
-		if t != "" {
-			types = append(types, t)
-		}
-	}
-	w.KVTypes = types
-	if len(types) > 0 {
-		w.KVType = types[0]
+	w.KVTypes = kvTypes(w.KVTypes)
+	if len(w.KVTypes) > 0 {
+		w.KVType = w.KVTypes[0]
 	}
 	return w, nil
 }
@@ -576,7 +592,7 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 		return Shape{}, err
 	}
 	if len(w.KVTypes) == 0 {
-		return chooseAt(fp, room, w)
+		return chooseAt(fp, room, w, room.Budget(), room.RAMBudget())
 	}
 	at := func(t string) (Footprint, Shape, error) {
 		ft, err := fp.atType(t)
@@ -585,7 +601,7 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 		}
 		wt := w
 		wt.KVType = t
-		s, err := chooseAt(ft, room, wt)
+		s, err := chooseAt(ft, room, wt, room.Budget(), room.RAMBudget())
 		return ft, s, err
 	}
 	last := len(w.KVTypes) - 1
@@ -602,13 +618,14 @@ func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	return s, err
 }
 
-// chooseAt is Choose at the one type w.KVType, with fp priced at it.
-func chooseAt(fp Footprint, room Room, w Wants) (Shape, error) {
-	s, err := choose(fp, room, w, true)
+// chooseAt is Choose at the one type w.KVType, with fp priced at it, within budget MiB of card
+// and ram MiB of host memory (the room's own, or less on the walk down: StepDown).
+func chooseAt(fp Footprint, room Room, w Wants, budget, ram float64) (Shape, error) {
+	s, err := choose(fp, room, w, budget, ram, true)
 	if errors.Is(err, ErrTooBig) && fp.TPS != nil && w.MinTPS > 0 && !room.NoGPU {
 		// Nothing fits above the speed floor. A slow shape still runs, so offer it (the verdict
 		// says it is slow) rather than refusing a model that does fit.
-		s, err = choose(fp, room, w, false)
+		s, err = choose(fp, room, w, budget, ram, false)
 	}
 	if err == nil && !s.CPUOnly {
 		s.EstTPS = fp.estTPS(s.NCpuMoe, room.SpeedScale)
@@ -628,9 +645,7 @@ func (fp Footprint) estTPS(n int, scale float64) float64 {
 	return math.Round(t*scale*10) / 10
 }
 
-func choose(fp Footprint, room Room, w Wants, enforceSpeed bool) (Shape, error) {
-	budget := room.Budget()
-	ram := room.RAMBudget()
+func choose(fp Footprint, room Room, w Wants, budget, ram float64, enforceSpeed bool) (Shape, error) {
 	block := float64(room.LargestBlock)
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
 		ceil := fp.ctxCeiling(w, slots)
@@ -706,8 +721,8 @@ func better(a, b Shape) bool {
 // the room is the freshly measured one. The result is always smaller than cur; when the floor
 // is reached it moves on to StepDown.
 //
-// With Wants.KVTypes it re-plans at cur's type (a smaller shape is never a costlier cache), and
-// StepDown moves on to the next type at that type's floor.
+// With Wants.KVTypes (taken once, each type at its first place) it re-plans at cur's type, and
+// at that type's floor StepDown moves on to the next type, never to a shape larger than cur.
 func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (Shape, error) {
 	if err := room.check(fp); err != nil {
 		return Shape{}, err
@@ -749,8 +764,18 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 // StepDown makes the shape one notch smaller: ctx per slot down by 1/16 (at least 1024) toward
 // the floor, then one more expert layer to RAM (MoE, not with Wants.Whole), then one slot fewer
 // at the floor ctx. It keeps cur's cache type; with Whole no step has an expert off the card.
-// With Wants.KVTypes, at the floor with MinSlots at a type that is not the last, it answers Choose
-// over the types after cur's; ErrTooBig comes only at the last type's floor.
+// With Wants.KVTypes (taken once, each type at its first place and repeats dropped), at the floor
+// with MinSlots at a type that is not the last, it moves to the next type in the list with the
+// largest shape there that needs no more memory than cur (predicted at cur's type) and is never
+// better than it (no more slots, no more ctx per slot); where none fits, on to the type after;
+// ErrTooBig comes only at the last type's floor. It never plans the room afresh (Choose alone
+// does): the load that failed disproved that plan.
+//
+// The walk is monotone: each step strictly lowers the pair (types left after the shape's in the
+// list, then the predicted memory the shape is sized against, Footprint.need), compared in that
+// order, so feeding each answer back ends at ErrTooBig in a bounded number of steps for any list.
+// One step does not lower it: the first expert layer moved to RAM where a layer weighs less than
+// Footprint.MoESchedMiB; those moves are bounded by ExpertLayers, so the walk still ends.
 func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	if err := room.check(fp); err != nil {
 		return Shape{}, err
@@ -785,11 +810,29 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	if cur.Slots > w.MinSlots {
 		return fp.shape(w, cur.Slots-1, w.CtxFloor, cur.NCpuMoe, cur.CPUOnly), nil
 	}
-	for i, t := range w.KVTypes {
-		if t == fp.KVType && i < len(w.KVTypes)-1 {
-			w.KVTypes = w.KVTypes[i+1:]
-			w.CtxFromModel = false // w is resolved
-			return Choose(fp, room, w)
+	i := slices.Index(w.KVTypes, fp.KVType) // w.KVTypes holds each type once (resolve)
+	if i < 0 {
+		return Shape{}, ErrTooBig
+	}
+	// The next type's shape: no more slots or ctx per slot than cur, no more memory than cur needs.
+	w.Slots = min(w.Slots, cur.Slots)
+	w.MinSlots = min(w.MinSlots, w.Slots)
+	w.CtxMax = min(w.CtxMax, alignDown(cur.CtxPerSlot))
+	budget, hostRAM := room.Budget(), ram
+	if cur.CPUOnly {
+		hostRAM = min(hostRAM, fp.need(cur))
+	} else {
+		budget = min(budget, fp.need(cur))
+	}
+	for _, t := range w.KVTypes[i+1:] {
+		ft, err := fp.atType(t)
+		if err != nil {
+			return Shape{}, err
+		}
+		w.KVType = t
+		s, err := chooseAt(ft, room, w, budget, hostRAM)
+		if !errors.Is(err, ErrTooBig) {
+			return s, err
 		}
 	}
 	return Shape{}, ErrTooBig

@@ -2,6 +2,7 @@ package fit
 
 import (
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -194,19 +195,20 @@ func TestCtxFromModelIsTheNamedNumber(t *testing.T) {
 }
 
 // With a list of cache types, the walk down after a failed load moves on to the next type at an
-// earlier type's floor, and answers too big only at the last type's: a room Choose places the
-// model in is never refused by MissRetry or StepDown.
+// earlier type's floor, with the largest shape there that is no bigger than the one that failed
+// (never Choose's fresh plan, which the failed load disproved), and answers too big only at the
+// last type's floor.
 func TestStepDownMovesToTheNextType(t *testing.T) {
 	fp := seed(refInfo(), "q4_0")
 	w := game
 	w.Whole = true
 	w.KVTypes = []string{"f16", "q4_0"}
 	r := room(17920, 5208, 64000)
-	want, err := Choose(fp, r, w)
-	if err != nil || want.KVType != "q4_0" {
-		t.Fatalf("Choose: %v %v", want, err)
+	if fresh, err := Choose(fp, r, w); err != nil || fresh.KVType != "q4_0" {
+		t.Fatalf("Choose: %v %v", fresh, err)
 	}
 	atFloor := Shape{Slots: 1, CtxPerSlot: 8192, KVType: "f16"}
+	want := fp.shape(Wants{KVType: "q4_0"}, 1, 8192, 0, false)
 	if s, err := StepDown(fp, atFloor, r, w); err != nil || s != want {
 		t.Errorf("StepDown at the f16 floor: %v %v, want %v", s, err, want)
 	}
@@ -216,5 +218,103 @@ func TestStepDownMovesToTheNextType(t *testing.T) {
 	last := Shape{Slots: 1, CtxPerSlot: 8192, KVType: "q4_0"}
 	if s, err := StepDown(fp, last, r, w); !errors.Is(err, ErrTooBig) {
 		t.Errorf("StepDown at the last type's floor: %v %v", s, err)
+	}
+}
+
+// After a load failed at a small shape, the next type's shape needs no more card memory than
+// the one that failed and is never better: no more slots, no more ctx per slot.
+func TestTypeMoveNeverGrows(t *testing.T) {
+	fp := seed(refInfo(), "q4_0")
+	w := game
+	w.Whole = true
+	w.KVTypes = []string{"f16", "q4_0"}
+	r := room(24576, 1255, 64000)
+	f16, _ := fp.atType("f16")
+	cur := f16.shape(Wants{KVType: "f16"}, 1, 8192, 0, false)
+	check := func(op string, s Shape, err error) {
+		if err != nil || s.KVType != "q4_0" || s.VRAMMiB > cur.VRAMMiB || s.Slots > cur.Slots || s.CtxPerSlot > cur.CtxPerSlot {
+			t.Errorf("%s after a failed %v: %v %v", op, cur, s, err)
+		}
+	}
+	s, err := MissRetry(fp, cur, 900, r, w)
+	check("MissRetry", s, err)
+	s, err = StepDown(fp, cur, r, w)
+	check("StepDown", s, err)
+}
+
+// A type named twice is one type, at its first place: the walk down ends at the too-big error.
+func TestRepeatedTypeWalkEnds(t *testing.T) {
+	fp := seed(refInfo(), "q4_0")
+	r := room(16303, 1255, 24000)
+	for _, list := range [][]string{{"q4_0", "q4_0"}, {"q4_0", "f16", "q4_0"}} {
+		w := game
+		w.Whole = true
+		w.KVTypes = list
+		cur, err := Choose(fp, r, w)
+		if err != nil {
+			t.Fatalf("%v: Choose: %v", list, err)
+		}
+		const bound = 500 // 3 slots x 57 ctx notches x 2 types is far under it
+		i := 0
+		for ; i < bound; i++ {
+			next, err := StepDown(fp, cur, r, w)
+			if errors.Is(err, ErrTooBig) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%v: %v", list, err)
+			}
+			cur = next
+		}
+		if i == bound {
+			t.Errorf("%v: the walk did not end in %d steps (at %v %s)", list, bound, cur, cur.KVType)
+		}
+	}
+}
+
+// Every step of the walk down lowers the measure (types left after the shape's, then the memory
+// it is sized against), for any list of types, so the walk ends. The split rooms take a model
+// whose expert layer outweighs the offload buffers (Footprint.MoESchedMiB): with a lighter one the
+// first layer moved raises the memory.
+func TestWalkDownIsMonotone(t *testing.T) {
+	ref, dense, ling := seed(refInfo(), "q4_0"), seed(denseInfo(), "q4_0"), seed(lingInfo(), "q4_0")
+	lists := [][]string{{"f16", "q4_0"}, {"q4_0", "f16"}, {"f16", "q8_0", "q4_0"}, {"q4_0", "q4_0"},
+		{"q4_0", "f16", "q4_0"}, {"q8_0"}, {"", "f16", "", "f16", "q4_0"}}
+	cases := []struct {
+		fp    Footprint
+		whole bool
+	}{{ref, true}, {ref, false}, {dense, true}, {dense, false}, {ling, true}}
+	for _, c := range cases {
+		for vram := 8192; vram <= 24576; vram += 4096 {
+			for _, list := range lists {
+				w := game
+				w.Whole, w.KVTypes = c.whole, list
+				r := room(vram, 1255, 64000)
+				cur, err := Choose(c.fp, r, w)
+				if err != nil {
+					continue
+				}
+				types := kvTypes(list)
+				measure := func(s Shape) (int, float64) {
+					ft, _ := c.fp.atType(s.KVType)
+					return len(types) - 1 - slices.Index(types, s.KVType), ft.need(s)
+				}
+				for i := 0; ; i++ {
+					next, err := StepDown(c.fp, cur, r, w)
+					if errors.Is(err, ErrTooBig) {
+						break
+					}
+					if err != nil || i > 2000 {
+						t.Fatalf("%v on %d: %v (step %d)", list, vram, err, i)
+					}
+					l0, m0 := measure(cur)
+					l1, m1 := measure(next)
+					if l1 > l0 || (l1 == l0 && m1 >= m0) {
+						t.Fatalf("%v on %d, whole %v: %v %s -> %v %s does not lower the measure", list, vram, c.whole, cur, cur.KVType, next, next.KVType)
+					}
+					cur = next
+				}
+			}
+		}
 	}
 }

@@ -155,20 +155,23 @@ func TestFailedShrinkStepsDownFromThere(t *testing.T) {
 	c0 := ctxOf(t, e.Starts()[0])
 	e.SetUsed(16000)
 	e.SetOthers(8000)
-	// the first smaller shape will not load: anything above c0*3/4 runs out of memory
-	writeCtl(t, e, "oom_above", strconv.Itoa(c0*3/4))
+	// the smaller shape the room asks for will not load: anything above 30000 runs out of memory
+	const above = 30000
+	writeCtl(t, e, "oom_above", strconv.Itoa(above))
 	testkit.WaitFor(t, 20*time.Second, "ready below the failed shrink", func() bool {
 		st := s.Status()
 		return len(e.Starts()) >= 3 && st.Phase == "ready"
 	})
 	lines := e.Starts()
+	if ctxOf(t, lines[1]) <= above {
+		t.Fatalf("the shrink target already fits below %d; the test needs a target above it: %v", above, lines)
+	}
 	for _, l := range lines[1:] {
 		if ctxOf(t, l) >= c0 {
 			t.Fatalf("went back to the shape that no longer fit: %v", lines)
 		}
 	}
-	last := ctxOf(t, lines[len(lines)-1])
-	if last > c0*3/4 {
+	if last := ctxOf(t, lines[len(lines)-1]); last > above {
 		t.Fatalf("serving above the shape known to run out of memory: %v", lines)
 	}
 	testkit.WaitFor(t, 2*time.Second, "the failed shrink recorded", func() bool { return capped(e, c0-1) })

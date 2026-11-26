@@ -531,6 +531,15 @@ func (s *Supervisor) tick() {
 		if err != nil {
 			return
 		}
+		// straight to the shape that fits the room when one step is not enough: one restart,
+		// not one per tick
+		if c, err := fit.Choose(srv.fp, room, w); err == nil {
+			if cn, _, err1 := srv.fp.Need(c); err1 == nil {
+				if nn, _, err2 := srv.fp.Need(next); err2 == nil && cn < nn {
+					next = c
+				}
+			}
+		}
 		r := sn.sum.Reserve
 		s.logf("model needs %d MiB, the room leaves %d (others %d, host %d, margin %d): shrinking to %d x %d (moe %d)", need, vram, r.OthersMiB, r.HostMiB, r.MarginMiB, next.Slots, next.CtxPerSlot, next.NCpuMoe)
 		if idle {

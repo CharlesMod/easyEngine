@@ -96,6 +96,20 @@ func pickEngine(as []gpusense.Adapter) (gpusense.Adapter, bool) {
 	return best, found
 }
 
+// oursAdapter is the discrete adapter the engine's own processes hold memory on, if any.
+func oursAdapter(pic gpusense.Picture, as []gpusense.Adapter) (gpusense.Adapter, bool) {
+	best, held := gpusense.Adapter{}, 0
+	for _, p := range pic.Processes {
+		if !p.Ours || p.DedicatedMiB <= held {
+			continue
+		}
+		if a, ok := adapterByIndex(as, p.Adapter); ok && !a.Integrated && !a.Unified && a.DedicatedMiB > 0 {
+			best, held = a, p.DedicatedMiB
+		}
+	}
+	return best, held > 0
+}
+
 // pooled reports whether the adapter's memory is system memory (unified or integrated), whose
 // dedicated figure is never taken as VRAM.
 func pooled(a gpusense.Adapter) bool { return a.Unified || a.Integrated }
@@ -160,6 +174,11 @@ func MeasureReserve(pic gpusense.Picture, hw probe.Hardware, host HostInfo, esti
 	if !ok {
 		sum.HostAdapter, sum.HostIntegrated = hostAdapter(pic, host)
 		return sum, -1
+	}
+	if oa, has := oursAdapter(pic, as); has {
+		// the engine's server already runs there: that card stays the engine's, however full
+		// another app makes it (of equal cards the emptier would flip to the other one)
+		e = oa
 	}
 	sum.EngineAdapter = e.Index
 	total := capacity(e, hw)

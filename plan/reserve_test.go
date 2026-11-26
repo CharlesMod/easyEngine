@@ -26,6 +26,32 @@ func TestPickEngineEqualCardsTakesTheEmptier(t *testing.T) {
 	}
 }
 
+// Two equal cards: once the engine's server runs on one, another app filling that card past the
+// other's use must not move the engine's reading to the other card (seen live: a 17.5 GB grab on
+// GPU 0 read GPU 1's 19311 MiB as the others).
+func TestMeasureReserveStaysOnOursCard(t *testing.T) {
+	pic := gpusense.Picture{
+		Adapters: []gpusense.Adapter{
+			{Index: 0, Vendor: "nvidia", DedicatedMiB: 24576, UsedMiB: 23353},
+			{Index: 1, Vendor: "nvidia", DedicatedMiB: 24576, UsedMiB: 19311},
+		},
+		Processes: []gpusense.Process{
+			{PID: 50, Adapter: 0, DedicatedMiB: 4564, Ours: true},
+			{PID: 60, Adapter: 0, DedicatedMiB: 17648},
+			{PID: 70, Adapter: 0, DedicatedMiB: 1124},
+			{PID: 80, Adapter: 1, DedicatedMiB: 16950},
+		},
+	}
+	sum, _ := MeasureReserve(pic, probe.Hardware{OS: "linux"}, HostInfo{}, 1500)
+	if sum.EngineAdapter != 0 || sum.Reserve.OthersMiB != 23353-4564 {
+		t.Fatalf("engine adapter %d, others %d; want 0, %d", sum.EngineAdapter, sum.Reserve.OthersMiB, 23353-4564)
+	}
+	pic.Processes = pic.Processes[1:] // no server of ours yet: of equal cards the emptier
+	if sum, _ := MeasureReserve(pic, probe.Hardware{OS: "linux"}, HostInfo{}, 1500); sum.EngineAdapter != 1 {
+		t.Fatalf("engine adapter %d with no server of ours, want 1", sum.EngineAdapter)
+	}
+}
+
 func TestMeasureReserve(t *testing.T) {
 	const e4b = 3121 // an E4B-sized model, MiB
 	ours := gpusense.Process{PID: 50, Adapter: 0, DedicatedMiB: 3000, Ours: true}

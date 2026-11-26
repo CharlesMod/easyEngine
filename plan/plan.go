@@ -170,9 +170,9 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 		case err != nil:
 			v.Fits = "no"
 			v.Limit, v.Why = whyNot(fp, room, w, err)
-		case !v.Installed && hw.DiskFreeMiB > 0 && int(m.Size/mib)+1024 > hw.DiskFreeMiB:
+		case !v.Installed && hw.DiskFreeMiB > 0 && int(m.Size/mib)+DiskHeadroomMiB > hw.DiskFreeMiB:
 			v.Fits, v.Shape, v.Limit = "no", sh, LimitDisk
-			v.Why = fmt.Sprintf("needs %d MiB of free disk for the download, %d MiB available", m.Size/mib+1024, hw.DiskFreeMiB)
+			v.Why = fmt.Sprintf("needs %d MiB of free disk for the download, %d MiB available", m.Size/mib+DiskHeadroomMiB, hw.DiskFreeMiB)
 		default:
 			v.Shape, v.EstVRAMMiB, v.EstRAMMiB, v.EstDecodeTPS = sh, sh.VRAMMiB, sh.RAMMiB, sh.EstTPS
 			v.Fits, v.Why = verdictFor(fp, sh, w)
@@ -201,6 +201,10 @@ func PlanSensedWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 
 // cpuComfort is the share of free RAM (after the OS reserve) a CPU-only model may take and still
 // count as comfortable: the rest is for the game and the OS caches.
+// DiskHeadroomMiB stays free after a download: the plan's disk verdict and the installer's
+// space check (run.diskNeed) use this one figure.
+const DiskHeadroomMiB = 512
+
 const cpuComfort = 0.6
 
 // cpuOnlyPick is the recommendation without a usable GPU. Nothing was ever measured on a CPU, so

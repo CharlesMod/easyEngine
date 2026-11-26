@@ -87,3 +87,29 @@ func TestWhyNotEachLimit(t *testing.T) {
 		}
 	}
 }
+
+// The plan's disk verdict uses the installer's headroom (DiskHeadroomMiB): a disk the installer
+// would accept is not refused by the plan, and one MiB less is.
+func TestPlanDiskHeadroomMatchesInstaller(t *testing.T) {
+	c := testCatalog()
+	none := func(catalog.Model) bool { return false }
+	const id = "gemma4-rp-maxxed-q3kxl"
+	var size int64
+	for _, m := range c.Models {
+		if m.ID == id {
+			size = m.Size
+		}
+	}
+	if size == 0 {
+		t.Fatalf("%s not in the test catalog", id)
+	}
+	hw := hwNvidia(24576, 300, 60000, "Tesla P40")
+	hw.DiskFreeMiB = int(size/mib) + DiskHeadroomMiB
+	if v := verdicts(Plan(c, hw, game, 2048, none))[id]; v.Limit == LimitDisk {
+		t.Errorf("exactly size+headroom free: refused for disk (%s)", v.Why)
+	}
+	hw.DiskFreeMiB--
+	if v := verdicts(Plan(c, hw, game, 2048, none))[id]; v.Limit != LimitDisk {
+		t.Errorf("one MiB short: fits=%s limit=%q, want disk", v.Fits, v.Limit)
+	}
+}

@@ -20,8 +20,6 @@ import (
 const (
 	// starterRatio: a starter is only worth it when the target is at least this many times its size.
 	starterRatio = 2
-	// diskHeadroomMiB stays free after a download.
-	diskHeadroomMiB = 512
 )
 
 // Upgrade states (UpgradeInfo.State).
@@ -155,7 +153,7 @@ func (s *Supervisor) diskNeed(m catalog.Model) int {
 	if st, err := os.Stat(s.modelPath(m) + ".part"); err == nil && st.Size() < left {
 		left -= st.Size()
 	}
-	return int(left>>20) + diskHeadroomMiB
+	return int(left>>20) + plan.DiskHeadroomMiB
 }
 
 // checkDisk errors when the model does not fit in the free disk space.

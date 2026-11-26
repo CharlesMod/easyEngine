@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "llamacpp": {
     "tag": "b12680",
     "assets": [
@@ -280,17 +280,17 @@
       ]
     },
     {
-      "id": "gemma4-e4b-q4km",
-      "name": "Gemma 4 E4B (Q4_K_M)",
-      "file": "gemma-4-E4B-it-Q4_K_M.gguf",
-      "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/gemma-4-E4B-it-Q4_K_M.gguf",
-      "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
-      "size": 4977171584,
+      "id": "gemma4-e4b-rp-q40",
+      "name": "Gemma 4 E4B RP (HermesVoice build)",
+      "file": "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+      "url": "https://huggingface.co/cmod/gemma4-e4b-rp-GGUF/resolve/main/gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+      "sha256": "f272d8be50efb4cedeb6895b8fa1e451dad529b2423d99603f8c247a33b0445d",
+      "size": 3649658624,
       "moe": false,
       "quality": 60,
       "chat": "gemma4",
       "footprint": {
-        "fixed_mib": 3318,
+        "fixed_mib": 2994,
         "mib_per_1k_ctx": {
           "f16": 16.111,
           "q4_0": 8.915,
@@ -302,16 +302,16 @@
           "q8_0": 11.9
         },
         "scratch_mib": 55,
-        "host_mib": 1848,
+        "host_mib": 912,
         "decode_tps": {
-          "1": 133.9,
-          "2": 107.4,
-          "3": 92.4
+          "1": 142.6,
+          "2": 135.4,
+          "3": 119.9
         },
         "prompt_tps": {
-          "1": 11167.8,
-          "2": 6978.8,
-          "3": 4746.2
+          "1": 11872.5,
+          "2": 7416.8,
+          "3": 4857.2
         },
         "measured_on": {
           "gpu": "NVIDIA GeForce RTX 5080",

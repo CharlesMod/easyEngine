@@ -456,23 +456,23 @@ func TestPlanTable(t *testing.T) {
 		GPUs: []probe.GPU{{Vendor: "apple", Name: "Apple M2", VRAMTotalMiB: 11468, UnifiedMemory: true, Source: "sysctl"}}}
 	cases := []pc{
 		{"16GB, reference installed with header", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), allInstalled, refInfoFn,
-			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
+			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes"}},
 		{"16GB, 2800 others: a few expert layers in RAM keep the long ctx", func() probe.Hardware { h := hwNvidia(16303, 2800, 24000, "NVIDIA GeForce RTX 5080"); return h }(), allInstalled, refInfoFn,
 			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes"}},
 		{"16GB, nothing installed: reference is downloadable now", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), noneInstalled, nil,
 			"gemma4-rp-maxxed-q3kxl", nil},
-		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes"}},
-		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "gemma4-e4b-q4km", map[string]string{"gemma4-e4b-q4km": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
-		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "gemma4-e2b-q4km", map[string]string{"gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
+		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes"}},
+		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "gemma4-e4b-rp-q40", map[string]string{"gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
+		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "gemma4-e4b-rp-q40", map[string]string{"gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
 		{"4GB: too little card, CPU-only and tight", hwNvidia(4096, 500, 24000, "NVIDIA GeForce GTX 1650"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "tight"}},
-		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "tight"}},
-		{"no GPU 8GB RAM", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 8000, RAMAvailMiB: 5000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
+		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "tight"}},
+		{"no GPU 8GB RAM", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 8000, RAMAvailMiB: 5000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
 		{"Apple unified 16GB", apple, noneInstalled, nil, "", map[string]string{"gemma4-rp-maxxed-q3kxl": "no"}},
 		{"16GB but 3 GB of disk", func() probe.Hardware {
 			h := hwNvidia(16303, 600, 24000, "NVIDIA GeForce RTX 5080")
 			h.DiskFreeMiB = 3000
 			return h
-		}(), noneInstalled, nil, "", map[string]string{"gemma4-e4b-q4km": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
+		}(), noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
 	}
 	for _, tc := range cases {
 		p := PlanWith(c, tc.hw, game, 1500, tc.installed, tc.info)

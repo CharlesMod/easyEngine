@@ -7,7 +7,7 @@ Checked 2026-11-25 at the sources named below. Contract context: `docs/ENGINE.md
 | Catalog id | Model | temperature | top_k | top_p | min_p | repeat_penalty | DRY |
 |---|---|---|---|---|---|---|---|
 | `gemma4-rp-maxxed-q3kxl` | Gemma 4 26B RP build (finetune of gemma-4-26B-A4B-it) | 1.0 | 64 | 0.95 | 0 | 1.0 (off) | off |
-| `gemma4-e4b-q4km` | Gemma 4 E4B | 1.0 | 64 | 0.95 | 0 | 1.0 (off) | off |
+| `gemma4-e4b-rp-q40` | Gemma 4 E4B | 1.0 | 64 | 0.95 | 0 | 1.0 (off) | off |
 | `gemma4-e2b-q4km` | Gemma 4 E2B | 1.0 | 64 | 0.95 | 0 | 1.0 (off) | off |
 
 Sources (Hugging Face revisions read on 2026-11-25; `generation_config.json` is identical in all):

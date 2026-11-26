@@ -46,7 +46,7 @@ var samplerSpecs = map[string]samplerSpec{
 	refID: gemmaSpec("https://huggingface.co/google/gemma-4-26B-A4B-it/blob/4d7ae4984b7db7de8f8457170b3f1a419ee76d52/generation_config.json"+
 		" (base model of this build); https://unsloth.ai/docs (Gemma 4: same values)",
 		"gemma4rpmaxxed", "gemma426b", "gemma4a4b"),
-	"gemma4-e4b-q4km": gemmaSpec("https://huggingface.co/google/gemma-4-E4B-it/blob/4ecc2ba63bcac23ba4a767fc87025b1450f84c9c/generation_config.json"+
+	"gemma4-e4b-rp-q40": gemmaSpec("https://huggingface.co/google/gemma-4-E4B-it/blob/4ecc2ba63bcac23ba4a767fc87025b1450f84c9c/generation_config.json"+
 		" (the QAT repo google/gemma-4-E4B-it-qat-q4_0-unquantized@476025a0 is identical); https://unsloth.ai/docs (Gemma 4: same values)",
 		"gemma4e4b"),
 	"gemma4-e2b-q4km": gemmaSpec("https://huggingface.co/google/gemma-4-E2B-it/blob/4adf15748de9e1a0097b6274cee9c15836c41c37/generation_config.json"+

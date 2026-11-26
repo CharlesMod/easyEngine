@@ -38,9 +38,9 @@ func TestEmbedded(t *testing.T) {
 	if ref.URL != "" && ref.URL != "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf" {
 		t.Errorf("reference url %q", ref.URL)
 	}
-	for _, id := range []string{"gemma4-e4b-q4km", "gemma4-e2b-q4km"} {
+	for id, host := range map[string]string{"gemma4-e4b-rp-q40": "https://huggingface.co/cmod/gemma4-e4b-rp-GGUF/", "gemma4-e2b-q4km": "https://huggingface.co/unsloth/"} {
 		m, ok := c.Model(id)
-		if !ok || !hex64.MatchString(m.SHA256) || !strings.HasPrefix(m.URL, "https://huggingface.co/unsloth/") || m.Size <= 0 {
+		if !ok || !hex64.MatchString(m.SHA256) || !strings.HasPrefix(m.URL, host) || m.Size <= 0 {
 			t.Errorf("%s: %+v", id, m)
 		}
 	}
@@ -113,7 +113,7 @@ func TestEmbeddedLadder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"gemma4-rp-maxxed-q3kxl": false, "gemma4-e4b-q4km": false, "gemma4-e2b-q4km": true}
+	want := map[string]bool{"gemma4-rp-maxxed-q3kxl": false, "gemma4-e4b-rp-q40": false, "gemma4-e2b-q4km": true}
 	if len(c.Models) != len(want) {
 		t.Fatalf("%d models", len(c.Models))
 	}
@@ -160,8 +160,8 @@ func TestModelByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"google/gemma-4-E4B-it":         "gemma4-e4b-q4km",
-		"gemma4:e4b":                    "gemma4-e4b-q4km",
+		"google/gemma-4-E4B-it":         "gemma4-e4b-rp-q40",
+		"gemma4:e4b":                    "gemma4-e4b-rp-q40",
 		"unsloth/gemma-4-E2B-it-GGUF":   "gemma4-e2b-q4km",
 		"google/gemma-4-26B-A4B-it":     "gemma4-rp-maxxed-q3kxl",
 		"gemma4-rp-maxxed-Q3_K_XL.gguf": "gemma4-rp-maxxed-q3kxl",

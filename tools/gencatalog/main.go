@@ -351,7 +351,9 @@ type modelSpec struct {
 }
 
 var modelSpecs = []modelSpec{
-	{id: "gemma4-e4b-q4km", name: "Gemma 4 E4B (Q4_K_M)", repo: "unsloth/gemma-4-E4B-it-GGUF", file: "gemma-4-E4B-it-Q4_K_M.gguf", quality: 60, chat: "gemma4"},
+	// The keeper's rp build of E4B (QAT-exact Q4_0, refusals removed, vocabulary pruned); replaced stock E4B Q4_K_M on 2026-11-25.
+	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP (HermesVoice build)", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+		useMain: true, quality: 60, chat: "gemma4"},
 	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
 		fallback: true, fallbackNote: "Smallest model: expect repeated lines and weaker understanding of what was said."},
 }

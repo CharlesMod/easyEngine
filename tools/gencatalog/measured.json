@@ -32,8 +32,8 @@
       "flags": "-ngl 999 -fa on --no-kv-unified -ub 512 --cache-reuse 256"
     }
   },
-  "gemma4-e4b-q4km": {
-    "fixed_mib": 3318,
+  "gemma4-e4b-rp-q40": {
+    "fixed_mib": 2994,
     "mib_per_1k_ctx": {
       "f16": 16.111,
       "q4_0": 8.915,
@@ -45,16 +45,16 @@
       "q8_0": 11.9
     },
     "scratch_mib": 55,
-    "host_mib": 1848,
+    "host_mib": 912,
     "decode_tps": {
-      "1": 133.9,
-      "2": 107.4,
-      "3": 92.4
+      "1": 142.6,
+      "2": 135.4,
+      "3": 119.9
     },
     "prompt_tps": {
-      "1": 11167.8,
-      "2": 6978.8,
-      "3": 4746.2
+      "1": 11872.5,
+      "2": 7416.8,
+      "3": 4857.2
     },
     "measured_on": {
       "gpu": "NVIDIA GeForce RTX 5080",

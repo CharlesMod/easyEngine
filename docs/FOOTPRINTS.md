@@ -17,6 +17,13 @@ VRAM for a shape is `fixed + slope(kv) * ctx_total/1k + state(kv) * slots + scra
 Slope is the least-squares line through the q4_0 rows (residual under 30 MiB); q8_0 and f16 slopes come
 from their rows, and any other KV type is interpolated by bytes per element.
 
+
+> **2026-11-25:** the catalog's E4B is now `gemma4-e4b-rp-q40`, the keeper's QAT-exact Q4_0 rp build
+> (cmod/gemma4-e4b-rp-GGUF, 3.65 GB). Measured on the RTX 5080 at b12680: fixed 2,994 MiB (stock Q4_K_M
+> 3,318), the same KV slopes, host RAM 912 MiB (stock 1,848), decode at 3 slots 120 t/s (stock 92).
+> The rows below for `gemma4-e4b-q4km` are the stock model, kept for comparison. The predictor
+> under-predicts the rp rows by 2-4 %.
+
 | model | fixed | GB per 1k ctx q4_0 / q8_0 / f16 | per-slot state q4_0 / q8_0 / f16 | scratch | per expert layer (VRAM / RAM) |
 |---|---|---|---|---|---|
 | gemma4-e2b-q4km | 1.76 GB | 0.0040 / 0.0054 / 0.0062 | 0 / 1.4 / 3.9 MiB | 54 MiB | dense |

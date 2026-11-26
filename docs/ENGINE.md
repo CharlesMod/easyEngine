@@ -80,7 +80,7 @@ wins when its `version` is higher.
      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
      "sha256": "595eddca...", "size": 10001779136,
      "moe": true, "quality": 100, "chat": "gemma4", "notes": "reference model"},
-    {"id": "gemma4-e4b-q4km", "file": "...", "url": "https://huggingface.co/...", "moe": false, "quality": 60},
+    {"id": "gemma4-e4b-rp-q40", "file": "...", "url": "https://huggingface.co/...", "moe": false, "quality": 60},
     {"id": "gemma4-e2b-q4km", ..., "quality": 40,
      "fallback": true, "fallback_note": "Smallest model: expect repeated lines and weaker understanding of what was said."}
   ]
@@ -89,7 +89,7 @@ wins when its `version` is higher.
 
 - **Fallback.** `fallback: true` marks a model kept only as a last resort (today gemma4-e2b-q4km);
   `fallback_note` is a one-sentence, game-agnostic description of what to expect. The ladder is
-  gemma4-rp-maxxed-q3kxl, gemma4-e4b-q4km, then the fallback. The flag is carried into the plan
+  gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback. The flag is carried into the plan
   (`models[].fallback`, `fallback_note`) and, when the selected local model is a fallback, into
   `GET status` as `model_fallback` and `model_note`. Front ends show it as a warning; the setup page
   does. `tools/gencatalog` sets it from the model spec.

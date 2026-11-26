@@ -97,7 +97,7 @@ func headerSeeder(modelsDir string, cat *catalog.Catalog) Seeder {
 			}
 			infos[model] = in
 		}
-		return plan.Seed(in, kv), nil
+		return plan.Seed(in, kv)
 	}
 }
 

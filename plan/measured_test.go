@@ -19,17 +19,25 @@ func measuredFP() *catalog.Footprint {
 	}
 }
 
+// must is a footprint whose error the test does not expect.
+func must(fp fit.Footprint, err error) fit.Footprint {
+	if err != nil {
+		panic(err)
+	}
+	return fp
+}
+
 func TestFromMeasuredUsesBlock(t *testing.T) {
-	fp := FromMeasured(measuredFP(), "q4_0")
+	fp := must(FromMeasured(measuredFP(), "q4_0"))
 	if fp.FixedMiB != 3000 || math.Abs(fp.PerTokenMiB-10.0/1024) > 1e-9 || fp.StatePerSlotMiB != 60 || !fp.MoE || fp.ExpertLayers != 30 || fp.TPS == nil {
 		t.Fatalf("%+v", fp)
 	}
 	// q5_0 sits between q4_0 and q8_0 by bytes per element, so its slope is in between.
-	mid := FromMeasured(measuredFP(), "q5_0")
+	mid := must(FromMeasured(measuredFP(), "q5_0"))
 	if !(mid.PerTokenMiB > fp.PerTokenMiB && mid.PerTokenMiB < 20.0/1024) {
 		t.Fatalf("interpolated slope %v", mid.PerTokenMiB)
 	}
-	if FromMeasured(measuredFP(), "").PerTokenMiB != fp.PerTokenMiB {
+	if must(FromMeasured(measuredFP(), "")).PerTokenMiB != fp.PerTokenMiB {
 		t.Fatal("default kv is q4_0")
 	}
 }
@@ -47,18 +55,18 @@ func TestSpeedScaleFor(t *testing.T) {
 
 func TestSeedFromSizeUsesMeasured(t *testing.T) {
 	m := catalog.Model{ID: "x", Size: 10 << 30, Footprint: measuredFP()}
-	fp := SeedFromSize(m, "q4_0")
+	fp := must(SeedFromSize(m, "q4_0"))
 	if fp.FixedMiB != 3000 || fp.Estimated {
 		t.Fatalf("%+v", fp)
 	}
-	g := SeedFromSize(catalog.Model{ID: "y", Size: 10 << 30}, "q4_0")
+	g := must(SeedFromSize(catalog.Model{ID: "y", Size: 10 << 30}, "q4_0"))
 	if !g.Estimated {
 		t.Fatal("a size guess is flagged estimated")
 	}
 }
 
 func TestSpeedFloorPrefersSpeedOverCtx(t *testing.T) {
-	fp := FromMeasured(measuredFP(), "q4_0")
+	fp := must(FromMeasured(measuredFP(), "q4_0"))
 	// Card too small for the experts: n must be raised, but the floor of 20 caps n at 10.
 	room := fit.Room{VRAMTotal: 3500, GameReserve: 0, Margin: 200, RAMAvail: 64000, SpeedScale: 1}
 	s, err := fit.Choose(fp, room, fit.Wants{Slots: 1, CtxMax: 8192, CtxFloor: 2048, KVType: "q4_0"})

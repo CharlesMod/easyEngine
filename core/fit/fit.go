@@ -47,6 +47,22 @@ type UnreadError struct{ Field string }
 
 func (e *UnreadError) Error() string { return "fit: room field " + e.Field + " was not read" }
 
+// KVTypeError means a cache type name the core has no price for. It is never priced as another
+// type; the empty name is not unknown, it means the default (q4_0).
+type KVTypeError struct{ Name string }
+
+func (e *KVTypeError) Error() string { return fmt.Sprintf("fit: unknown cache type %q", e.Name) }
+
+// Basis says where a memory figure came from. Predicted: worked out from the header's seed and
+// the constants above (or from the seed corrected where the book took a reading). Measured: read
+// from a load of this model, card and backend that came up. "" is not said: a figure built by hand.
+type Basis string
+
+const (
+	Predicted Basis = "predicted"
+	Measured  Basis = "measured"
+)
+
 const (
 	alignTokens = 1024
 	// The constants below were measured on an RTX 5080 with llama.cpp b12680 at -ub 512, -fa on,
@@ -143,6 +159,11 @@ type Footprint struct {
 
 	StatePerSlotMiB float64 `json:"state_per_slot_mib"` // recurrent (linear-attention/SSM) state per slot; fixed, not per token
 	Estimated       bool    `json:"estimated"`          // built from a conservative guess, not a known architecture
+	// Basis is of FixedMiB, the one term a reading corrects: Measured where the book took a
+	// reading for this model, card and backend (Book.Footprint), Predicted from Seed and
+	// SeedFromBytes. The per-token terms are always predicted. A reading passed over leaves it
+	// as it was.
+	Basis Basis `json:"basis,omitempty"`
 
 	SWAPerTokenMiB float64 `json:"swa_per_token_mib"` // sliding-window KV per cached token
 	SWAWindow      int     `json:"swa_window"`        // tokens kept per slot by those layers
@@ -171,6 +192,10 @@ type Shape struct {
 	// EstTPS is the expected decode speed per stream (tokens/s) on this machine, 0 when no
 	// measured curve exists for the model.
 	EstTPS float64 `json:"est_decode_tps"`
+	// VRAMBasis is of VRAMMiB: Predicted from the planner; Measured from Book.Mark, where the book
+	// holds a reading of this very shape and VRAMMiB is that reading. RAMMiB is always predicted:
+	// no reading of host memory is taken.
+	VRAMBasis Basis `json:"vram_basis,omitempty"`
 }
 
 // CtxTotal is the -c value.
@@ -217,29 +242,54 @@ func alignDown(n int) int {
 	return n / alignTokens * alignTokens
 }
 
-// kvBytes is bytes per KV element for a llama.cpp cache type.
-func kvBytes(t string) float64 {
+// kvBytes is bytes per KV element for a llama.cpp cache type, and false for a name it does not
+// know; "" is not a name here (the callers put the default in first).
+func kvBytes(t string) (float64, bool) {
 	switch t {
 	case "f32":
-		return 4
+		return 4, true
 	case "f16", "bf16":
-		return 2
+		return 2, true
 	case "q8_0":
-		return 8.5 / 8
+		return 8.5 / 8, true
 	case "q5_1":
-		return 6.0 / 8
+		return 6.0 / 8, true
 	case "q5_0":
-		return 5.5 / 8
+		return 5.5 / 8, true
 	case "q4_1":
-		return 5.0 / 8
+		return 5.0 / 8, true
 	case "q4_0", "iq4_nl":
-		return 4.5 / 8
+		return 4.5 / 8, true
 	}
-	return 2 // unknown: assume f16
+	return 0, false
 }
 
-// KVBytes is the bytes per element of a llama.cpp KV cache type (unknown types count as f16).
-func KVBytes(t string) float64 { return kvBytes(t) }
+// q4Bytes is kvBytes("q4_0"), the default type the size guesses are stated at.
+const q4Bytes = 4.5 / 8
+
+// knownKV is nil where every name given is a known cache type or empty, else a *KVTypeError
+// naming the first that is not.
+func knownKV(names ...string) error {
+	for _, t := range names {
+		if _, ok := kvBytes(t); t != "" && !ok {
+			return &KVTypeError{Name: t}
+		}
+	}
+	return nil
+}
+
+// KVBytes is the bytes per element of a llama.cpp KV cache type; "" is the default (q4_0), and a
+// name the core does not know is a *KVTypeError.
+func KVBytes(t string) (float64, error) {
+	if t == "" {
+		t = "q4_0"
+	}
+	b, ok := kvBytes(t)
+	if !ok {
+		return 0, &KVTypeError{Name: t}
+	}
+	return b, nil
+}
 
 // DefaultMargin is max(512 MiB, 4 % of the card).
 func DefaultMargin(vramTotal int) int {
@@ -252,13 +302,17 @@ func DefaultMargin(vramTotal int) int {
 
 const mib = 1 << 20
 
-// Seed builds a footprint from a GGUF header. notes says what it had to guess (an architecture
-// not fully understood, no KV dimensions in the header), one line each, for the caller to log.
-func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
+// Seed builds a footprint from a GGUF header, priced at cache type kvType ("" is q4_0; a name
+// the core does not know is a *KVTypeError). notes says what it had to guess (an architecture not
+// fully understood, no KV dimensions in the header), one line each, for the caller to log.
+func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string, err error) {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
-	b := kvBytes(kvType)
+	b, ok := kvBytes(kvType)
+	if !ok {
+		return Footprint{}, nil, &KVTypeError{Name: kvType}
+	}
 	layers := info.Layers
 	if len(layers) != info.NLayer || len(layers) == 0 {
 		layers = nil
@@ -302,6 +356,7 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		ComputePerTokenMiB: compute,
 		StatePerSlotMiB:    float64(info.StateBytesPerSlot) / mib,
 		Estimated:          info.Estimated,
+		Basis:              Predicted,
 
 		KVType:             kvType,
 		DequantPerTokenMiB: dequant,
@@ -318,7 +373,7 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		if gib < 1 {
 			gib = 1
 		}
-		fp.PerTokenMiB = 0.0006 * gib * 1.25 * b / kvBytes("q4_0")
+		fp.PerTokenMiB = 0.0006 * gib * 1.25 * b / q4Bytes
 		fp.Estimated = true
 		notes = append(notes, fmt.Sprintf("fit: %s: header gave no KV dimensions; guessing %.4f MiB per token from the weight size", info.Arch, fp.PerTokenMiB))
 	}
@@ -329,23 +384,29 @@ func Seed(info gguf.Info, kvType string) (fp Footprint, notes []string) {
 		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
 		fp.MoESchedMiB = moeSchedMiB
 	}
-	return fp, notes
+	return fp, notes, nil
 }
 
 // SeedFromBytes is the footprint of a model known only by its file size: about 0.0006 MiB per
 // token per GiB of weights at q4_0 with a 25 % safety factor, 30 expert layers for a MoE. It is
-// marked Estimated; the header gives the real footprint once the file is on disk.
-func SeedFromBytes(size int64, moe bool, kvType string) Footprint {
+// marked Estimated; the header gives the real footprint once the file is on disk. kvType is as
+// for Seed.
+func SeedFromBytes(size int64, moe bool, kvType string) (Footprint, error) {
 	if kvType == "" {
 		kvType = "q4_0"
+	}
+	b, ok := kvBytes(kvType)
+	if !ok {
+		return Footprint{}, &KVTypeError{Name: kvType}
 	}
 	sizeMiB := float64(size) / mib
 	gib := sizeMiB / 1024
 	fp := Footprint{
 		FixedMiB:    sizeMiB + baseOverheadMiB + 200*vocabMiBPer1k, // a typical 200k vocabulary
-		PerTokenMiB: 0.0006 * gib * 1.25 * kvBytes(kvType) / kvBytes("q4_0"),
+		PerTokenMiB: 0.0006 * gib * 1.25 * b / q4Bytes,
 		ScratchMiB:  runtimeMiB,
 		Estimated:   true,
+		Basis:       Predicted,
 		KVType:      kvType,
 		WeightsMiB:  sizeMiB,
 	}
@@ -357,7 +418,7 @@ func SeedFromBytes(size int64, moe bool, kvType string) Footprint {
 		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
 		fp.MoESchedMiB = moeSchedMiB
 	}
-	return fp
+	return fp, nil
 }
 
 // quantised reports whether a cache type is expanded to f16 for the widest layer.
@@ -366,13 +427,18 @@ func quantised(t string) bool { return t != "f16" && t != "bf16" && t != "f32" }
 // atType is fp priced at cache type t: the per-token cache scales with the bytes per element and
 // the f16 expansion comes or goes with quantisation. Worked out from the footprint, never tried.
 func (fp Footprint) atType(t string) (Footprint, error) {
+	if err := knownKV(t, fp.KVType); err != nil {
+		return Footprint{}, err
+	}
 	if t == fp.KVType {
 		return fp, nil
 	}
 	if fp.KVType == "" {
 		return Footprint{}, ErrNoKVType
 	}
-	r := kvBytes(t) / kvBytes(fp.KVType)
+	bt, _ := kvBytes(t)
+	bf, _ := kvBytes(fp.KVType)
+	r := bt / bf
 	fp.PerTokenMiB *= r
 	fp.SWAPerTokenMiB *= r
 	if quantised(fp.KVType) {
@@ -455,7 +521,7 @@ func (fp Footprint) HostRAM(slots, ctxPerSlot int) float64 { return fp.allHost(s
 func ceilMiB(f float64) int { return int(math.Ceil(f)) }
 
 func (fp Footprint) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
-	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly}
+	s := Shape{Slots: slots, CtxPerSlot: ctx, NCpuMoe: n, KVType: w.KVType, CPUOnly: cpuOnly, VRAMBasis: Predicted}
 	if cpuOnly {
 		s.NCpuMoe = 0
 		s.RAMMiB = ceilMiB(fp.allHost(slots, ctx))
@@ -572,7 +638,10 @@ func (fp Footprint) resolve(w Wants) (Wants, error) {
 	if len(w.KVTypes) > 0 {
 		w.KVType = w.KVTypes[0]
 	}
-	return w, nil
+	if err := knownKV(w.KVType); err != nil {
+		return w, err
+	}
+	return w, knownKV(w.KVTypes...)
 }
 
 // Choose picks the shape, in the order of ENGINE.md section 5: all on GPU at the largest ctx;
@@ -731,6 +800,9 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	if err != nil {
 		return Shape{}, err
 	}
+	if err := knownKV(cur.KVType); err != nil {
+		return Shape{}, err
+	}
 	if fp, err = fp.typed(w, cur); err != nil {
 		return Shape{}, err
 	}
@@ -782,6 +854,9 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	w, err := fp.resolve(w)
 	if err != nil {
+		return Shape{}, err
+	}
+	if err := knownKV(cur.KVType); err != nil {
 		return Shape{}, err
 	}
 	if fp, err = fp.typed(w, cur); err != nil {
@@ -891,12 +966,44 @@ func (s Shape) String() string {
 
 // ---- calibration book ----
 
-// Calib is what one healthy load taught us about a (model, GPU, backend).
+// Calib is what the loads of one (model, GPU, backend) taught us. The four first fields are the
+// book as older builds wrote it, kept with their names and meaning so either build reads the
+// other's state; an older build drops the rest when it writes.
 type Calib struct {
-	FixedMiB    float64   `json:"fixed_mib"`
+	FixedMiB    float64   `json:"fixed_mib"` // the fixed part from the last reading taken; 0: none taken
 	CapCtxTotal int       `json:"cap_ctx_total"`
-	Loads       int       `json:"loads"`
+	Loads       int       `json:"loads"` // readings taken
 	Updated     time.Time `json:"updated"`
+	// Lift is what lets CapCtxTotal go (Book.LetGo); nil for a cap an older build lowered, which
+	// stands as it always did.
+	Lift *CapLift `json:"cap_lift,omitempty"`
+	// Readings is the card memory each shape that came up held, one per shape, whether or not
+	// its reading was taken for the fixed part (Book.Mark).
+	Readings []Reading `json:"readings,omitempty"`
+}
+
+// CapLift is what a cap was measured under: the room (Room.Budget, or Room.RAMBudget for a run
+// with no GPU), how much less the cap's shape was predicted to need than the shape that ran out
+// of memory, and the engine build. A room larger than RoomMiB by more than MissMiB, or another
+// build, lets the cap go.
+type CapLift struct {
+	RoomMiB int    `json:"room_mib"`
+	MissMiB int    `json:"miss_mib"`
+	NoGPU   bool   `json:"no_gpu,omitempty"`
+	Backend string `json:"backend"`
+}
+
+// Reading is the card memory one shape held when its load came up, read by its process.
+type Reading struct {
+	Slots      int    `json:"slots"`
+	CtxPerSlot int    `json:"ctx_per_slot"`
+	NCpuMoe    int    `json:"n_cpu_moe"`
+	KVType     string `json:"kv_type"`
+	VRAMMiB    int    `json:"vram_mib"`
+}
+
+func (r Reading) of(s Shape) bool {
+	return !s.CPUOnly && r.Slots == s.Slots && r.CtxPerSlot == s.CtxPerSlot && r.NCpuMoe == s.NCpuMoe && r.KVType == s.KVType
 }
 
 // Book is the calibration book kept in state.json.
@@ -909,7 +1016,8 @@ func BookKey(modelSHA, gpuName, backendID string) string {
 	return modelSHA + "|" + gpuName + "|" + backendID
 }
 
-// Footprint overlays what the book knows (calibrated fixed load, runtime-OOM cap) on a seed.
+// Footprint overlays what the book knows (the fixed load from a reading taken, marked Measured;
+// the runtime-OOM cap) on a seed.
 func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if b == nil {
 		return seed
@@ -917,45 +1025,169 @@ func (b *Book) Footprint(key string, seed Footprint) Footprint {
 	if e, ok := b.Entries[key]; ok {
 		if e.FixedMiB > 0 {
 			seed.FixedMiB = e.FixedMiB
+			seed.Basis = Measured
 		}
 		seed.CapCtxTotal = e.CapCtxTotal
 	}
 	return seed
 }
 
-// Calibrate records the fixed load implied by a healthy load that held measuredMiB of VRAM at
-// shape s. Like the hive's calibrate() it accepts the reading only within +-15 % of the seed's
-// fixed load (a wild reading means others changed during the load) and reports whether it did.
-// now is the stamp the entry is given.
-func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) bool {
-	if s.CPUOnly || measuredMiB <= 0 || seed.FixedMiB <= 0 {
-		return false
+// Mark is s with what the book holds of it: where key has a reading of this very shape, VRAMMiB
+// is that reading and VRAMBasis Measured. Otherwise s as given.
+func (b *Book) Mark(key string, s Shape) Shape {
+	if b == nil {
+		return s
 	}
-	implied := float64(measuredMiB) - (seed.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - seed.FixedMiB)
-	if math.Abs(implied-seed.FixedMiB) > 0.15*seed.FixedMiB {
-		return false
+	for _, r := range b.Entries[key].Readings {
+		if r.of(s) {
+			s.VRAMMiB, s.VRAMBasis = r.VRAMMiB, Measured
+		}
+	}
+	return s
+}
+
+// CalibVerdict is what Calibrate did with a reading.
+type CalibVerdict string
+
+const (
+	// Taken: within 15 % of the seed's fixed part, so the book's fixed part is now the implied one.
+	Taken CalibVerdict = "taken"
+	// OutsideGate: more than 15 % off the seed's fixed part (others may have changed during the
+	// load, or the seed is wrong for this model); the fixed part stays predicted.
+	OutsideGate CalibVerdict = "outside_gate"
+	// NoSeed: the seed has no fixed part to hold the reading to.
+	NoSeed CalibVerdict = "no_seed"
+	// NoReading: no reading was given (0 MiB or less).
+	NoReading CalibVerdict = "no_reading"
+	// CPUOnly: a CPU-only shape's card use says nothing of the fixed part on the card.
+	CPUOnly CalibVerdict = "cpu_only"
+)
+
+// Calibration is what Calibrate did: its verdict, the fixed part the reading implies (0 where
+// there was no card reading) and the seed's fixed part it was held to.
+type Calibration struct {
+	Verdict         CalibVerdict `json:"verdict"`
+	ImpliedFixedMiB float64      `json:"implied_fixed_mib"`
+	SeedFixedMiB    float64      `json:"seed_fixed_mib"`
+}
+
+// Taken reports whether the reading became the book's fixed part.
+func (c Calibration) Taken() bool { return c.Verdict == Taken }
+
+// OffMiB is how far the seed's fixed part is from what the reading implies (implied less seed).
+func (c Calibration) OffMiB() float64 { return c.ImpliedFixedMiB - c.SeedFixedMiB }
+
+func (c Calibration) String() string {
+	if c.Verdict == NoReading || c.Verdict == CPUOnly {
+		return string(c.Verdict)
+	}
+	return fmt.Sprintf("%s (implied fixed %.0f MiB, seed %.0f MiB, off %+.0f MiB)", c.Verdict, c.ImpliedFixedMiB, c.SeedFixedMiB, c.OffMiB())
+}
+
+// Calibrate records a healthy load that held measuredMiB of VRAM at shape s, and says what it did.
+// The reading is kept for its shape (Book.Mark) whatever the gate says. Like the hive's
+// calibrate() it becomes the book's fixed part only within +-15 % of the seed's (a wild reading
+// means others changed during the load, or the seed is wrong here: the caller sees by how much).
+// now is the stamp the entry is given.
+func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) Calibration {
+	c := Calibration{SeedFixedMiB: seed.FixedMiB}
+	switch {
+	case s.CPUOnly:
+		c.Verdict = CPUOnly
+		return c
+	case measuredMiB <= 0:
+		c.Verdict = NoReading
+		return c
+	}
+	c.ImpliedFixedMiB = float64(measuredMiB) - (seed.vram(s.Slots, s.CtxPerSlot, s.NCpuMoe) - seed.FixedMiB)
+	switch {
+	case seed.FixedMiB <= 0:
+		c.Verdict = NoSeed
+	case math.Abs(c.ImpliedFixedMiB-seed.FixedMiB) > 0.15*seed.FixedMiB:
+		c.Verdict = OutsideGate
+	default:
+		c.Verdict = Taken
 	}
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}
 	e := b.Entries[key]
-	e.FixedMiB = implied
-	e.Loads++
+	// A new slice every time: a copy of the book handed to a writer may still hold the old one.
+	rs := make([]Reading, 0, len(e.Readings)+1)
+	for _, r := range e.Readings {
+		if !r.of(s) {
+			rs = append(rs, r)
+		}
+	}
+	e.Readings = append(rs, Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB})
+	if c.Taken() {
+		e.FixedMiB = c.ImpliedFixedMiB
+		e.Loads++
+	}
 	e.Updated = now
 	b.Entries[key] = e
-	return true
+	return c
 }
 
-// LowerCap records a runtime OOM: the next start must use less total ctx than ctxTotal. now is
-// the stamp the entry is given.
-func (b *Book) LowerCap(key string, ctxTotal int, now time.Time) {
+// capRoom is the room a cap is measured against: the card's budget, or host RAM with no GPU.
+func capRoom(room Room) int {
+	if room.NoGPU {
+		return int(room.RAMBudget())
+	}
+	return int(room.Budget())
+}
+
+// LowerCap records an out-of-memory of shape failed in room with engine build backendID: the
+// next start must use less total ctx than ctxTotal. Where the cap moves it carries what lifts it
+// (CapLift): the room, the miss (the memory fp predicts failed needs above the same slots at
+// ctxTotal) and the build. Where the miss cannot be told (no slots, a type fp cannot be priced
+// at, nothing between them) the cap carries no lift and stands as caps always did. now is the
+// stamp the entry is given.
+func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, room Room, backendID string, now time.Time) {
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}
 	e := b.Entries[key]
 	if ctxTotal > 0 && (e.CapCtxTotal == 0 || ctxTotal < e.CapCtxTotal) {
 		e.CapCtxTotal = ctxTotal
+		e.Lift = nil
+		ft, err := fp, error(nil) // a footprint naming no type is taken as given, as the walk does
+		if fp.KVType != "" && failed.KVType != "" {
+			ft, err = fp.atType(failed.KVType)
+		}
+		if err == nil && failed.Slots > 0 {
+			miss := ceilMiB(ft.kvAt(failed.Slots, failed.CtxPerSlot) - ft.kvAt(failed.Slots, ctxTotal/failed.Slots))
+			if miss > 0 {
+				e.Lift = &CapLift{RoomMiB: capRoom(room), MissMiB: miss, NoGPU: room.NoGPU, Backend: backendID}
+			}
+		}
 	}
 	e.Updated = now
 	b.Entries[key] = e
+}
+
+// LetGo lets the cap of key go where room, as it stands now, is larger than the room it was
+// measured under by more than its miss (the same kind of room: card, or host with no GPU), or
+// backendID is another build than the one it was measured with. It answers whether a cap still
+// stands and, where one does, what would lift it (nil for a cap that carries none). With no cap:
+// false, nil. A cap let go takes its lift with it; the fixed part and the readings stay.
+func (b *Book) LetGo(key string, room Room, backendID string) (stands bool, lift *CapLift) {
+	if b == nil {
+		return false, nil
+	}
+	e, ok := b.Entries[key]
+	if !ok || e.CapCtxTotal <= 0 {
+		return false, nil
+	}
+	l := e.Lift
+	if l == nil {
+		return true, nil
+	}
+	if l.Backend == backendID && (l.NoGPU != room.NoGPU || capRoom(room) <= l.RoomMiB+l.MissMiB) {
+		c := *l
+		return true, &c
+	}
+	e.CapCtxTotal, e.Lift = 0, nil
+	b.Entries[key] = e
+	return false, nil
 }

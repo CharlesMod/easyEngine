@@ -74,11 +74,18 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if err != nil {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, err
 	}
+	room := s.room(ctx, hw, nil)
 	s.mu.Lock()
+	had := s.st.Book.Entries[key].CapCtxTotal
+	stands, _ := s.st.Book.LetGo(key, room, in.backend)
 	fp := s.st.Book.Footprint(key, seed)
 	s.mu.Unlock()
+	if had > 0 && !stands {
+		s.logf("ctx cap %d let go: the room grew past what it missed by, or the backend moved", had)
+		s.save()
+	}
 	lc := loadCtx{in: in, key: key, fp: fp, gpu: g, hasG: hasG}
-	return lc, s.room(ctx, hw, nil), s.wantsFor(key), nil
+	return lc, room, s.wantsFor(key), nil
 }
 
 // startLocked chooses a shape and loads it. opMu must be held.
@@ -160,7 +167,7 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			next, err = fit.StepDown(lc.fp, shape, room, w)
 			if err == nil {
 				s.mu.Lock()
-				s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot, time.Now())
+				s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.backend, time.Now())
 				s.mu.Unlock()
 				s.save()
 			}
@@ -230,7 +237,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 				s.srv = srv
 				s.mu.Lock()
 				s.llamaURL = url
-				s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB)}
+				basis := shape.VRAMBasis
+				if srv.measured > 0 {
+					basis = fit.Measured
+				}
+				s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB), VRAMBasis: basis}
 				s.retryable = false
 				s.tokS = 0
 				s.mu.Unlock()
@@ -279,10 +290,10 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 	}
 	srv.measured = m
 	s.mu.Lock()
-	ok := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m, time.Now())
+	c := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m, time.Now())
 	s.mu.Unlock()
-	s.logf("calibrate: measured %d MiB, accepted=%v", m, ok)
-	if ok {
+	s.logf("calibrate: measured %d MiB, %s", m, c)
+	if c.Verdict != fit.CPUOnly { // the reading is kept for its shape whether or not it was taken
 		s.save()
 	}
 }
@@ -472,7 +483,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
 		s.mu.Lock()
-		s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot, time.Now())
+		s.st.Book.LowerCap(lc.key, lc.fp, shape, next.Slots*next.CtxPerSlot, room, lc.in.backend, time.Now())
 		s.mu.Unlock()
 		s.save()
 		shape = next
@@ -504,7 +515,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 	s.loadCancel = cancel
 	s.mu.Unlock()
 	defer func() { cancel(); s.mu.Lock(); s.loadCancel = nil; s.mu.Unlock() }()
-	lc, _, _, err := s.loadContext(cctx)
+	lc, room, _, err := s.loadContext(cctx)
 	if err != nil {
 		s.failStart(err, true)
 		return
@@ -517,7 +528,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 		s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
 		if res.oom {
 			s.mu.Lock()
-			s.st.Book.LowerCap(lc.key, to.Slots*to.CtxPerSlot-1024*to.Slots, time.Now())
+			s.st.Book.LowerCap(lc.key, lc.fp, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room, lc.in.backend, time.Now())
 			s.mu.Unlock()
 			s.save()
 		}

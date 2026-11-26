@@ -56,7 +56,10 @@ var game = Wants{Slots: 3, MinSlots: 1, CtxMax: 65536, CtxFloor: 8192, KVType: "
 
 // seed is Seed without its notes, for the tests that look only at the footprint.
 func seed(info gguf.Info, kvType string) Footprint {
-	fp, _ := Seed(info, kvType)
+	fp, _, err := Seed(info, kvType)
+	if err != nil {
+		panic(err)
+	}
 	return fp
 }
 
@@ -105,7 +108,7 @@ func TestSeedLingMLAAndState(t *testing.T) {
 }
 
 func TestSeedUnknownArchitectureNeverZero(t *testing.T) {
-	fp, notes := Seed(gguf.Info{Arch: "mystery", NLayer: 10, DenseBytes: 4 << 30}, "q4_0")
+	fp, notes, _ := Seed(gguf.Info{Arch: "mystery", NLayer: 10, DenseBytes: 4 << 30}, "q4_0")
 	logged := strings.Join(notes, "\n")
 	if fp.PerTokenMiB <= 0 || !fp.Estimated || logged == "" {
 		t.Errorf("%+v log %q", fp, logged)
@@ -357,7 +360,7 @@ func TestBook(t *testing.T) {
 	var b Book
 	key := BookKey("sha", "RTX 5080", "cuda-linux-x64")
 	// within +-15 %: accepted, and the footprint now carries the measured fixed load
-	if !b.Calibrate(key, ref, shape, 12500, stamp) {
+	if !b.Calibrate(key, ref, shape, 12500, stamp).Taken() {
 		t.Fatal("12500 should calibrate")
 	}
 	fp := b.Footprint(key, ref)
@@ -365,7 +368,7 @@ func TestBook(t *testing.T) {
 		t.Errorf("calibrated model predicts %.0f, measured 12500", fp.vram(3, 65536, 0))
 	}
 	// a wild reading (others changed during load) is refused and changes nothing
-	if b.Calibrate(key, ref, shape, 16000, stamp) || b.Calibrate(key, ref, shape, 8000, stamp) {
+	if b.Calibrate(key, ref, shape, 16000, stamp).Taken() || b.Calibrate(key, ref, shape, 8000, stamp).Taken() {
 		t.Error("out-of-range reading accepted")
 	}
 	if got := b.Footprint(key, ref).FixedMiB; math.Abs(got-fp.FixedMiB) > 1e-9 {
@@ -374,9 +377,9 @@ func TestBook(t *testing.T) {
 	if e := b.Entries[key]; e.Loads != 1 || !e.Updated.Equal(stamp) { // the stamp is the caller's
 		t.Errorf("%+v", e)
 	}
-	// runtime OOM lowers the cap; the next plan honours it; it only ever goes down
-	b.LowerCap(key, 150000, stamp)
-	b.LowerCap(key, 170000, stamp)
+	// runtime OOM lowers the cap; the next plan honours it; a later OOM never raises it (LetGo lifts it)
+	b.LowerCap(key, ref, shape, 150000, room(16303, 600, 24000), "cuda-linux-x64", stamp)
+	b.LowerCap(key, ref, shape, 170000, room(16303, 600, 24000), "cuda-linux-x64", stamp)
 	fp = b.Footprint(key, ref)
 	if fp.CapCtxTotal != 150000 {
 		t.Errorf("cap %d", fp.CapCtxTotal)
@@ -394,7 +397,7 @@ func TestBook(t *testing.T) {
 		t.Error("nil book")
 	}
 	// CPU-only runs never calibrate a GPU fixed load
-	if b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000, stamp) {
+	if b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000, stamp).Taken() {
 		t.Error("cpu-only calibrated")
 	}
 }
@@ -406,7 +409,7 @@ func TestCalibrateWithExpertsOnCPU(t *testing.T) {
 	truth.FixedMiB += 150 // the real fixed load is 150 MiB above the seed
 	measured := int(truth.vram(3, 32768, 10))
 	var b Book
-	if !b.Calibrate("k", ref, sh, measured, stamp) {
+	if !b.Calibrate("k", ref, sh, measured, stamp).Taken() {
 		t.Fatal("not accepted")
 	}
 	if got := b.Entries["k"].FixedMiB; math.Abs(got-truth.FixedMiB) > 1 {
@@ -450,7 +453,7 @@ func TestReferenceFromFile(t *testing.T) {
 }
 
 func TestJSONTags(t *testing.T) {
-	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}} {
+	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}, CapLift{}, Reading{}, Calibration{}} {
 		rt := reflect.TypeOf(v)
 		for i := 0; i < rt.NumField(); i++ {
 			if rt.Field(i).Tag.Get("json") == "" {

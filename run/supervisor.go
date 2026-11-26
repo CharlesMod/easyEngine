@@ -42,6 +42,9 @@ type ShapeInfo struct {
 	NCpuMoe    int    `json:"n_cpu_moe"`
 	KVType     string `json:"kv_type"`
 	VRAMMiB    int    `json:"vram_mib"`
+	// VRAMBasis says whether VRAMMiB was read from the running server (measured) or is the
+	// planner's figure (predicted).
+	VRAMBasis fit.Basis `json:"vram_basis"`
 }
 
 // ExternalInfo is the external endpoint without its key.

@@ -183,11 +183,18 @@ func (c *Config) defaults() {
 
 func defaultSeed(m catalog.Model, modelPath, kv string) (fit.Footprint, error) {
 	if info, err := plan.ReadInfo(modelPath); err == nil {
-		fp := plan.Seed(info, kv)
+		fp, err := plan.Seed(info, kv)
+		if err != nil {
+			return fit.Footprint{}, err
+		}
 		if m.Footprint != nil { // the header gives the sizes, the measurement the speed curve
-			fp.TPS = plan.FromMeasured(m.Footprint, kv).TPS
+			mf, err := plan.FromMeasured(m.Footprint, kv)
+			if err != nil {
+				return fit.Footprint{}, err
+			}
+			fp.TPS = mf.TPS
 		}
 		return fp, nil
 	}
-	return plan.SeedFromSize(m, kv), nil
+	return plan.SeedFromSize(m, kv)
 }

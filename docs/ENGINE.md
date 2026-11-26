@@ -185,6 +185,39 @@ loop lives in `run`.
   the measured use (as `calibrate()` does in the hive launcher: accept a new `fixed` only
   within ±15 % of the seed). The book is keyed by model sha256 + GPU name + backend id and
   kept in `state.json`.
+- **Every figure marked.** `Footprint.Basis` (`basis`) and `Shape.VRAMBasis` (`vram_basis`) are
+  `fit.Predicted` or `fit.Measured` (`""` only on a value built by hand). A footprint is measured
+  where the book took a reading for its key (its `fixed` is that reading; the per-token terms stay
+  predicted); `Seed`, `SeedFromBytes` and `plan.FromMeasured` say predicted. Every shape the
+  planner makes is predicted; `Book.Mark(key, shape)` makes it measured, with `vram_mib` the
+  reading, only where the book holds a reading of that very shape (`Calib.Readings`, one per
+  shape that came up, kept whether or not the reading was taken). `RAMMiB` is always predicted.
+  A reading passed over never marks the footprint or any other shape. The engine's `/status`
+  `shape.vram_basis` says whether `vram_mib` was read from the running server.
+- **A calibration says what it did.** `Book.Calibrate` answers a `fit.Calibration`: its
+  `Verdict` (`taken`; `outside_gate`, more than ±15 % off the seed's `fixed`; `no_seed`;
+  `no_reading`; `cpu_only`), the `fixed` the reading implies and the seed's, so `OffMiB()` says by
+  how much the seed is off. Only `taken` moves the book's `fixed`; the footprint then stays
+  predicted. The engine logs the whole answer.
+- **A cap names what lifts it.** `Book.LowerCap(key, fp, failed, ctxTotal, room, backendID,
+  now)` keeps beside the cap a `CapLift`: the room it was measured under (`Room.Budget`, or
+  `RAMBudget` with no GPU), the miss (the memory `fp` predicts the failed shape needs above
+  the same slots at `ctxTotal`) and the backend id. `Book.LetGo(key, room, backendID)`, with the room
+  and build as they stand now, lets the cap go where the room is larger by more than the miss
+  (of the same kind) or the build is another, and otherwise answers that it stands and its
+  `CapLift`. With neither changed the cap stands exactly as before. A cap with no lift (lowered
+  by an older build, or with no miss to tell) stands as caps always did. The engine calls
+  `LetGo` each time it reads the book for a start.
+- **An unknown cache type is refused.** `Seed`, `SeedFromBytes`, `KVBytes`, `Choose` (`KVType`
+  or any of `KVTypes`), `MissRetry` and `StepDown` (also the current shape's type) and pricing at
+  another type answer `*fit.KVTypeError` naming it, never a price; `Grow` does not grow. The
+  nine names (`f32`, `f16`, `bf16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`) price as
+  before and `""` is still `q4_0`. `plan`'s verdict for such a type says so.
+- **state.json both ways.** `Calib` keeps `fixed_mib`, `cap_ctx_total`, `loads` and `updated`
+  with their meaning and adds `cap_lift` and `readings`, both left out when empty. An older build
+  reads a newer book with all four fields it knew (Go's decoder skips the rest) and drops the new
+  ones when it writes; a newer build reads an older book as a book with no lifts and no
+  readings, which is exactly how it behaved. `TestBookJSONBothWays` holds both.
 - **Room:** `budget = VRAM total - others - game_reserve - margin`. `game_reserve` comes from the
   profile (HermesVoice: 1500 MiB on top of what the game already uses when measured, because a
   loaded save grows it). `margin` = max(512 MiB, 4 % of total), never a guessed fit target.
@@ -318,7 +351,8 @@ cannot send the custom header cross-origin without a preflight that the engine r
 `phase` is one of: `not_installed`, `downloading`, `installing`, `starting`, `loading`,
 `ready`, `resizing`, `sleeping`, `external`, `error`. `progress` is `{done_bytes, total_bytes,
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
-n_cpu_moe, kv_type, vram_mib}`.
+n_cpu_moe, kv_type, vram_mib, vram_basis}`; `vram_basis` is `measured` where `vram_mib` was read
+from the running server, else `predicted`.
 
 ### 7a. First run: a starter model, then the target
 
@@ -512,7 +546,11 @@ taking the engine's downloads, processes or server:
   (the host's reserve, the margin, the largest free block, a processor node as the pool, and a
   field marked unread): §5, "Wants and room another program may state". Unset, each is the
   engine's own behaviour; each refusal is a typed error (`ErrTooBig`, `ErrNoCtxTrain`, `ErrCtxTrainUnder`,
-  `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`).
+  `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`, `*KVTypeError`).
+- **What it says it knows.** Every memory figure is marked predicted or measured, a calibration
+  answers what it did with a reading and by how much the seed is off, a cap carries the room and
+  build it was measured under and is let go by `Book.LetGo`, and an unknown cache type is a typed
+  error: §5, the calibration book.
 - **What it must never do.** Its non-test code imports only pure standard-library packages
   (`errors`, `fmt`, `math`, `sort`, `strconv`, `strings`, `io`, `bufio`, `bytes`,
   `encoding/binary`, `slices`, `maps`, and `time` as a type only): never `os`, `os/exec`, `net`,

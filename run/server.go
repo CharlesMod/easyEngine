@@ -612,6 +612,9 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	oom, _ := ParseOOM(tail)
 	quick := s.cfg.Now().Sub(srv.startedAt) < s.cfg.CrashQuick
 	why := lastLine(tail)
+	if err := srv.proc.Err(); err != nil { // how it ended says more than its last line when it was killed
+		why = fmt.Sprintf("%v; last line: %s", err, why)
+	}
 	s.srv = nil
 	s.ours.set(0)
 	s.mu.Lock()

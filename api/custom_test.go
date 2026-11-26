@@ -174,3 +174,35 @@ func TestStateWithoutCustomLoads(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+// A catalog install while the custom file serves switches back to the catalog model; the file is
+// remembered (status.custom) but no longer serves, and it is never deleted.
+func TestCustomThenCatalogInstallSwitches(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	e.InstallFake()
+	s, srv := serve(t, e, e.Config())
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	dir := t.TempDir()
+	p := testkit.WriteGGUF(t, dir, "mine.gguf", true)
+	if code, out := post(t, srv.URL, "custom/use", jsonPath(p)); code != 202 {
+		t.Fatalf("use: %d %s", code, out)
+	}
+	testkit.WaitFor(t, 15*time.Second, "custom serving", func() bool {
+		st := s.Status()
+		return st.Phase == "ready" && st.Model == "custom:mine"
+	})
+	if code, out := post(t, srv.URL, "install", `{"model":"m1"}`); code != 202 && code != 200 {
+		t.Fatalf("install m1: %d %s", code, out)
+	}
+	testkit.WaitFor(t, 15*time.Second, "m1 serving", func() bool {
+		st := s.Status()
+		return st.Phase == "ready" && st.Model == "m1"
+	})
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("custom file touched: %v", err)
+	}
+	if st := s.Status(); st.Previous != nil {
+		t.Fatalf("previous should be nil for a custom file: %+v", st.Previous)
+	}
+}

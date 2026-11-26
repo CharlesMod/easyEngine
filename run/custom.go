@@ -164,6 +164,10 @@ func (s *Supervisor) UseCustom(path string) error {
 	if err != nil {
 		return errors.New("file not found")
 	}
+	// A background download (first-run upgrade or switch) would swap away from the file later.
+	if err := s.prepareInstall(customID); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if s.jobRunning {
 		s.mu.Unlock()

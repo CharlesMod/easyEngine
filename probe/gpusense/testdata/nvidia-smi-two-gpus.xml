@@ -1,0 +1,50 @@
+<?xml version="1.0" ?>
+<!DOCTYPE nvidia_smi_log SYSTEM "nvsmi_device_v12.dtd">
+<nvidia_smi_log>
+	<timestamp>Thu Nov 26 10:00:00 2026</timestamp>
+	<driver_version>576.80</driver_version>
+	<attached_gpus>2</attached_gpus>
+	<gpu id="00000000:01:00.0">
+		<product_name>NVIDIA GeForce RTX 5080</product_name>
+		<uuid>GPU-aaaaaaaa-1111-2222-3333-444444444444</uuid>
+		<minor_number>0</minor_number>
+		<fb_memory_usage>
+			<total>16303 MiB</total>
+			<reserved>422 MiB</reserved>
+			<used>5120 MiB</used>
+			<free>10200 MiB</free>
+		</fb_memory_usage>
+		<processes>
+			<process_info>
+				<gpu_instance>N/A</gpu_instance>
+				<compute_instance>N/A</compute_instance>
+				<pid>4242</pid>
+				<type>C</type>
+				<process_name>/usr/local/bin/llama-server</process_name>
+				<used_memory>4096 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<pid>5150</pid>
+				<type>C+G</type>
+				<process_name>C:\Games\Voxel\Voxel.exe</process_name>
+				<used_memory>N/A</used_memory>
+			</process_info>
+			<process_info>
+				<pid>977</pid>
+				<type>G</type>
+				<process_name>/usr/lib/xorg/Xorg</process_name>
+				<used_memory>512 MiB</used_memory>
+			</process_info>
+		</processes>
+	</gpu>
+	<gpu id="00000000:02:00.0">
+		<product_name>NVIDIA GeForce RTX 3050</product_name>
+		<uuid>GPU-bbbbbbbb-1111-2222-3333-444444444444</uuid>
+		<fb_memory_usage>
+			<total>6144 MiB</total>
+			<used>N/A</used>
+		</fb_memory_usage>
+		<processes>
+		</processes>
+	</gpu>
+</nvidia_smi_log>

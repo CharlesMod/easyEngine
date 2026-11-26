@@ -1,0 +1,14 @@
+pos:	0
+flags:	02100002
+mnt_id:	27
+ino:	412
+drm-driver:	xe
+drm-client-id:	5
+drm-pdev:	0000:03:00.0
+drm-total-system:	2048 KiB
+drm-shared-system:	0
+drm-resident-system:	1024 KiB
+drm-total-gtt:	8 MiB
+drm-resident-gtt:	4 MiB
+drm-total-vram0:	512 MiB
+drm-resident-vram0:	200 MiB

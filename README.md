@@ -22,6 +22,7 @@ Models in the catalog: `gemma4-rp-maxxed` (16 GB and 12 GB cards), `Gemma 4 E4B`
 
 ```bash
 go vet ./... && go test ./...
+./core-check.sh   # the sizing core in core/, its own module at Go 1.23
 ```
 
 ```bash
@@ -30,6 +31,10 @@ go vet ./... && go test ./...
 
 `build.sh` cross-compiles Linux, Windows and macOS binaries into `dist/<os>-<arch>/`. Tests need no
 GPU and no network; they use a fake llama-server.
+
+The sizing core (footprint, shape chooser, calibration book, GGUF header reader) is a nested Go
+module, `github.com/CharlesMod/easyEngine/core`, that other programs can require by its tag
+(`core/vX.Y.Z`); see docs/ENGINE.md section 13.
 
 ## Docs
 

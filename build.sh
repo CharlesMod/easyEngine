@@ -5,6 +5,7 @@ set -eu
 cd "$(dirname "$0")"
 GO="${GO:-$(command -v go || echo "$HOME/.local/go/bin/go")}"
 VERSION="${1:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
+GO="$GO" ./core-check.sh # the sizing core must still build at Go 1.23 on its own (ENGINE.md section 13)
 OUT=dist
 rm -rf "$OUT"
 mkdir -p "$OUT"

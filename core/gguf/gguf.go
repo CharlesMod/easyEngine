@@ -1,5 +1,9 @@
 // Package gguf reads the header, metadata and tensor table of a GGUF file (v2/v3). It never
 // reads tensor data, so a 10 GB model is described from the first few hundred KiB.
+//
+// It is part of the sizing core (docs/ENGINE.md section 13): it reads from an io.Reader the
+// caller opened (Parse) and must never open a file itself, import os, or import a package of
+// the engine's root module. The engine's plan.ReadInfo opens a path and calls Parse.
 package gguf
 
 import (
@@ -9,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"sort"
 	"strings"
 )
@@ -334,24 +337,6 @@ func (f *File) sizeTensors() {
 			}
 		}
 	}
-}
-
-// Read opens path and returns its Info.
-func Read(path string) (Info, error) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return Info{}, err
-	}
-	defer fh.Close()
-	st, err := fh.Stat()
-	if err != nil {
-		return Info{}, err
-	}
-	f, err := Parse(fh, st.Size())
-	if err != nil {
-		return Info{}, fmt.Errorf("%s: %w", path, err)
-	}
-	return f.Info()
 }
 
 func (f *File) num(key string) (float64, bool) {

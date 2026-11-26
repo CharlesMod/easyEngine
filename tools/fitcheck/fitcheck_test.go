@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/fit"
+	"github.com/CharlesMod/easyEngine/core/fit"
 )
 
 const hdr = "model,slots,ctx_per_slot,ctx_total,kv,n_cpu_moe,status,vram_load,vram_used,rss_load,rss_used,decode_tps,prompt_tps\n"

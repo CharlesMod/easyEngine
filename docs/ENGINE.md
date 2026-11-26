@@ -14,7 +14,8 @@ any OpenAI-compatible endpoint as the alternative, with a Test light.
 ## 1. What it is
 
 One native Go binary, `hermes-engine` (this repo, Go module `hermesengine`, Go 1.27,
-toolchain at `~/.local/go/bin/go`). Cross-compiled for `linux-amd64`, `windows-amd64`,
+toolchain at `~/.local/go/bin/go`; its sizing core is a nested module at Go 1.23 that other
+programs import, §13). Cross-compiled for `linux-amd64`, `windows-amd64`,
 `darwin-arm64` and `darwin-amd64`; no cgo. Not PyInstaller (AV false positives).
 
 It does four jobs:
@@ -103,7 +104,7 @@ wins when its `version` is higher.
 - A model with an empty `url` is **import-only** (`hermes-engine import <path>` copies or
   hard-links a local file after checking its sha256). The mechanism stays for future models
   that are not public. gemma4-rp-maxxed is public on Hugging Face (`cmod/gemma4-rp-maxxed-GGUF`)
-  and downloads like any other entry; `fit.Verdict.import_only` is true only for entries
+  and downloads like any other entry; `plan.Verdict.import_only` is true only for entries
   without a `url`.
 - The KV cost follows the architecture: MLA models (bailingmoe3) cache one latent per token
   (`kv_lora_rank + rope dims`, no V) on their full-attention layers; linear-attention/SSM layers
@@ -157,9 +158,11 @@ for any vendor. Every source is behind an interface with a fake for tests.
 llama-server's own use, from `nvidia-smi --query-compute-apps` when available, else from the
 calibration book).
 
-## 5. The ctx balancer (`fit`)
+## 5. The ctx balancer (`core/fit`, `plan`)
 
-A generic port of the hive's measure-then-try launcher
+The footprint, the room and the choice of a shape are the sizing core's `fit` (§13); the
+verdicts over the whole catalog, the room built from the probe and the speed scale are the
+engine's `plan`. A generic port of the hive's measure-then-try launcher
 (`~/hive-mind/serve/bin/hive-mind-llm-run`, design in
 `~/.local/share/sprinter-llm/WORKLOG-adaptive-ctx.md`), with the machine-specific constants
 replaced by numbers from the GGUF header and a calibration book. Pure functions; the runtime
@@ -462,6 +465,9 @@ hermes-engine version
   reports `/health` 503→200, can be told to OOM at load or at run time and to be busy on
   `/slots`. Lifecycle tests: parent death stops children; second `serve` attaches; stale pids
   killed.
+- The sizing core (`core/`) is its own module, so the root's `go test ./...` does not reach it:
+  `./core-check.sh` (run first by `build.sh`) tests it, and builds and vets it for Linux,
+  Windows and macOS, at its own go line (§13).
 - A purity test: no source file contains `rimworld`/`RimWorld`/`pawn`/`colon`
   (case-insensitive), as the agent core's test does.
 - `Mod.Tests`: EngineClient against a fake engine; launcher binary choice per platform; profile
@@ -475,3 +481,49 @@ hermes-engine version
 
 - Signing and notarising the binaries (needs the keeper's certificates); a tray icon; Player2 as a provider; Steam
   launch-option wrappers.
+
+## 13. The sizing core (`core/`)
+
+The footprint model, the shape chooser, the calibration book and the GGUF header reader are a
+Go module of their own, so another program can size a model exactly as the engine does without
+taking the engine's downloads, processes or server:
+
+- Module `github.com/CharlesMod/easyEngine/core` in `core/`, with its own `go 1.23` line and **no
+  `require` at all**. Packages: `core/fit` (Seed, SeedFromBytes, Choose, MissRetry, StepDown,
+  Grow, Args, the Book) and `core/gguf` (Parse and Info).
+- **What it must never do.** Its non-test code imports only pure standard-library packages
+  (`errors`, `fmt`, `math`, `sort`, `strconv`, `strings`, `io`, `bufio`, `bytes`,
+  `encoding/binary`, `slices`, `maps`, and `time` as a type only): never `os`, `os/exec`, `net`,
+  `syscall`, `unsafe`, `log`, and never a package of the engine's root module. It never reads the
+  clock or arms a timer (`Book.Calibrate` and `Book.LowerCap` take the stamp from the caller),
+  never logs (`fit.Seed` returns its notes beside the footprint), and never opens a file or
+  runs a process (`gguf.Parse` takes an `io.Reader` and the file's size). `core/fit`'s
+  `TestCoreStaysPure` reads the core's own source and `go.mod` and fails on any of these, on a
+  raised go line, and on a `require`.
+- **Checked at Go 1.23.** `./core-check.sh` (run first by `build.sh`) refuses a go line other
+  than 1.23, runs the core's tests, and builds and vets it with `GOOS` set to `linux`, `windows`
+  and `darwin`. vet's `stdversion` check reports a standard-library call newer than the go line
+  even on a newer toolchain. It never fetches a toolchain (`GOTOOLCHAIN=local`).
+- **What left `fit` and `gguf`, and where it went.** The engine's package `plan` holds the
+  planner of a whole catalog (`Plan`, `PlanWith`, `PlanResult`, `Verdict`, `RoomFor`, the
+  CPU-only pick, the 2048 MiB least usable card), the footprint from a catalog's measured block
+  (`FromMeasured`, `SeedFromSize`, which falls back to the core's `SeedFromBytes`), the speed
+  scale (`SpeedScaleFor`, `OtherHardwareSpeed`), `Seed` (the core's, with its notes logged) and
+  `ReadInfo`, which opens a model file and hands it to `gguf.Parse`. `catalog.TPSPoint` is the
+  core's `fit.TPSPoint`, so `catalog.json` decodes as before. `run`, `tools/fitcheck` and
+  `internal/testkit` import the core by its path; `catalog`, `probe` and `dirs` stay outside it.
+- **In this repository** the root requires the core and points the requirement at the
+  directory (`go.mod`: `require github.com/CharlesMod/easyEngine/core v0.1.0` and
+  `replace github.com/CharlesMod/easyEngine/core => ./core`), so a plain checkout builds offline
+  with no `go.sum` line for it. The root's `./...` does not include
+  `core/`. Because of the `replace`, the engine itself is built from a checkout (`build.sh`), not
+  with `go install` of the root module.
+- **Tagging.** A version of the core is a tag with the directory as its prefix:
+  `git tag core/v0.1.0 && git push origin core/v0.1.0` (the tag names a commit whose `core/` is
+  that version; v0 and v1 take no `/vN` suffix in the path). Keep the root's `require` line on
+  the newest tag. A change to the core is made here, under the core's tests, and tagged; every
+  program that moves its own requirement then has it.
+- **Another program** requires it as any module: `require github.com/CharlesMod/easyEngine/core
+  v0.1.0` (its `go.sum` gets the module's hash on the first fetch), imports
+  `github.com/CharlesMod/easyEngine/core/fit` and `.../core/gguf`, and needs only Go 1.23. With
+  the module cache filled once (or a vendor directory), it builds with no network.

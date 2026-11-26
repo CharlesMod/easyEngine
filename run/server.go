@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 	"hermesengine/lifecycle"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -41,7 +42,7 @@ func (s *Supervisor) room(ctx context.Context, hw probe.Hardware, ourPIDs []int)
 		s.mu.Unlock()
 		if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
 			if m, ok := cat.Model(id); ok {
-				r.SpeedScale = fit.SpeedScaleFor(g.Name, m.Footprint)
+				r.SpeedScale = plan.SpeedScaleFor(g.Name, m.Footprint)
 			}
 		}
 		r.VRAMTotal = g.VRAMTotalMiB
@@ -159,7 +160,7 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			next, err = fit.StepDown(lc.fp, shape, room, w)
 			if err == nil {
 				s.mu.Lock()
-				s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot)
+				s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot, time.Now())
 				s.mu.Unlock()
 				s.save()
 			}
@@ -278,7 +279,7 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 	}
 	srv.measured = m
 	s.mu.Lock()
-	ok := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m)
+	ok := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m, time.Now())
 	s.mu.Unlock()
 	s.logf("calibrate: measured %d MiB, accepted=%v", m, ok)
 	if ok {
@@ -471,7 +472,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
 		s.mu.Lock()
-		s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot)
+		s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot, time.Now())
 		s.mu.Unlock()
 		s.save()
 		shape = next
@@ -516,7 +517,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 		s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
 		if res.oom {
 			s.mu.Lock()
-			s.st.Book.LowerCap(lc.key, to.Slots*to.CtxPerSlot-1024*to.Slots)
+			s.st.Book.LowerCap(lc.key, to.Slots*to.CtxPerSlot-1024*to.Slots, time.Now())
 			s.mu.Unlock()
 			s.save()
 		}

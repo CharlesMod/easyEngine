@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 	"hermesengine/probe"
 	"hermesengine/run"
 )

@@ -977,6 +977,9 @@ type Calib struct {
 	// Lift is what lets CapCtxTotal go (Book.LetGo). Every cap this build lowers carries one; a
 	// cap an older build lowered has none until the first LetGo records it.
 	Lift *CapLift `json:"cap_lift,omitempty"`
+	// Under is the caps this one was lowered beneath, latest last, each with its own lift: where
+	// LetGo lets CapCtxTotal go it falls back to the latest of these that still stands.
+	Under []HeldCap `json:"cap_under,omitempty"`
 	// Readings is the card memory each shape that came up held, one per shape, whether or not
 	// its reading was taken for the fixed part (Book.Mark).
 	Readings []Reading `json:"readings,omitempty"`
@@ -991,6 +994,17 @@ type CapLift struct {
 	MissMiB int    `json:"miss_mib"`
 	NoGPU   bool   `json:"no_gpu,omitempty"`
 	Build   string `json:"build"`
+}
+
+// HeldCap is an earlier cap kept beneath a lower one, with the lift it was measured under.
+type HeldCap struct {
+	CapCtxTotal int     `json:"cap_ctx_total"`
+	Lift        CapLift `json:"cap_lift"`
+}
+
+// lifted reports whether room and build, as they stand now, let a cap measured under l go.
+func (l CapLift) lifted(room Room, build string) bool {
+	return l.Build != build || (l.NoGPU == room.NoGPU && capRoom(room) > l.RoomMiB+l.MissMiB)
 }
 
 // Reading is the card memory one shape held when its load came up, read by its process.
@@ -1160,6 +1174,15 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 	}
 	e := b.Entries[key]
 	if ctxTotal > 0 && (e.CapCtxTotal == 0 || ctxTotal < e.CapCtxTotal) {
+		if e.CapCtxTotal > 0 {
+			// The cap moved from keeps its own lift beneath; a new slice, as a copy of the book
+			// handed to a writer may still hold the old one.
+			l := CapLift{RoomMiB: capRoom(room), NoGPU: room.NoGPU, Build: build}
+			if e.Lift != nil {
+				l = *e.Lift
+			}
+			e.Under = append(append(make([]HeldCap, 0, len(e.Under)+1), e.Under...), HeldCap{e.CapCtxTotal, l})
+		}
 		e.CapCtxTotal = ctxTotal
 		miss := 0
 		ft, err := fp, error(nil) // a footprint naming no type is taken as given, as the walk does
@@ -1184,7 +1207,9 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 // where one does, what would lift it, never nothing. A cap an older book holds recorded nothing it
 // was measured under: the first LetGo records room and build as they stand then (miss 0), so from
 // there any larger room or another build lifts it, and until then it stands as it always did.
-// With no cap: false, nil. A cap let go takes its lift with it; the fixed part and the readings
+// A cap let go takes its lift with it and the latest earlier cap (Calib.Under) that still stands
+// takes its place, with its own lift, so a shape that ran out of memory in a room never comes back
+// in that room; those lifted go too. With no cap left: false, nil. The fixed part and the readings
 // stay.
 func (b *Book) LetGo(key string, room Room, build string) (stands bool, lift *CapLift) {
 	if b == nil {
@@ -1200,11 +1225,21 @@ func (b *Book) LetGo(key string, room Room, build string) (stands bool, lift *Ca
 		e.Lift = l
 		b.Entries[key] = e
 	}
-	if l.Build == build && (l.NoGPU != room.NoGPU || capRoom(room) <= l.RoomMiB+l.MissMiB) {
+	if !l.lifted(room, build) {
 		c := *l
 		return true, &c
 	}
 	e.CapCtxTotal, e.Lift = 0, nil
+	for i := len(e.Under) - 1; i >= 0; i-- {
+		if h := e.Under[i]; !h.Lift.lifted(room, build) {
+			c := h.Lift
+			e.CapCtxTotal, e.Lift = h.CapCtxTotal, &c
+			e.Under = e.Under[:i:i] // capped: a later LowerCap never writes into a slice a copy holds
+			b.Entries[key] = e
+			return true, &h.Lift
+		}
+	}
+	e.Under = nil
 	b.Entries[key] = e
 	return false, nil
 }

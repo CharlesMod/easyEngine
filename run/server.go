@@ -85,6 +85,9 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	case was.CapCtxTotal > 0 && !stands:
 		s.logf("ctx cap %d let go: the room grew past what it missed by, or the engine build moved", was.CapCtxTotal)
 		s.save()
+	case stands && fp.CapCtxTotal != was.CapCtxTotal: // let go to an earlier cap that still stands
+		s.logf("ctx cap %d let go; the earlier cap %d stands, lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, fp.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
+		s.save()
 	case stands && was.Lift == nil: // an older book's cap now records the room and build it stands under
 		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
 		s.save()

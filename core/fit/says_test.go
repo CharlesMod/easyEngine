@@ -189,6 +189,37 @@ func TestCapNamesWhatLiftsIt(t *testing.T) {
 	if stands, l := b.LetGo("k", at, "cuda@b1"); stands || l != nil {
 		t.Error("no cap, yet one stands")
 	}
+
+	// Two out-of-memory events, in room A and then in the smaller room B: each cap keeps its own
+	// lift, and letting the later one go falls back to the earlier one where its own lift is unmet.
+	small := room(16303, 5000, 24000)
+	seq := []struct {
+		name   string
+		now    func(missA int) Room
+		build  string
+		cap    int // the cap that stands after LetGo; 0: none
+		roomOf Room
+	}{
+		{"still in room B", func(int) Room { return small }, "cuda@b1", 98304, small},
+		{"back in room A", func(int) Room { return at }, "cuda@b1", 150000, at},
+		{"past room A by more than its miss", func(m int) Room { r := at; r.Others -= m + 1; return r }, "cuda@b1", 0, Room{}},
+		{"another build", func(int) Room { return small }, "cuda@b2", 0, Room{}},
+	}
+	for _, c := range seq {
+		var b Book
+		b.LowerCap("k", ref, failed, 150000, at, "cuda@b1", stamp)
+		missA := b.Entries["k"].Lift.MissMiB
+		b.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 49152, KVType: "q4_0"}, 98304, small, "cuda@b1", stamp)
+		stands, l := b.LetGo("k", c.now(missA), c.build)
+		got := b.Footprint("k", ref).CapCtxTotal
+		if got != c.cap || stands != (c.cap > 0) {
+			t.Errorf("%s: stands %v cap %d, want %d", c.name, stands, got, c.cap)
+			continue
+		}
+		if stands && (l == nil || l.RoomMiB != capRoom(c.roomOf) || *l != *b.Entries["k"].Lift) {
+			t.Errorf("%s: a standing cap %d says %+v", c.name, got, l)
+		}
+	}
 }
 
 // An unknown cache type name is a typed error from every entry that takes one; the known names
@@ -267,6 +298,7 @@ func TestBookJSONBothWays(t *testing.T) {
 	var nb Book
 	nb.Calibrate("k", ref, Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}, 12500, stamp)
 	nb.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}, 150000, room(16303, 600, 24000), "b1", stamp)
+	nb.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 49152, KVType: "q4_0"}, 98304, room(16303, 2600, 24000), "b1", stamp)
 	j, err := json.Marshal(nb)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +310,15 @@ func TestBookJSONBothWays(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, o := nb.Entries["k"], ob.Entries["k"]
-	if o.FixedMiB != e.FixedMiB || o.CapCtxTotal != 150000 || o.Loads != 1 || !o.Updated.Equal(stamp) {
+	if o.FixedMiB != e.FixedMiB || o.CapCtxTotal != 98304 || o.Loads != 1 || !o.Updated.Equal(stamp) {
 		t.Errorf("the older reader saw %+v of %+v", o, e)
+	}
+	// The newer reader keeps the earlier cap beneath, with its lift.
+	var rb Book
+	if err := json.Unmarshal(j, &rb); err != nil {
+		t.Fatal(err)
+	}
+	if r := rb.Entries["k"]; r.CapCtxTotal != 98304 || *r.Lift != *e.Lift || len(r.Under) != 1 || r.Under[0] != e.Under[0] || r.Under[0].CapCtxTotal != 150000 {
+		t.Errorf("the newer reader saw %+v of %+v", r, e)
 	}
 }

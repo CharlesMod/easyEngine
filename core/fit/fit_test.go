@@ -453,7 +453,7 @@ func TestReferenceFromFile(t *testing.T) {
 }
 
 func TestJSONTags(t *testing.T) {
-	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}, CapLift{}, Reading{}, Calibration{}} {
+	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}, CapLift{}, HeldCap{}, Reading{}, Calibration{}} {
 		rt := reflect.TypeOf(v)
 		for i := 0; i < rt.NumField(); i++ {
 			if rt.Field(i).Tag.Get("json") == "" {

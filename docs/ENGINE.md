@@ -210,7 +210,10 @@ loop lives in `run`.
   kept the ctx and moved experts) and the engine build. `Book.LetGo(key, room, build)`, with the
   room and build as they stand now, lets the cap go where the room is larger by more than the
   miss (any larger room for a miss of 0; of the same kind) or the build is another, and otherwise
-  answers that it stands and its `CapLift`, never a standing cap with nothing named. With
+  answers that it stands and its `CapLift`, never a standing cap with nothing named. A cap
+  lowered beneath another keeps the one it moved from, with that one's own lift, in `cap_under`
+  (`HeldCap`); letting the lower cap go falls back to the latest earlier cap that still stands,
+  so a room back where an earlier out-of-memory was measured keeps that earlier cap. With
   neither changed the cap stands exactly as before. A cap from an older book recorded nothing:
   the first `LetGo` (or `LowerCap`) records the room and build as they stand then, and it lifts
   from there as any other. In the engine the build is the backend id and the sha256 of the
@@ -223,7 +226,8 @@ loop lives in `run`.
   nine names (`f32`, `f16`, `bf16`, `q8_0`, `q5_1`, `q5_0`, `q4_1`, `q4_0`, `iq4_nl`) price as
   before and `""` is still `q4_0`. `plan`'s verdict for such a type says so.
 - **state.json both ways.** `Calib` keeps `fixed_mib`, `cap_ctx_total`, `loads` and `updated`
-  with their meaning and adds `cap_lift` and `readings`, both left out when empty. An older build
+  with their meaning and adds `cap_lift`, `cap_under` and `readings`, each left out when empty
+  (`cap_ctx_total` is always the cap that stands, the lowest). An older build
   reads a newer book with all four fields it knew (Go's decoder skips the rest) and drops the new
   ones when it writes; a newer build reads an older book as a book with no lifts and no
   readings: its caps stand as before until the first `LetGo` records what lifts them. `TestBookJSONBothWays` holds both.

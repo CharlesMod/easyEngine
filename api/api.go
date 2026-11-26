@@ -132,6 +132,9 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 	ctx := r.Context()
+	if strings.HasPrefix(name, "custom/") && a.customRoute(w, r, ctx, name, need) {
+		return
+	}
 	switch name {
 	case "status":
 		if need("GET") {

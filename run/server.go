@@ -42,12 +42,15 @@ func (s *Supervisor) room(ctx context.Context, hw probe.Hardware, ourPIDs []int)
 		id := s.st.Model
 		s.mu.Unlock()
 		if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
-			if m, ok := cat.Model(id); ok {
+			if m, ok := s.modelFor(cat, id); ok {
 				r.SpeedScale = plan.SpeedScaleFor(g.Name, m.Footprint)
 			}
 		}
 		r.VRAMTotal = g.VRAMTotalMiB
 		r.Margin = fit.DefaultMargin(g.VRAMTotalMiB)
+		if s.customEstimated() { // no measurement behind the footprint: a wider margin
+			r = plan.WithCustomMargin(r)
+		}
 		if o, err := s.cfg.Others(ctx, g, ourPIDs); err == nil {
 			r.Others = o
 		} else {
@@ -102,6 +105,9 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 // startLocked chooses a shape and loads it. opMu must be held.
 func (s *Supervisor) startLocked() error {
 	if _, ok := s.resolveInstall(); !ok {
+		if s.customMissingPhase() {
+			return nil
+		}
 		// a failed or running install job owns the phase; do not paint over it
 		s.mu.Lock()
 		busy := s.jobRunning || s.phase == "error" || s.phase == "downloading" || s.phase == "installing"

@@ -419,6 +419,41 @@ download is `upgrade.progress`. `status.model` is the id of the model answering 
 shows its "simpler speech" notice when `model_tier == "starter"`, and a progress bar from
 `upgrade.progress` when `model_stage` is `target_downloading`.
 
+### 7b. Your own GGUF file (`custom/*`)
+
+The engine can serve a local GGUF file in place. The file is never copied, moved or deleted (not by
+`custom/clear`, not by any cleanup); `state.custom.path` lies outside `models/`.
+
+- `POST custom/check {path}` -> 200 `CustomCheck`: `ok`, `error` ("file not found", "not a GGUF file",
+  "header unreadable: ..."), `path`, `name` (base name without `.gguf`), `size`, `arch`, `params`
+  (sum of tensor elements), `ctx_train`, `quant` (from `general.file_type`), `moe`, `known`,
+  `estimated`, `fits` (`yes|tight|no`), `why`, `shape`, `est_vram_mib`, `est_ram_mib`,
+  `est_decode_tps`, `chat_template`. Reads the header only; nothing is stored.
+- `POST custom/use {path}` -> 202 `{started:true}` | 400 `{error}` | 409 (an install job runs). Saves
+  `state.custom = {path, name, size, mtime}` and `state.model = "custom"` (the catalog model it
+  replaced is kept as `custom_prev`), stops the running server and loads the file in the background.
+- `POST custom/clear {}` -> 200. Forgets the file; the `custom_prev` model serves again when installed,
+  else `not_installed`.
+
+Serving: alias `custom:<name>`, `--jinja` and the other fixed flags as for any model. Footprint: a
+catalog model with a measured footprint whose file has exactly the same byte size lends its measured
+footprint and sampler profiles (the catalog records no arch/params/quant, and a ten GB hash is not
+cheap), and the check reports `known: true`. Otherwise the footprint is the header seed (`fit.Seed`),
+`estimated: true`, and the room is narrowed by an extra 768 MiB margin (`plan.CustomExtraMarginMiB`).
+The ctx balancer and verdicts are those of a catalog model. Sampler: a catalog model matched by size
+or by name lends its profiles; else the generic rp values (temperature 1.0, top_k 64, top_p 0.95,
+min_p 0) as both `official` and `rp`. The calibration book keys on `custom-<hash of path+size+mtime>`
+instead of a sha256.
+
+Status: `custom` is `{path, name, size, missing}` or null; `model` is `"custom:<name>"` while it
+serves; `model_name` is the human name of the selected model (the catalog name, or the file name).
+`GET plan` gains `custom` (a `CustomCheck` of the current file, or null).
+
+A missing file (at `custom/use`, at engine start, at restart or by the watchdog): `custom/use` answers
+400 "file not found"; an engine start or restart goes to phase `error`, message
+`Model file not found: <path>`, with no retry; `custom/use` with another path or `custom/clear`
+recovers.
+
 ### Proxy
 
 Every other path (`/v1/*`, `/completion`, `/slots`, `/props`, `/health`, `/metrics`, `/tokenize`, …)

@@ -78,6 +78,11 @@ func (s *Supervisor) samplerLocked() SamplerInfo {
 		info.Basis = "local"
 		if s.st.Model == "" {
 			info.Note = "no model selected"
+		} else if s.st.Model == customID {
+			m, ok = s.customModelLocked(cat)
+			if !ok {
+				info.Note = "custom file not set: requests pass through untouched"
+			}
 		} else if cat != nil {
 			if m, ok = cat.Model(s.st.Model); !ok {
 				info.Note = fmt.Sprintf("model %q is not in the catalog: requests pass through untouched", s.st.Model)

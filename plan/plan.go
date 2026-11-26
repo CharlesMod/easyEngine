@@ -75,6 +75,8 @@ type PlanResult struct {
 	Recommended string    `json:"recommended"`
 	Backend     string    `json:"backend"`
 	Models      []Verdict `json:"models"`
+	// Custom is the verdict on the user's own GGUF file, or nil when none is set.
+	Custom *CustomCheck `json:"custom"`
 }
 
 // RoomFor derives the planning room from the probed hardware: the GPU with the most memory,

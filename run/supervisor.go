@@ -84,6 +84,10 @@ type Status struct {
 	ModelNote     string `json:"model_note,omitempty"`
 	// Sampler is the sampler policy mode and the profiles in force (docs/SAMPLERS.md).
 	Sampler SamplerInfo `json:"sampler"`
+	// ModelName is the human name of the selected model; Custom is the user's own GGUF file
+	// (nil when none is set). While it serves, Model is "custom:<name>".
+	ModelName string      `json:"model_name"`
+	Custom    *CustomInfo `json:"custom"`
 }
 
 // Parent is a watched parent process.
@@ -270,6 +274,7 @@ func (s *Supervisor) Status() Status {
 	}
 	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
+	s.customStatusLocked(&st)
 	return st
 }
 
@@ -390,7 +395,9 @@ func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	if err != nil {
 		return plan.PlanResult{}, err
 	}
-	return plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
+	res := plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
+	s.planCustom(&res, cat, hw)
+	return res, nil
 }
 
 func (s *Supervisor) modelPath(m catalog.Model) string { return filepath.Join(s.dir, "models", m.File) }
@@ -441,9 +448,23 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 	if err != nil {
 		return install{}, false
 	}
-	m, ok := cat.Model(id)
-	if !ok || !s.modelInstalled(m) {
-		return install{}, false
+	var m catalog.Model
+	var mpath string
+	if id == customID {
+		cm, ok := s.customModel(cat)
+		if !ok {
+			return install{}, false
+		}
+		if st, err := os.Stat(cm.File); err != nil || st.IsDir() {
+			return install{}, false
+		}
+		m, mpath = cm, cm.File
+	} else {
+		var ok bool
+		if m, ok = cat.Model(id); !ok || !s.modelInstalled(m) {
+			return install{}, false
+		}
+		mpath = s.modelPath(m)
 	}
 	bin := findServer(filepath.Join(s.dir, "backends", be))
 	if bin == "" {
@@ -453,7 +474,7 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 	if sha, err := os.ReadFile(filepath.Join(s.dir, "backends", be, ".installed")); err == nil && len(sha) > 0 {
 		build = be + "@" + strings.TrimSpace(string(sha))
 	}
-	return install{model: m, modelPath: s.modelPath(m), bin: bin, backend: be, build: build}, true
+	return install{model: m, modelPath: mpath, bin: bin, backend: be, build: build}, true
 }
 
 // ---- proxy helpers ------------------------------------------------------------------------
@@ -534,7 +555,9 @@ func (s *Supervisor) settle() {
 		return
 	}
 	if _, ok := s.resolveInstall(); !ok {
-		s.setPhase("not_installed", "No model installed")
+		if !s.customMissingPhase() {
+			s.setPhase("not_installed", "No model installed")
+		}
 		return
 	}
 	if stopped {
@@ -598,7 +621,7 @@ func (s *Supervisor) Stop() error {
 	if s.Status().Mode == "local" {
 		if _, ok := s.resolveInstall(); ok {
 			s.setPhase("sleeping", "Stopped")
-		} else {
+		} else if !s.customMissingPhase() {
 			s.setPhase("not_installed", "No model installed")
 		}
 	}

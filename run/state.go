@@ -29,8 +29,13 @@ type State struct {
 	Target string `json:"target,omitempty"`
 	// StarterOwned is the starter model this engine downloaded only to bridge a first run. It is
 	// deleted once the target serves; a model that was already on disk is never deleted.
-	StarterOwned string   `json:"starter_owned,omitempty"`
-	Book         fit.Book `json:"book"`
+	StarterOwned string `json:"starter_owned,omitempty"`
+	// Custom is the user's own GGUF file, served in place while Model is "custom" (run/custom.go).
+	// Its path is outside models/ and nothing here ever copies, moves or deletes it.
+	Custom *CustomFile `json:"custom,omitempty"`
+	// CustomPrev is the catalog model that was selected before the custom file, for custom/clear.
+	CustomPrev string   `json:"custom_prev,omitempty"`
+	Book       fit.Book `json:"book"`
 }
 
 func (s *State) defaults() {

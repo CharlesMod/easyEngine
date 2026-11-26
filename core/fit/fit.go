@@ -288,6 +288,9 @@ type Shape struct {
 func (s Shape) CtxTotal() int { return s.Slots * s.CtxPerSlot }
 
 // Norm is w with every default filled in and every bound made consistent: what Choose plans with.
+// CtxMax is taken down to the step of context (1024 tokens); CtxFloor is kept exactly as asked,
+// on the step or not (never under 1024), and where it is above CtxMax, CtxMax is the floor. So a
+// shape planned from it never holds less context per slot than the floor asked.
 func (w Wants) Norm() Wants {
 	if w.Slots < 1 {
 		w.Slots = 1
@@ -305,7 +308,6 @@ func (w Wants) Norm() Wants {
 		w.CtxFloor = 8192
 	}
 	w.CtxMax = alignDown(w.CtxMax)
-	w.CtxFloor = alignDown(w.CtxFloor)
 	if w.CtxFloor < alignTokens {
 		w.CtxFloor = alignTokens
 	}
@@ -886,7 +888,8 @@ func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 	return s
 }
 
-// ctxCeiling is the largest 1024-aligned ctx per slot allowed by wants and the book's cap.
+// ctxCeiling is the largest ctx per slot allowed by wants and the book's cap: aligned, or the
+// floor itself where CtxMax is the floor; under the floor where the cap is (no shape then).
 func (fp fig) ctxCeiling(w Wants, slots int) int {
 	c := w.CtxMax
 	if fp.CapCtxTotal > 0 {
@@ -897,14 +900,18 @@ func (fp fig) ctxCeiling(w Wants, slots int) int {
 	return c
 }
 
-// maxCtx finds the largest aligned ctx per slot in [floor, ceiling] with ok(ctx) true; ok must
-// be monotone (true for small ctx).
+// maxCtx finds the largest aligned ctx per slot in [floor, ceiling] with ok(ctx) true, or the
+// floor itself where ok holds there and at no aligned ctx above it (a floor off the step). It
+// never answers under the floor. ok must be monotone (true for small ctx).
 func maxCtx(floor, ceiling int, ok func(ctx int) bool) (int, bool) {
 	if ceiling < floor || !ok(floor) {
 		return 0, false
 	}
-	lo, hi := floor/alignTokens, ceiling/alignTokens // lo ok
-	for lo < hi {
+	lo, hi := (floor+alignTokens-1)/alignTokens, ceiling/alignTokens // the aligned ctx in [floor, ceiling]
+	if lo > hi || !ok(lo*alignTokens) {
+		return floor, true
+	}
+	for lo < hi { // lo ok
 		mid := (lo + hi + 1) / 2
 		if ok(mid * alignTokens) {
 			lo = mid
@@ -1058,8 +1065,8 @@ func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed boo
 				return fp.vram(slots, c, n) <= budget && (block <= 0 || fp.largest(slots, c, n) <= block)
 			}
 		}
-		// (1) all on GPU at the largest ctx.
-		if ctx, ok := maxCtx(ceil, ceil, okAt(0)); ok {
+		// (1) all on GPU at the largest ctx, never under the floor (a cap may put ceil there).
+		if ctx, ok := maxCtx(max(ceil, w.CtxFloor), ceil, okAt(0)); ok {
 			return fp.shape(w, slots, ctx, 0, false), nil
 		}
 		// (2) ctx per slot down to half the largest.
@@ -1209,7 +1216,11 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	// The next type's shape: no more slots or ctx per slot than cur, no more memory than cur needs.
 	w.Slots = min(w.Slots, cur.Slots)
 	w.MinSlots = min(w.MinSlots, w.Slots)
-	w.CtxMax = min(w.CtxMax, alignDown(cur.CtxPerSlot))
+	c := alignDown(cur.CtxPerSlot)
+	if c < w.CtxFloor {
+		c = cur.CtxPerSlot // cur at a floor off the step: the next type holds that floor exactly
+	}
+	w.CtxMax = min(w.CtxMax, c)
 	budget, hostRAM := st.room.budget, ram
 	if cur.CPUOnly {
 		hostRAM = min(hostRAM, f.need(cur))

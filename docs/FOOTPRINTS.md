@@ -64,6 +64,13 @@ vocab buffers scale with vocabulary size; a compute buffer grows with ctx (0.44 
 `window + ubatch`; MoE offload adds a fixed scheduling buffer; the old CUDA-context and scratch guesses were
 replaced by 135 MiB base overhead and 58 MiB runtime. All constants are global, none per model.
 
+These constants are the core's default set (`fit.DefaultConsts`: backend `cuda@b12680`, card
+`RTX 5080, 16303 MiB`), each with a word of where it was read. They hold for this build and this card:
+the base a start takes before any buffer reads 168 to 220 MiB on a 4 GB card with another build. A
+caller that has read its own gives them as a `fit.Consts` set to `fit.SeedWith`; every footprint and
+shape says which set built it, so a figure from the default set on another card is a prediction. A
+fixed part the book worked out from a reading is laid only on a seed of the set it was worked out under.
+
 ## Measured but not shipped
 
 Ling 3.0-tiny (Q4_K_M, bailingmoe3: MLA plus linear attention, 4.76 GB, MoE with 23 expert layers) was

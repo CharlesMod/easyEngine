@@ -1,13 +1,13 @@
 package fit
 
-import (
-	"sort"
+import "sort"
 
-	"hermesengine/catalog"
-)
-
-// TPSPoint is a measured per-stream decode speed with n expert layers on the CPU.
-type TPSPoint = catalog.TPSPoint
+// TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU. The
+// catalog's measured block holds the same type, so its JSON form is fixed here.
+type TPSPoint struct {
+	NCpuMoe int     `json:"n_cpu_moe"`
+	TPS     float64 `json:"tps"`
+}
 
 // TPSCurve is decode speed (tokens/s per stream, 3 slots decoding at once, so a lower bound for
 // fewer slots) against --n-cpu-moe, measured on one reference machine.

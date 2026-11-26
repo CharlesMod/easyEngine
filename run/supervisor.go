@@ -16,9 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 	"hermesengine/lifecycle"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -41,6 +42,9 @@ type ShapeInfo struct {
 	NCpuMoe    int    `json:"n_cpu_moe"`
 	KVType     string `json:"kv_type"`
 	VRAMMiB    int    `json:"vram_mib"`
+	// VRAMBasis says whether VRAMMiB was read from the running server (measured) or is the
+	// planner's figure (predicted).
+	VRAMBasis fit.Basis `json:"vram_basis"`
 }
 
 // ExternalInfo is the external endpoint without its key.
@@ -114,6 +118,7 @@ type server struct {
 	shape     fit.Shape
 	key       string
 	fp        fit.Footprint
+	seed      fit.Footprint // the header's seed, which every reading is held to (never fp)
 	startedAt time.Time
 	misses    int
 	idleCount int
@@ -376,16 +381,16 @@ func (s *Supervisor) wantsFor(key string) fit.Wants {
 }
 
 // Plan is GET /engine/v1/plan.
-func (s *Supervisor) Plan(ctx context.Context) (fit.PlanResult, error) {
+func (s *Supervisor) Plan(ctx context.Context) (plan.PlanResult, error) {
 	hw, err := s.Hardware(ctx, false)
 	if err != nil {
-		return fit.PlanResult{}, err
+		return plan.PlanResult{}, err
 	}
 	cat, err := s.catalog()
 	if err != nil {
-		return fit.PlanResult{}, err
+		return plan.PlanResult{}, err
 	}
-	return fit.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
+	return plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled), nil
 }
 
 func (s *Supervisor) modelPath(m catalog.Model) string { return filepath.Join(s.dir, "models", m.File) }
@@ -419,6 +424,10 @@ type install struct {
 	modelPath string
 	bin       string
 	backend   string
+	// build is the engine build a cap is measured with: the backend id and the sha256 of the
+	// archive installed under it (its .installed marker), so a new llama.cpp build installed under
+	// the same id is another build. With no marker read, the id alone.
+	build string
 }
 
 func (s *Supervisor) resolveInstall() (install, bool) {
@@ -440,7 +449,11 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 	if bin == "" {
 		return install{}, false
 	}
-	return install{model: m, modelPath: s.modelPath(m), bin: bin, backend: be}, true
+	build := be
+	if sha, err := os.ReadFile(filepath.Join(s.dir, "backends", be, ".installed")); err == nil && len(sha) > 0 {
+		build = be + "@" + strings.TrimSpace(string(sha))
+	}
+	return install{model: m, modelPath: s.modelPath(m), bin: bin, backend: be, build: build}, true
 }
 
 // ---- proxy helpers ------------------------------------------------------------------------

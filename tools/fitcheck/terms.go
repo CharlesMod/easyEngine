@@ -8,8 +8,8 @@ import (
 	"os"
 	"sort"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 )
 
 // Reference shape of the speed rows: 3 slots x 65536, q4_0.
@@ -167,7 +167,11 @@ func fitModel(id string, rows []Row) (*Fit, error) {
 	// (f16) takes the per-slot cost from the line through the other types' per-slot costs
 	// against bytes per element, and fits only the per-ctx slope.
 	type kvPoint struct{ b, s float64 }
-	pts := []kvPoint{{fit.KVBytes(refKV), x[2]}}
+	bRef, err := fit.KVBytes(refKV)
+	if err != nil {
+		return nil, err
+	}
+	pts := []kvPoint{{bRef, x[2]}}
 	var one []string
 	for _, kv := range []string{"q8_0", "f16"} {
 		var Ak [][]float64
@@ -192,7 +196,11 @@ func fitModel(id string, rows []Row) (*Fit, error) {
 				xk = []float64{xk[0], 0}
 			}
 			fp.MiBPer1kCtx[kv], fp.StateMiBPerSlot[kv] = xk[0], xk[1]
-			pts = append(pts, kvPoint{fit.KVBytes(kv), xk[1]})
+			bk, err := fit.KVBytes(kv)
+			if err != nil {
+				return nil, err
+			}
+			pts = append(pts, kvPoint{bk, xk[1]})
 		case len(Ak) == 1:
 			one = append(one, kv)
 		}
@@ -204,7 +212,10 @@ func fitModel(id string, rows []Row) (*Fit, error) {
 				r0 = r
 			}
 		}
-		b := fit.KVBytes(kv)
+		b, err := fit.KVBytes(kv)
+		if err != nil {
+			return nil, err
+		}
 		s := pts[len(pts)-1].s
 		if len(pts) >= 2 {
 			p0, p1 := pts[0], pts[len(pts)-1]

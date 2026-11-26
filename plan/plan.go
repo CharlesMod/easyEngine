@@ -1,54 +1,63 @@
-package fit
+// Package plan is the engine's planner of a whole catalog on the probed machine: for every
+// model, whether it fits and in what shape, and which to recommend. It is the engine's side of
+// the sizing core (core/fit, core/gguf): it joins the core to the catalog and the probe, opens
+// model files and logs the core's notes. Nothing the core must stay free of (the machine, the
+// clock, a log, a file) may move back into the core from here.
+package plan
 
 import (
+	"errors"
 	"fmt"
+	"log"
+	"math"
+
+	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/core/gguf"
 
 	"hermesengine/catalog"
-	"hermesengine/gguf"
 	"hermesengine/probe"
+)
+
+const (
+	mib = 1 << 20
+	// minUsableVRAM: a GPU whose budget is below this is treated as no GPU by Plan.
+	minUsableVRAM = 2048
 )
 
 // SeedFromSize is the footprint of a model not yet downloaded. With a measured footprint in the
 // catalog (m.Footprint, from a real llama-server run) it is that block, so the verdict before
-// download matches the one after. Without one it is a guess scaled by the file size: about 0.0006
-// MiB per token per GiB of weights at q4_0 with a 25 % safety factor, 30 expert layers for a MoE.
-// Fit is re-checked from the real header after download.
-func SeedFromSize(m catalog.Model, kvType string) Footprint {
+// download matches the one after. Without one it is the core's guess scaled by the file size
+// (fit.SeedFromBytes). Fit is re-checked from the real header after download. A cache type the
+// core does not know is a *fit.KVTypeError.
+func SeedFromSize(m catalog.Model, kvType string) (fit.Footprint, error) {
 	if kvType == "" {
 		kvType = "q4_0"
 	}
 	if m.Footprint != nil {
 		return FromMeasured(m.Footprint, kvType)
 	}
-	sizeMiB := float64(m.Size) / mib
-	gib := sizeMiB / 1024
-	fp := Footprint{
-		FixedMiB:    sizeMiB + baseOverheadMiB + 200*vocabMiBPer1k, // a typical 200k vocabulary
-		PerTokenMiB: 0.0006 * gib * 1.25 * kvBytes(kvType) / kvBytes("q4_0"),
-		ScratchMiB:  runtimeMiB,
-		Estimated:   true,
+	return fit.SeedFromBytes(m.Size, m.MoE, kvType)
+}
+
+// Seed is the core's fit.Seed with its notes logged, as the engine has always logged them.
+func Seed(info gguf.Info, kvType string) (fit.Footprint, error) {
+	fp, notes, err := fit.Seed(info, kvType)
+	for _, n := range notes {
+		log.Print(n)
 	}
-	if m.MoE {
-		const layers = 30 // typical; the header gives the real count after download
-		fp.MoE = true
-		fp.ExpertLayers = layers
-		fp.ExpertMiBPerLayer = 0.75 * sizeMiB / layers
-		fp.ExpertRAMPerLayer = fp.ExpertMiBPerLayer * expertRAMFactor
-		fp.MoESchedMiB = moeSchedMiB
-	}
-	return fp
+	return fp, err
 }
 
 // Verdict is one catalog model's answer for this machine.
 type Verdict struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Size       int64  `json:"size"`
-	Fits       string `json:"fits"` // yes | tight | no
-	Why        string `json:"why"`
-	Shape      Shape  `json:"shape"`
-	EstVRAMMiB int    `json:"est_vram_mib"`
-	EstRAMMiB  int    `json:"est_ram_mib"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Size       int64     `json:"size"`
+	Fits       string    `json:"fits"` // yes | tight | no
+	Why        string    `json:"why"`
+	Shape      fit.Shape `json:"shape"`
+	EstVRAMMiB int       `json:"est_vram_mib"`
+	EstRAMMiB  int       `json:"est_ram_mib"`
 	// EstDecodeTPS is the expected decode speed per stream in tokens/s on this machine (0 = no
 	// measured curve for this model).
 	EstDecodeTPS float64 `json:"est_decode_tps"`
@@ -70,8 +79,8 @@ type PlanResult struct {
 
 // RoomFor derives the planning room from the probed hardware: the GPU with the most memory,
 // all processes counted as others (nothing of ours is running at plan time).
-func RoomFor(hw probe.Hardware, gameReserve int) Room {
-	r := Room{GameReserve: gameReserve, RAMAvail: hw.RAMAvailMiB}
+func RoomFor(hw probe.Hardware, gameReserve int) fit.Room {
+	r := fit.Room{GameReserve: gameReserve, RAMAvail: hw.RAMAvailMiB}
 	best := -1
 	for i, g := range hw.GPUs {
 		if g.VRAMTotalMiB > 0 && (best < 0 || g.VRAMTotalMiB > hw.GPUs[best].VRAMTotalMiB) {
@@ -85,7 +94,7 @@ func RoomFor(hw probe.Hardware, gameReserve int) Room {
 	g := hw.GPUs[best]
 	r.GPUName = g.Name
 	r.VRAMTotal = g.VRAMTotalMiB
-	r.Margin = DefaultMargin(g.VRAMTotalMiB)
+	r.Margin = fit.DefaultMargin(g.VRAMTotalMiB)
 	if g.UnifiedMemory {
 		r.Unified = true
 		if o := g.VRAMTotalMiB - hw.RAMAvailMiB; o > 0 { // what the rest of the system already holds
@@ -94,7 +103,7 @@ func RoomFor(hw probe.Hardware, gameReserve int) Room {
 	} else {
 		r.Others = g.VRAMUsedMiB
 	}
-	if int(budgetOf(r)) < minUsableVRAM {
+	if v, _, err := r.Budget(); err == nil && int(v) < minUsableVRAM {
 		r.NoGPU = true // too little card to be worth using next to the game
 	}
 	return r
@@ -102,14 +111,14 @@ func RoomFor(hw probe.Hardware, gameReserve int) Room {
 
 // Plan answers, for every catalog model, whether it fits hw and in what shape, and recommends
 // the highest-quality installable model that fits comfortably ("yes"), else the best "tight" one.
-func Plan(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, installed func(catalog.Model) bool) PlanResult {
+func Plan(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, gameReserve int, installed func(catalog.Model) bool) PlanResult {
 	return PlanWith(c, hw, w, gameReserve, installed, nil)
 }
 
 // PlanWith is Plan with a header source: for models whose file is on disk, info returns the
 // GGUF Info so the footprint is exact instead of size-guessed.
-func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool)) PlanResult {
-	w = w.norm()
+func PlanWith(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, gameReserve int, installed func(catalog.Model) bool, info func(catalog.Model) (gguf.Info, bool)) PlanResult {
+	w = w.Norm()
 	room := RoomFor(hw, gameReserve)
 	var res PlanResult
 	if bs := c.Backends(hw); len(bs) > 0 {
@@ -121,23 +130,27 @@ func PlanWith(c *catalog.Catalog, hw probe.Hardware, w Wants, gameReserve int, i
 		if installed != nil {
 			v.Installed = installed(m)
 		}
-		var fp Footprint
+		var fp fit.Footprint
 		if info != nil && v.Installed {
 			if in, ok := info(m); ok {
-				fp = Seed(in, w.KVType)
+				// An unknown cache type leaves fp empty: Choose below says so.
+				fp, _ = Seed(in, w.KVType)
 				if m.Footprint != nil { // the header gives the sizes; the measurement gives the speed
-					fp.TPS = FromMeasured(m.Footprint, w.KVType).TPS
+					mf, _ := FromMeasured(m.Footprint, w.KVType)
+					fp.TPS = mf.TPS
 				}
 			}
 		}
 		if fp.FixedMiB == 0 {
-			fp = SeedFromSize(m, w.KVType)
+			fp, _ = SeedFromSize(m, w.KVType)
 		}
 		rm := room
 		rm.SpeedScale = SpeedScaleFor(room.GPUName, m.Footprint)
-		sh, err := Choose(fp, rm, w)
+		sh, err := fit.Choose(fp, rm, w)
 		v.Estimated = room.NoGPU || (m.Footprint == nil && fp.Estimated)
 		switch {
+		case errors.As(err, new(*fit.KVTypeError)):
+			v.Fits, v.Why = "no", err.Error()
 		case err != nil:
 			v.Fits, v.Why = "no", whyNot(fp, room, w)
 		case !v.Installed && hw.DiskFreeMiB > 0 && int(m.Size/mib)+1024 > hw.DiskFreeMiB:
@@ -177,8 +190,8 @@ const cpuComfort = 0.6
 // the choice is conservative: the smallest installable model that fits in RAM, preferring one
 // whose need stays within cpuComfort of the free RAM, not the best-quality one. The verdicts are
 // marked Estimated.
-func cpuOnlyPick(vs []Verdict, room Room) string {
-	free := float64(room.RAMAvail - osReserveMiB)
+func cpuOnlyPick(vs []Verdict, room fit.Room) string {
+	_, free, _ := room.Budget() // RoomFor's room: every field read
 	best, bestComfy := -1, -1
 	for i, v := range vs {
 		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
@@ -200,7 +213,7 @@ func cpuOnlyPick(vs []Verdict, room Room) string {
 	return ""
 }
 
-func verdictFor(fp Footprint, s Shape, w Wants) (string, string) {
+func verdictFor(fp fit.Footprint, s fit.Shape, w fit.Wants) (string, string) {
 	desc := fmt.Sprintf("%d slots x %d ctx", s.Slots, s.CtxPerSlot)
 	switch {
 	case s.CPUOnly:
@@ -219,19 +232,28 @@ func verdictFor(fp Footprint, s Shape, w Wants) (string, string) {
 	return "yes", desc + ", all on the GPU"
 }
 
-func whyNot(fp Footprint, room Room, w Wants) string {
+func whyNot(fp fit.Footprint, room fit.Room, w fit.Wants) string {
+	vram, ram, err := room.Budget()
+	if err != nil {
+		return err.Error()
+	}
+	least := fit.Shape{Slots: w.MinSlots, CtxPerSlot: w.CtxFloor, KVType: w.KVType, CPUOnly: room.NoGPU}
+	if fp.MoE && !room.Unified && !room.NoGPU {
+		least.NCpuMoe = fp.ExpertLayers
+	}
+	cardNeed, hostNeed, err := fp.Need(least)
+	if err != nil {
+		return err.Error()
+	}
 	if room.NoGPU {
-		need := fp.allHost(w.MinSlots, w.CtxFloor)
-		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(need), room.RAMAvail-osReserveMiB)
+		return fmt.Sprintf("needs about %d MiB of RAM, %d MiB available after the OS reserve", ceilMiB(hostNeed), int(ram))
 	}
-	need := fp.vram(w.MinSlots, w.CtxFloor, 0)
-	if fp.MoE && !room.Unified {
-		need = fp.vram(w.MinSlots, w.CtxFloor, fp.ExpertLayers)
-	}
-	have := int(budgetOf(room))
+	need, have := cardNeed, int(vram)
 	kind := "dense models cannot be split between card and RAM"
 	if fp.MoE {
 		kind = "even with every expert layer in RAM"
 	}
 	return fmt.Sprintf("needs about %d MiB of VRAM, %d MiB free after the game's room (%s)", ceilMiB(need), have, kind)
 }
+
+func ceilMiB(f float64) int { return int(math.Ceil(f)) }

@@ -60,8 +60,41 @@ func writeKV(b *w, e kv) {
 		for _, x := range v {
 			b.str(x)
 		}
+	case num:
+		b.u32(uint32(v.t))
+		b.scalar(v.t, v.v)
+	case arr:
+		b.u32(uint32(kArr))
+		b.u32(uint32(v.et))
+		b.u64(uint64(len(v.v)))
+		for _, x := range v.v {
+			b.scalar(v.et, x)
+		}
 	default:
 		panic("unsupported")
+	}
+}
+
+// num is a scalar of any type, its bits as written; arr an array of them.
+type num struct {
+	t kind
+	v uint64
+}
+type arr struct {
+	et kind
+	v  []uint64
+}
+
+func (b *w) scalar(t kind, v uint64) {
+	switch kindSize[t] {
+	case 1:
+		b.WriteByte(byte(v))
+	case 2:
+		binary.Write(b, binary.LittleEndian, uint16(v))
+	case 4:
+		b.u32(uint32(v))
+	case 8:
+		b.u64(v)
 	}
 }
 
@@ -144,7 +177,7 @@ func gemmaLike() []byte {
 func TestGemmaLike(t *testing.T) {
 	data := gemmaLike()
 	p := writeFile(t, data)
-	in, err := Read(p)
+	in, err := read(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,9 +215,10 @@ func TestDenseLlamaScalarKV(t *testing.T) {
 		{"llama.embedding_length", uint32(4096)},
 		{"llama.attention.head_count", uint32(32)},
 		{"llama.attention.head_count_kv", uint32(8)},
+		{"llama.context_length", uint32(131072)},
 	}
 	p := writeFile(t, build(3, kvs, []tn{{"blk.0.attn_q.weight", []uint64{256, 4}, 12}}))
-	in, err := Read(p)
+	in, err := read(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +227,13 @@ func TestDenseLlamaScalarKV(t *testing.T) {
 	}
 	if len(in.Layers) != 32 || in.Layers[31].KVHeads != 8 || in.Layers[31].SWA || !in.Layers[31].HasKV {
 		t.Errorf("layers")
+	}
+	// the trained context is the header's own; where the header does not say it, it is 0, never a guess
+	if in.CtxTrain != 131072 {
+		t.Errorf("trained ctx %d", in.CtxTrain)
+	}
+	if in, err := read(writeFile(t, build(3, kvs[:5], nil))); err != nil || in.CtxTrain != 0 {
+		t.Errorf("no context_length in the header: trained ctx %d (%v)", in.CtxTrain, err)
 	}
 }
 
@@ -208,7 +249,7 @@ func TestGemma3PeriodAndSharedKV(t *testing.T) {
 		{"gemma3n.attention.sliding_window_pattern", uint32(5)},
 		{"gemma3n.attention.shared_kv_layers", uint32(4)},
 	}
-	in, err := Read(writeFile(t, build(3, kvs, nil)))
+	in, err := read(writeFile(t, build(3, kvs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +271,7 @@ func TestHybridFullAttentionInterval(t *testing.T) {
 		{"qwen3next.attention.key_length", uint32(256)},
 		{"qwen3next.full_attention_interval", uint32(4)},
 	}
-	in, err := Read(writeFile(t, build(3, kvs, nil)))
+	in, err := read(writeFile(t, build(3, kvs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,22 +287,22 @@ func TestHybridFullAttentionInterval(t *testing.T) {
 }
 
 func TestBadFiles(t *testing.T) {
-	if _, err := Read(filepath.Join(t.TempDir(), "nope")); err == nil {
+	if _, err := read(filepath.Join(t.TempDir(), "nope")); err == nil {
 		t.Error("missing file")
 	}
-	if _, err := Read(writeFile(t, []byte("not a gguf file at all"))); err == nil {
+	if _, err := read(writeFile(t, []byte("not a gguf file at all"))); err == nil {
 		t.Error("bad magic")
 	}
 	good := gemmaLike()
-	if _, err := Read(writeFile(t, good[:len(good)/2])); err == nil {
+	if _, err := read(writeFile(t, good[:len(good)/2])); err == nil {
 		t.Error("truncated")
 	}
 	v1 := append([]byte(nil), good...)
 	binary.LittleEndian.PutUint32(v1[4:], 1)
-	if _, err := Read(writeFile(t, v1)); err == nil {
+	if _, err := read(writeFile(t, v1)); err == nil {
 		t.Error("v1")
 	}
-	if _, err := Read(writeFile(t, build(3, []kv{{"general.name", "x"}}, nil))); err == nil {
+	if _, err := read(writeFile(t, build(3, []kv{{"general.name", "x"}}, nil))); err == nil {
 		t.Error("no architecture")
 	}
 }
@@ -273,7 +314,7 @@ func TestReferenceModel(t *testing.T) {
 	if _, err := os.Stat(p); err != nil {
 		t.Skip("reference model not on this machine")
 	}
-	in, err := Read(p)
+	in, err := read(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +441,7 @@ func TestHostBytesAndVocabSize(t *testing.T) {
 		{"per_layer_token_embd.weight", []uint64{256, 100}, 8},
 		{"blk.0.attn_q.weight", []uint64{256, 64}, 12},
 	}
-	in, err := Read(writeFile(t, build(3, kvs, ts)))
+	in, err := read(writeFile(t, build(3, kvs, ts)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,4 +455,23 @@ func TestHostBytesAndVocabSize(t *testing.T) {
 	if in.DenseBytes < in.HostBytes*2 {
 		t.Errorf("host bytes must be part of dense bytes: %d vs %d", in.HostBytes, in.DenseBytes)
 	}
+}
+
+// read opens path and parses it as a caller does: the core takes a reader and a size, and the
+// engine's own opener (plan.ReadInfo) is this, outside the core.
+func read(path string) (Info, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return Info{}, err
+	}
+	defer fh.Close()
+	st, err := fh.Stat()
+	if err != nil {
+		return Info{}, err
+	}
+	f, err := Parse(fh, st.Size())
+	if err != nil {
+		return Info{}, err
+	}
+	return f.Info()
 }

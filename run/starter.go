@@ -8,7 +8,7 @@ import (
 
 	"hermesengine/catalog"
 	"hermesengine/fetch"
-	"hermesengine/fit"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
@@ -113,7 +113,7 @@ func (s *Supervisor) stagingLocked(st *Status) {
 // machines that can run nothing else; its speech is too degraded to be anyone's first impression). nil: no starter (the target is already small, or it
 // is the smallest that fits, as on a CPU-only machine, or the starter would not fit the disk).
 func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, target catalog.Model) *catalog.Model {
-	res := fit.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
+	res := plan.Plan(cat, hw, s.wants(), s.cfg.Profile.GameReserveMiB, s.modelInstalled)
 	var best *catalog.Model
 	for _, v := range res.Models {
 		m, ok := cat.Model(v.ID)

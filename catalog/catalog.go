@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
+
 	"hermesengine/probe"
 )
 
@@ -64,11 +66,9 @@ type Model struct {
 	SamplerMatch []string `json:"sampler_match,omitempty"`
 }
 
-// TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU.
-type TPSPoint struct {
-	NCpuMoe int     `json:"n_cpu_moe"`
-	TPS     float64 `json:"tps"`
-}
+// TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU. It is
+// the sizing core's type, so a measured block feeds the core's speed curve as it is.
+type TPSPoint = fit.TPSPoint
 
 // MeasuredOn says where a footprint came from.
 type MeasuredOn struct {

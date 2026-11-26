@@ -12,16 +12,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
-	"hermesengine/fit"
 	"hermesengine/lifecycle"
+	"hermesengine/plan"
 	"hermesengine/probe"
 )
 
 type loadCtx struct {
 	in   install
 	key  string
-	fp   fit.Footprint
+	fp   fit.Footprint // the seed with the book's overlay
+	seed fit.Footprint // the header's seed alone, which Calibrate holds every reading to
 	gpu  probe.GPU
 	hasG bool
 }
@@ -41,7 +43,7 @@ func (s *Supervisor) room(ctx context.Context, hw probe.Hardware, ourPIDs []int)
 		s.mu.Unlock()
 		if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
 			if m, ok := cat.Model(id); ok {
-				r.SpeedScale = fit.SpeedScaleFor(g.Name, m.Footprint)
+				r.SpeedScale = plan.SpeedScaleFor(g.Name, m.Footprint)
 			}
 		}
 		r.VRAMTotal = g.VRAMTotalMiB
@@ -73,11 +75,28 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if err != nil {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, err
 	}
+	room := s.room(ctx, hw, nil)
 	s.mu.Lock()
+	was := s.st.Book.Entries[key]
+	stands, lift, err := s.st.Book.LetGo(key, room, in.build)
 	fp := s.st.Book.Footprint(key, seed)
 	s.mu.Unlock()
-	lc := loadCtx{in: in, key: key, fp: fp, gpu: g, hasG: hasG}
-	return lc, s.room(ctx, hw, nil), s.wantsFor(key), nil
+	if err != nil {
+		return loadCtx{}, fit.Room{}, fit.Wants{}, err
+	}
+	switch {
+	case was.CapCtxTotal > 0 && !stands:
+		s.logf("ctx cap %d let go: the room grew past what it missed by, or the engine build moved", was.CapCtxTotal)
+		s.save()
+	case stands && fp.CapCtxTotal != was.CapCtxTotal: // let go to an earlier cap that still stands
+		s.logf("ctx cap %d let go; the earlier cap %d stands, lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, fp.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
+		s.save()
+	case stands && was.Lift == nil: // an older book's cap now records the room and build it stands under
+		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
+		s.save()
+	}
+	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG}
+	return lc, room, s.wantsFor(key), nil
 }
 
 // startLocked chooses a shape and loads it. opMu must be held.
@@ -158,10 +177,7 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			s.logf("load OOM again: stepping down")
 			next, err = fit.StepDown(lc.fp, shape, room, w)
 			if err == nil {
-				s.mu.Lock()
-				s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot)
-				s.mu.Unlock()
-				s.save()
+				s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
 			}
 		}
 		if err != nil {
@@ -223,13 +239,17 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-tick.C:
 			if s.healthy(url) {
-				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, startedAt: s.cfg.Now()}
+				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now()}
 				srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowIdle)
 				s.calibrate(ctx, srv)
 				s.srv = srv
 				s.mu.Lock()
 				s.llamaURL = url
-				s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB)}
+				basis := shape.VRAMBasis
+				if srv.measured > 0 {
+					basis = fit.Measured
+				}
+				s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB), VRAMBasis: basis}
 				s.retryable = false
 				s.tokS = 0
 				s.mu.Unlock()
@@ -268,6 +288,19 @@ func (s *Supervisor) healthy(base string) bool {
 	return resp.StatusCode == 200
 }
 
+// lowerCap records an out-of-memory of failed in the book (Book.LowerCap) and saves it; where the
+// core refuses the room or the shape, nothing is recorded and the refusal is logged.
+func (s *Supervisor) lowerCap(lc loadCtx, failed fit.Shape, ctxTotal int, room fit.Room) {
+	s.mu.Lock()
+	err := s.st.Book.LowerCap(lc.key, lc.fp, failed, ctxTotal, room, lc.in.build, time.Now())
+	s.mu.Unlock()
+	if err != nil {
+		s.logf("ctx cap not lowered: %v", err)
+		return
+	}
+	s.save()
+}
+
 // calibrate records the measured VRAM after a healthy load.
 func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 	mctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -278,10 +311,14 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 	}
 	srv.measured = m
 	s.mu.Lock()
-	ok := s.st.Book.Calibrate(srv.key, srv.fp, srv.shape, m)
+	c, err := s.st.Book.Calibrate(srv.key, srv.seed, srv.shape, m, time.Now())
 	s.mu.Unlock()
-	s.logf("calibrate: measured %d MiB, accepted=%v", m, ok)
-	if ok {
+	if err != nil {
+		s.logf("calibrate: measured %d MiB, not recorded: %v", m, err)
+		return
+	}
+	s.logf("calibrate: measured %d MiB, %s", m, c)
+	if c.Verdict != fit.CPUOnly { // the reading is kept for its shape whether or not it was taken
 		s.save()
 	}
 }
@@ -421,7 +458,7 @@ func (s *Supervisor) tick() {
 	if idle && !srv.idleSince.IsZero() && s.cfg.Now().Sub(srv.idleSince) >= s.cfg.GrowIdle && !s.cfg.Now().Before(srv.nextGrow) {
 		room := s.room(ctx, hw, []int{srv.proc.Pid})
 		w := s.wantsFor(srv.key)
-		if next, ok := fit.Grow(srv.fp, srv.shape, room, w); ok {
+		if next, ok, err := fit.Grow(srv.fp, srv.shape, room, w); err == nil && ok {
 			s.logf("idle with room: growing to %d x %d (moe %d)", next.Slots, next.CtxPerSlot, next.NCpuMoe)
 			s.resize(ctx, srv, next, true)
 		}
@@ -470,10 +507,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 			return
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
-		s.mu.Lock()
-		s.st.Book.LowerCap(lc.key, next.Slots*next.CtxPerSlot)
-		s.mu.Unlock()
-		s.save()
+		s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
 		shape = next
 	} else {
 		s.addError("llama-server exited (%s): restarting", lastLine(tail))
@@ -503,7 +537,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 	s.loadCancel = cancel
 	s.mu.Unlock()
 	defer func() { cancel(); s.mu.Lock(); s.loadCancel = nil; s.mu.Unlock() }()
-	lc, _, _, err := s.loadContext(cctx)
+	lc, room, _, err := s.loadContext(cctx)
 	if err != nil {
 		s.failStart(err, true)
 		return
@@ -515,10 +549,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 		}
 		s.addError("grow to %d x %d failed (%v): back to the old shape", to.Slots, to.CtxPerSlot, res.err)
 		if res.oom {
-			s.mu.Lock()
-			s.st.Book.LowerCap(lc.key, to.Slots*to.CtxPerSlot-1024*to.Slots)
-			s.mu.Unlock()
-			s.save()
+			s.lowerCap(lc, to, to.Slots*to.CtxPerSlot-1024*to.Slots, room)
 		}
 		if s.runShape(cctx, lc, old) == nil && s.srv != nil {
 			s.srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowBackoff)

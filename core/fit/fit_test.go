@@ -1,22 +1,19 @@
 package fit
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/gguf"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/core/gguf"
 )
 
-// refInfo is the reference model's header as read by engine/gguf (see TestReferenceFromFile).
+// refInfo is the reference model's header as read by core/gguf (see TestReferenceFromFile).
 func refInfo() gguf.Info {
 	in := gguf.Info{Arch: "gemma4", NLayer: 30, NKVHead: 2, HeadDimK: 512, HeadDimV: 512, SlidingWindow: 1024, SWALayers: 25,
 		NExpert: 96, NExpertUsed: 8, ExpertBytes: 7734594816, DenseBytes: 2256820680, FileSize: 10001779136,
@@ -52,14 +49,26 @@ func lingInfo() gguf.Info {
 	return in
 }
 
+// stamp is the time the tests give the book; the core never reads the clock.
+var stamp = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
 var game = Wants{Slots: 3, MinSlots: 1, CtxMax: 65536, CtxFloor: 8192, KVType: "q4_0"}
+
+// seed is Seed without its notes, for the tests that look only at the footprint.
+func seed(info gguf.Info, kvType string) Footprint {
+	fp, _, err := Seed(info, kvType)
+	if err != nil {
+		panic(err)
+	}
+	return fp
+}
 
 func room(vram, others, ram int) Room {
 	return Room{VRAMTotal: vram, Others: others, GameReserve: 1500, Margin: DefaultMargin(vram), RAMAvail: ram}
 }
 
 func TestSeedReferencePredictsMeasuredFootprint(t *testing.T) {
-	fp := Seed(refInfo(), "q4_0")
+	fp := seed(refInfo(), "q4_0")
 	got := fp.vram(3, 65536, 0)
 	t.Logf("reference seed: fixed %.0f scratch %.0f perTok %.5f swaPerTok %.5f expert/layer %.1f -> 3x64k q4_0 n-cpu-moe 0: %.0f MiB (measured process use after requests: 12134, sweep.csv)",
 		fp.FixedMiB, fp.ScratchMiB, fp.PerTokenMiB, fp.SWAPerTokenMiB, fp.ExpertMiBPerLayer, got)
@@ -76,7 +85,7 @@ func TestSeedReferencePredictsMeasuredFootprint(t *testing.T) {
 }
 
 func TestSeedLingMLAAndState(t *testing.T) {
-	fp := Seed(lingInfo(), "q4_0")
+	fp := seed(lingInfo(), "q4_0")
 	// 6 full layers x 576 latent elements at 4.5 bit, no V cache
 	if want := 6 * 576 * 4.5 / 8 / mib; math.Abs(fp.PerTokenMiB-want) > 1e-9 {
 		t.Errorf("per token %.7f want %.7f", fp.PerTokenMiB, want)
@@ -99,15 +108,12 @@ func TestSeedLingMLAAndState(t *testing.T) {
 }
 
 func TestSeedUnknownArchitectureNeverZero(t *testing.T) {
-	var logged string
-	old := Logf
-	Logf = func(f string, a ...any) { logged += fmt.Sprintf(f, a...) }
-	defer func() { Logf = old }()
-	fp := Seed(gguf.Info{Arch: "mystery", NLayer: 10, DenseBytes: 4 << 30}, "q4_0")
+	fp, notes, _ := Seed(gguf.Info{Arch: "mystery", NLayer: 10, DenseBytes: 4 << 30}, "q4_0")
+	logged := strings.Join(notes, "\n")
 	if fp.PerTokenMiB <= 0 || !fp.Estimated || logged == "" {
 		t.Errorf("%+v log %q", fp, logged)
 	}
-	fp = Seed(gguf.Info{Arch: "mystery", NLayer: 2, Estimated: true, Note: "assumed", NKVHead: 4, HeadDimK: 64, HeadDimV: 64,
+	fp = seed(gguf.Info{Arch: "mystery", NLayer: 2, Estimated: true, Note: "assumed", NKVHead: 4, HeadDimK: 64, HeadDimV: 64,
 		Layers: []gguf.Layer{{HasKV: true, KVHeads: 4, HeadDimK: 64, HeadDimV: 64}, {HasKV: true, KVHeads: 4, HeadDimK: 64, HeadDimV: 64}}}, "q4_0")
 	if fp.PerTokenMiB <= 0 || !fp.Estimated {
 		t.Errorf("%+v", fp)
@@ -115,16 +121,16 @@ func TestSeedUnknownArchitectureNeverZero(t *testing.T) {
 }
 
 func TestSeedKVTypes(t *testing.T) {
-	q4 := Seed(refInfo(), "q4_0").PerTokenMiB
-	q8 := Seed(refInfo(), "q8_0").PerTokenMiB
-	f16 := Seed(refInfo(), "f16").PerTokenMiB
+	q4 := seed(refInfo(), "q4_0").PerTokenMiB
+	q8 := seed(refInfo(), "q8_0").PerTokenMiB
+	f16 := seed(refInfo(), "f16").PerTokenMiB
 	if math.Abs(q8/q4-8.5/4.5) > 1e-9 || math.Abs(f16/q4-16/4.5) > 1e-9 {
 		t.Error(q4, q8, f16)
 	}
 }
 
 func TestSeedDenseFullAttentionEveryLayer(t *testing.T) {
-	fp := Seed(denseInfo(), "f16")
+	fp := seed(denseInfo(), "f16")
 	if want := 40.0 * 8 * 256 * 2 / mib; math.Abs(fp.PerTokenMiB-want) > 1e-9 || fp.MoE || fp.SWAPerTokenMiB != 0 {
 		t.Errorf("%+v want per token %v", fp, want)
 	}
@@ -132,7 +138,7 @@ func TestSeedDenseFullAttentionEveryLayer(t *testing.T) {
 
 func TestSeedSWAWithoutLayers(t *testing.T) {
 	in := gguf.Info{Arch: "x", NLayer: 10, NKVHead: 4, HeadDimK: 64, HeadDimV: 64, SlidingWindow: 512, SWALayers: 8, DenseBytes: 1 << 30}
-	fp := Seed(in, "f16")
+	fp := seed(in, "f16")
 	if fp.PerTokenMiB == 0 || fp.SWAPerTokenMiB == 0 || fp.SWAWindow != 512+ubatchTokens {
 		t.Errorf("%+v", fp)
 	}
@@ -156,8 +162,8 @@ type tcase struct {
 }
 
 func TestChooseTable(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
-	ling := Seed(lingInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
+	ling := seed(lingInfo(), "q4_0")
 	cases := []tcase{
 		{name: "16GB card, desktop 1255 others, reference model, full wants", fp: ref, room: room(16303, 1255, 24000), slots: 3, ncpuMax: 0, ctxMin: 65536},
 		{name: "16GB card, 2800 others (browser + game loaded): ctx shrinks, experts stay on the card", fp: ref, room: room(16303, 2800, 24000), slots: 3, ncpuMin: 0, ncpuMax: 0, ctxMin: 32768},
@@ -173,9 +179,9 @@ func TestChooseTable(t *testing.T) {
 		{name: "no GPU, 12GB RAM free: model alone needs ~11 GiB", fp: ref, room: Room{NoGPU: true, RAMAvail: 12000}, wantErr: true},
 		{name: "Apple unified 16GB (usable 11468): no expert offload", fp: ref, room: Room{VRAMTotal: 11468, GameReserve: 1500, Margin: 512, RAMAvail: 12000, Unified: true}, wantErr: true},
 		{name: "Apple unified 32GB (usable 22937)", fp: ref, room: Room{VRAMTotal: 22937, GameReserve: 1500, Margin: 917, RAMAvail: 28000, Unified: true}, slots: 3, ctxMin: 65536},
-		{name: "dense 14GiB on 8GB card: never split", fp: Seed(denseInfo(), "q4_0"), room: room(8192, 600, 64000), wantErr: true},
-		{name: "dense 14GiB on 24GB card", fp: Seed(denseInfo(), "q4_0"), room: room(24564, 800, 64000), slots: 3, ctxMin: 8192},
-		{name: "dense 14GiB, no GPU, plenty of RAM: CPU only is allowed", fp: Seed(denseInfo(), "q4_0"), room: Room{NoGPU: true, RAMAvail: 32000}, slots: 3, ctxMin: 8192, cpuOnly: true},
+		{name: "dense 14GiB on 8GB card: never split", fp: seed(denseInfo(), "q4_0"), room: room(8192, 600, 64000), wantErr: true},
+		{name: "dense 14GiB on 24GB card", fp: seed(denseInfo(), "q4_0"), room: room(24564, 800, 64000), slots: 3, ctxMin: 8192},
+		{name: "dense 14GiB, no GPU, plenty of RAM: CPU only is allowed", fp: seed(denseInfo(), "q4_0"), room: Room{NoGPU: true, RAMAvail: 32000}, slots: 3, ctxMin: 8192, cpuOnly: true},
 	}
 	for _, c := range cases {
 		s, err := Choose(c.fp, c.room, game)
@@ -197,8 +203,8 @@ func TestChooseTable(t *testing.T) {
 			t.Errorf("%s: ctx %d not aligned or over max", c.name, s.CtxPerSlot)
 		}
 		if !s.CPUOnly {
-			if float64(s.VRAMMiB) > budgetOf(c.room)+1 {
-				t.Errorf("%s: vram %d over budget %.0f", c.name, s.VRAMMiB, budgetOf(c.room))
+			if float64(s.VRAMMiB) > vramBudget(c.room)+1 {
+				t.Errorf("%s: vram %d over budget %.0f", c.name, s.VRAMMiB, vramBudget(c.room))
 			}
 		}
 		if c.fp.MoE == false && s.NCpuMoe != 0 {
@@ -208,7 +214,7 @@ func TestChooseTable(t *testing.T) {
 }
 
 func TestChooseOrderCtxBeforeExpertsBeforeSlots(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
 	// Find a budget where full ctx does not fit but floor ctx does with zero CPU layers:
 	// ctx must shrink first, experts stay on the GPU.
 	need := func(c int) float64 { return ref.vram(3, c, 0) }
@@ -227,7 +233,7 @@ func TestChooseOrderCtxBeforeExpertsBeforeSlots(t *testing.T) {
 	// equal ctx: the fewer CPU layers wins
 	if s.NCpuMoe > 1 {
 		lower := ref.vram(3, s.CtxPerSlot, s.NCpuMoe-1)
-		if lower <= budgetOf(r) {
+		if lower <= vramBudget(r) {
 			t.Errorf("a smaller n-cpu-moe also fits: %v", s)
 		}
 	}
@@ -253,7 +259,7 @@ func TestChooseOrderCtxBeforeExpertsBeforeSlots(t *testing.T) {
 }
 
 func TestChooseWantsDefaultsAndCap(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
 	s, err := Choose(ref, room(16303, 600, 24000), Wants{})
 	if err != nil || s.Slots != 1 || s.CtxPerSlot != 65536 || s.KVType != "q4_0" {
 		t.Errorf("%v %v", s, err)
@@ -265,7 +271,7 @@ func TestChooseWantsDefaultsAndCap(t *testing.T) {
 		t.Errorf("cap ignored: %v %v", s, err)
 	}
 	// f16 KV needs more room than q4_0
-	f16 := Seed(refInfo(), "f16")
+	f16 := seed(refInfo(), "f16")
 	w := game
 	w.KVType = "f16"
 	s1, _ := Choose(f16, room(16303, 1255, 24000), w)
@@ -289,7 +295,7 @@ func TestArgs(t *testing.T) {
 }
 
 func TestStepDownAndMissRetryAndGrow(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
 	r := room(16303, 1255, 24000)
 	cur, _ := Choose(ref, r, game)
 	// StepDown walks down to ErrTooBig, strictly shrinking each time
@@ -339,22 +345,22 @@ func TestStepDownAndMissRetryAndGrow(t *testing.T) {
 
 	// Grow: bigger room offers a bigger shape; same room does not
 	small, _ := Choose(ref, room(16303, 5000, 24000), game)
-	if g, ok := Grow(ref, small, room(16303, 1255, 24000), game); !ok || !better(g, small) {
+	if g, ok, _ := Grow(ref, small, room(16303, 1255, 24000), game); !ok || !better(g, small) {
 		t.Errorf("grow: %v %v", g, ok)
 	}
 	best, _ := Choose(ref, room(16303, 1255, 24000), game)
-	if g, ok := Grow(ref, best, room(16303, 1255, 24000), game); ok {
+	if g, ok, _ := Grow(ref, best, room(16303, 1255, 24000), game); ok {
 		t.Errorf("grow at best: %v", g)
 	}
 }
 
 func TestBook(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
 	shape := Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}
 	var b Book
 	key := BookKey("sha", "RTX 5080", "cuda-linux-x64")
 	// within +-15 %: accepted, and the footprint now carries the measured fixed load
-	if !b.Calibrate(key, ref, shape, 12500) {
+	if !taken(b.Calibrate(key, ref, shape, 12500, stamp)) {
 		t.Fatal("12500 should calibrate")
 	}
 	fp := b.Footprint(key, ref)
@@ -362,18 +368,18 @@ func TestBook(t *testing.T) {
 		t.Errorf("calibrated model predicts %.0f, measured 12500", fp.vram(3, 65536, 0))
 	}
 	// a wild reading (others changed during load) is refused and changes nothing
-	if b.Calibrate(key, ref, shape, 16000) || b.Calibrate(key, ref, shape, 8000) {
+	if taken(b.Calibrate(key, ref, shape, 16000, stamp)) || taken(b.Calibrate(key, ref, shape, 8000, stamp)) {
 		t.Error("out-of-range reading accepted")
 	}
 	if got := b.Footprint(key, ref).FixedMiB; math.Abs(got-fp.FixedMiB) > 1e-9 {
 		t.Error("book changed by refused reading")
 	}
-	if e := b.Entries[key]; e.Loads != 1 || e.Updated.IsZero() {
+	if e := b.Entries[key]; e.Loads != 1 || !e.Updated.Equal(stamp) { // the stamp is the caller's
 		t.Errorf("%+v", e)
 	}
-	// runtime OOM lowers the cap; the next plan honours it; it only ever goes down
-	b.LowerCap(key, 150000)
-	b.LowerCap(key, 170000)
+	// runtime OOM lowers the cap; the next plan honours it; a later OOM never raises it (LetGo lifts it)
+	b.LowerCap(key, ref, shape, 150000, room(16303, 600, 24000), "cuda-linux-x64", stamp)
+	b.LowerCap(key, ref, shape, 170000, room(16303, 600, 24000), "cuda-linux-x64", stamp)
 	fp = b.Footprint(key, ref)
 	if fp.CapCtxTotal != 150000 {
 		t.Errorf("cap %d", fp.CapCtxTotal)
@@ -391,145 +397,23 @@ func TestBook(t *testing.T) {
 		t.Error("nil book")
 	}
 	// CPU-only runs never calibrate a GPU fixed load
-	if b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000) {
+	if taken(b.Calibrate("k2", ref, Shape{Slots: 1, CtxPerSlot: 8192, CPUOnly: true}, 12000, stamp)) {
 		t.Error("cpu-only calibrated")
 	}
 }
 
 func TestCalibrateWithExpertsOnCPU(t *testing.T) {
-	ref := Seed(refInfo(), "q4_0")
+	ref := seed(refInfo(), "q4_0")
 	sh := Shape{Slots: 3, CtxPerSlot: 32768, NCpuMoe: 10, KVType: "q4_0"}
 	truth := ref
 	truth.FixedMiB += 150 // the real fixed load is 150 MiB above the seed
 	measured := int(truth.vram(3, 32768, 10))
 	var b Book
-	if !b.Calibrate("k", ref, sh, measured) {
+	if !taken(b.Calibrate("k", ref, sh, measured, stamp)) {
 		t.Fatal("not accepted")
 	}
 	if got := b.Entries["k"].FixedMiB; math.Abs(got-truth.FixedMiB) > 1 {
 		t.Errorf("fixed %.0f want %.0f", got, truth.FixedMiB)
-	}
-}
-
-// ---- Plan ----
-
-func testCatalog() *catalog.Catalog {
-	c, err := catalog.Load("")
-	if err != nil {
-		panic(err)
-	}
-	return c
-}
-
-func hwNvidia(vram, used, ram int, name string) probe.Hardware {
-	return probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: ram + 4000, RAMAvailMiB: ram, DiskFreeMiB: 500000,
-		GPUs: []probe.GPU{{Vendor: "nvidia", Name: name, VRAMTotalMiB: vram, VRAMUsedMiB: used, Source: "nvidia-smi"}}}
-}
-
-func verdicts(p PlanResult) map[string]Verdict {
-	m := map[string]Verdict{}
-	for _, v := range p.Models {
-		m[v.ID] = v
-	}
-	return m
-}
-
-func TestPlanTable(t *testing.T) {
-	c := testCatalog()
-	allInstalled := func(catalog.Model) bool { return true }
-	noneInstalled := func(catalog.Model) bool { return false }
-	refInfoFn := func(m catalog.Model) (gguf.Info, bool) {
-		if m.ID == "gemma4-rp-maxxed-q3kxl" {
-			return refInfo(), true
-		}
-		return gguf.Info{}, false
-	}
-	type pc struct {
-		name      string
-		hw        probe.Hardware
-		installed func(catalog.Model) bool
-		info      func(catalog.Model) (gguf.Info, bool)
-		rec       string
-		fits      map[string]string
-	}
-	apple := probe.Hardware{OS: "darwin", Arch: "arm64", RAMTotalMiB: 16384, RAMAvailMiB: 11000, DiskFreeMiB: 500000,
-		GPUs: []probe.GPU{{Vendor: "apple", Name: "Apple M2", VRAMTotalMiB: 11468, UnifiedMemory: true, Source: "sysctl"}}}
-	cases := []pc{
-		{"16GB, reference installed with header", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), allInstalled, refInfoFn,
-			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes"}},
-		{"16GB, 2800 others: a few expert layers in RAM keep the long ctx", func() probe.Hardware { h := hwNvidia(16303, 2800, 24000, "NVIDIA GeForce RTX 5080"); return h }(), allInstalled, refInfoFn,
-			"gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes"}},
-		{"16GB, nothing installed: reference is downloadable now", hwNvidia(16303, 1255, 24000, "NVIDIA GeForce RTX 5080"), noneInstalled, nil,
-			"gemma4-rp-maxxed-q3kxl", nil},
-		{"12GB", hwNvidia(12288, 800, 24000, "NVIDIA GeForce RTX 4070"), noneInstalled, nil, "gemma4-rp-maxxed-q3kxl", map[string]string{"gemma4-rp-maxxed-q3kxl": "yes", "gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes"}},
-		{"8GB", hwNvidia(8192, 600, 24000, "NVIDIA GeForce RTX 3060 Ti"), noneInstalled, nil, "gemma4-e4b-rp-q40", map[string]string{"gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
-		{"6GB", hwNvidia(6144, 600, 24000, "NVIDIA GeForce RTX 2060"), noneInstalled, nil, "gemma4-e4b-rp-q40", map[string]string{"gemma4-e4b-rp-q40": "yes", "gemma4-e2b-q4km": "yes", "gemma4-rp-maxxed-q3kxl": "tight"}},
-		{"4GB: too little card, CPU-only and tight", hwNvidia(4096, 500, 24000, "NVIDIA GeForce GTX 1650"), noneInstalled, nil, "", map[string]string{"gemma4-e2b-q4km": "tight"}},
-		{"no GPU 32GB", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 32000, RAMAvailMiB: 24000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "tight"}},
-		{"no GPU 8GB RAM", probe.Hardware{OS: "linux", Arch: "amd64", RAMTotalMiB: 8000, RAMAvailMiB: 5000, DiskFreeMiB: 500000}, noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
-		{"Apple unified 16GB", apple, noneInstalled, nil, "", map[string]string{"gemma4-rp-maxxed-q3kxl": "no"}},
-		{"16GB but 3 GB of disk", func() probe.Hardware {
-			h := hwNvidia(16303, 600, 24000, "NVIDIA GeForce RTX 5080")
-			h.DiskFreeMiB = 3000
-			return h
-		}(), noneInstalled, nil, "", map[string]string{"gemma4-e4b-rp-q40": "no", "gemma4-rp-maxxed-q3kxl": "no"}},
-	}
-	for _, tc := range cases {
-		p := PlanWith(c, tc.hw, game, 1500, tc.installed, tc.info)
-		vs := verdicts(p)
-		for _, v := range p.Models {
-			t.Logf("[%s] %-26s %-5s %-s | %v", tc.name, v.ID, v.Fits, v.Why, v.Shape)
-		}
-		t.Logf("[%s] recommended %q backend %q", tc.name, p.Recommended, p.Backend)
-		for id, want := range tc.fits {
-			if vs[id].Fits != want {
-				t.Errorf("%s: %s fits=%q want %q (%s)", tc.name, id, vs[id].Fits, want, vs[id].Why)
-			}
-		}
-		if tc.rec != "" && p.Recommended != tc.rec {
-			t.Errorf("%s: recommended %q want %q", tc.name, p.Recommended, tc.rec)
-		}
-		if len(p.Models) != len(c.Models) {
-			t.Errorf("%s: %d verdicts", tc.name, len(p.Models))
-		}
-	}
-}
-
-func TestPlanRecommendationRules(t *testing.T) {
-	c := &catalog.Catalog{Models: []catalog.Model{
-		{ID: "big", Size: 20 << 30, Quality: 100, URL: "https://x"},
-		{ID: "mid", Size: 6 << 30, Quality: 60, URL: "https://x"},
-		{ID: "importonly", Size: 1 << 30, Quality: 99, URL: ""},
-		{ID: "small", Size: 2 << 30, Quality: 40, URL: "https://x"},
-	}}
-	hw := hwNvidia(12288, 600, 24000, "NVIDIA GeForce RTX 4070")
-	p := Plan(c, hw, game, 1500, func(catalog.Model) bool { return false })
-	v := verdicts(p)
-	if v["big"].Fits != "no" || !v["importonly"].ImportOnly || v["mid"].ImportOnly {
-		t.Errorf("%+v", v)
-	}
-	if p.Recommended != "mid" { // import-only and not installed cannot be recommended despite quality 99
-		t.Errorf("recommended %q", p.Recommended)
-	}
-	p = Plan(c, hw, game, 1500, func(m catalog.Model) bool { return m.ID == "importonly" })
-	if p.Recommended != "importonly" {
-		t.Errorf("installed import-only model should win: %q", p.Recommended)
-	}
-	// only a tight option: it is recommended
-	hw4 := hwNvidia(4096, 500, 24000, "GTX")
-	if p := Plan(c, hw4, game, 1500, nil); p.Recommended == "" || verdicts(p)[p.Recommended].Fits != "tight" {
-		t.Errorf("tight fallback: %+v", p)
-	}
-	if p := Plan(&catalog.Catalog{}, hw, game, 1500, nil); p.Recommended != "" || len(p.Models) != 0 {
-		t.Errorf("%+v", p)
-	}
-}
-
-func TestPlanBackend(t *testing.T) {
-	c := testCatalog()
-	p := Plan(c, hwNvidia(16303, 600, 24000, "NVIDIA GeForce RTX 5080"), game, 1500, nil)
-	if p.Backend != "cuda-linux-x64" {
-		t.Errorf("backend %q", p.Backend)
 	}
 }
 
@@ -540,11 +424,24 @@ func TestReferenceFromFile(t *testing.T) {
 	if _, err := os.Stat(p); err != nil {
 		t.Skip("reference model not on this machine")
 	}
-	in, err := gguf.Read(p)
+	fh, err := os.Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fp := Seed(in, "q4_0")
+	defer fh.Close()
+	st, err := fh.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := gguf.Parse(fh, st.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := f.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := seed(in, "q4_0")
 	got := fp.vram(3, 65536, 0)
 	t.Logf("from the real header: %.0f MiB at 3x64k q4_0 n-cpu-moe 0 (measured 12134)", got)
 	if math.Abs(got-12134) > 200 {
@@ -556,28 +453,12 @@ func TestReferenceFromFile(t *testing.T) {
 }
 
 func TestJSONTags(t *testing.T) {
-	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}, Verdict{}, PlanResult{}} {
+	for _, v := range []any{Wants{}, Room{}, Footprint{}, Shape{}, Calib{}, Book{}, CapLift{}, HeldCap{}, Reading{}, Calibration{}, Consts{}, Const{}} {
 		rt := reflect.TypeOf(v)
 		for i := 0; i < rt.NumField(); i++ {
 			if rt.Field(i).Tag.Get("json") == "" {
 				t.Errorf("%s.%s has no json tag", rt.Name(), rt.Field(i).Name)
 			}
 		}
-	}
-}
-
-func TestPlanCarriesFallback(t *testing.T) {
-	c := &catalog.Catalog{Models: []catalog.Model{
-		{ID: "big", Size: 6 << 30, Quality: 60, URL: "https://x"},
-		{ID: "tiny", Size: 2 << 30, Quality: 40, URL: "https://x", Fallback: true, FallbackNote: "smallest"},
-	}}
-	p := Plan(c, hwNvidia(12288, 600, 24000, "NVIDIA GeForce RTX 4070"), game, 1500, nil)
-	v := verdicts(p)
-	if v["big"].Fallback || v["big"].FallbackNote != "" || !v["tiny"].Fallback || v["tiny"].FallbackNote != "smallest" {
-		t.Errorf("%+v", v)
-	}
-	b, _ := json.Marshal(p)
-	if !strings.Contains(string(b), `"fallback":true`) || !strings.Contains(string(b), `"fallback_note":"smallest"`) {
-		t.Errorf("json %s", b)
 	}
 }

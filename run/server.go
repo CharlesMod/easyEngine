@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -541,6 +542,18 @@ func (s *Supervisor) tick() {
 				if nn, _, err2 := srv.fp.Need(next); err2 == nil && cn < nn {
 					next = c
 				}
+			}
+		} else {
+			// nothing fits the room: the smallest shape the steps reach, in one restart
+			for i := 0; i < 64; i++ {
+				if nn, _, err := srv.fp.Need(next); err != nil || int(math.Ceil(nn)) <= vram {
+					break
+				}
+				n2, err := fit.StepDown(srv.fp, next, room, w)
+				if err != nil {
+					break
+				}
+				next = n2
 			}
 		}
 		r := sn.sum.Reserve

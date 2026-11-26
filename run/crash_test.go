@@ -321,3 +321,18 @@ func TestGrowsBackAfterTheAppLetsGo(t *testing.T) {
 		return st.Phase == "ready" && st.Shape != nil && st.Shape.Slots*st.Shape.CtxPerSlot == c0
 	})
 }
+
+// Another app leaves less room than any shape needs: the model goes to the smallest shape in one
+// restart, not one step per tick.
+func TestNoRoomAtAllShrinksOnce(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	s := ready(t, e)
+	e.SetUsed(16300)
+	e.SetOthers(12000) // budget well under the 5000 MiB the model needs at any ctx
+	testkit.WaitFor(t, 10*time.Second, "shrink", func() bool { return len(e.Starts()) >= 2 && s.Phase() == "ready" })
+	time.Sleep(500 * time.Millisecond)
+	if n := len(e.Starts()); n != 2 {
+		t.Fatalf("%d starts, want one restart: %v", n, e.Starts())
+	}
+}

@@ -404,7 +404,9 @@ var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP (HermesVoice build)", r
 func main() {
 	out := flag.String("out", "catalog/catalog.json", "output file")
 	pin := flag.String("llama-tag", "", "pin a llama.cpp build tag instead of picking the newest")
-	minAge := flag.Duration("min-age", 24*time.Hour, "when every release is a prerelease, skip builds newer than this")
+	// A week, not a day: Windows Smart App Control refuses unsigned DLLs with no reputation yet. In the first
+	// Windows test it blocked b12680's llama.dll at about a day old, while b12651 (3 days) and older ran.
+	minAge := flag.Duration("min-age", 7*24*time.Hour, "when every release is a prerelease, skip builds newer than this (Windows Smart App Control needs a build to have a reputation)")
 	ref := flag.String("ref-file", filepath.Join(os.Getenv("HOME"), ".hive/models/gemma4-rp-maxxed", refFile), "the reference model file; its size is recorded (not copied or loaded)")
 	version := flag.Int("version", 1, "catalog version to write")
 	measuredOnly := flag.Bool("measured-only", false, "no network: re-read -out, attach tools/gencatalog/measured.json and write it back with -version")

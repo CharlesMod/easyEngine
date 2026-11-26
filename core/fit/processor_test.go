@@ -72,3 +72,75 @@ func TestProcessorPricesNoExpansion(t *testing.T) {
 		}
 	}
 }
+
+// The figures a caller holds or gets back always keep the expansion: only the pricing of a shape
+// that lays nothing on a card leaves it out. So in a card room every card shape an entry answers,
+// whatever shape it was walked from (a CPU-only one included), needs exactly what Need says of
+// that shape, and what the core answered before a processor's pricing was mended.
+func TestCardShapeFromCPUOnlyKeepsExpansion(t *testing.T) {
+	dense := seed(denseInfo(), "q4_0")
+	card := Room{VRAMTotal: 24576, GameReserve: 1500, Margin: DefaultMargin(24576), RAMAvail: 32000}
+	w := Wants{Slots: 2, MinSlots: 1, CtxMax: 131072, CtxFloor: 4096, KVType: "q4_0"}
+	listed := w
+	listed.KVTypes = []string{"q8_0", "q4_0"}
+	cases := []struct {
+		name string
+		step func() (Shape, error)
+		vram int // MiB the card shape needs
+	}{
+		{"MissRetry from 2x8192 q4_0 CPU-only", func() (Shape, error) {
+			return MissRetry(dense, Shape{Slots: 2, CtxPerSlot: 8192, KVType: "q4_0", CPUOnly: true}, 500, card, w)
+		}, 14925},
+		{"StepDown, q8_0 then q4_0, from 1x4096 q8_0 CPU-only", func() (Shape, error) {
+			return StepDown(dense, Shape{Slots: 1, CtxPerSlot: 4096, KVType: "q8_0", CPUOnly: true}, card, listed)
+		}, 14727},
+	}
+	for _, c := range cases {
+		s, err := c.step()
+		if err != nil || s.CPUOnly {
+			t.Fatalf("%s: %v %v", c.name, s, err)
+		}
+		v, _, err := dense.Need(s)
+		if err != nil || s.VRAMMiB != c.vram || s.VRAMMiB != int(math.Ceil(v)) {
+			t.Errorf("%s: answered %v needing %d MiB; Need says %.1f, and it was %d", c.name, s, s.VRAMMiB, v, c.vram)
+		}
+	}
+}
+
+// Swept over card rooms, footprints, wants and shapes walked from (card and CPU-only, each type):
+// every card shape Choose, MissRetry, StepDown and Grow answer needs what Need says of it.
+func TestEveryCardShapePricesAsNeed(t *testing.T) {
+	fps := []Footprint{seed(refInfo(), "q4_0"), seed(denseInfo(), "q4_0"), seed(denseInfo(), "f16"), seed(hybridInfo(), "q8_0")}
+	lists := [][]string{nil, {"f16", "q8_0", "q4_0"}, {"q8_0", "q4_0"}}
+	for _, fp := range fps {
+		for vram := 8192; vram <= 32768; vram += 8192 {
+			rm := room(vram, 1000, 32000)
+			for _, list := range lists {
+				w := Wants{Slots: 2, MinSlots: 1, CtxMax: 131072, CtxFloor: 4096, KVType: "q4_0", KVTypes: list}
+				check := func(op string, s Shape, err error) {
+					if err != nil || s.CPUOnly {
+						return
+					}
+					v, _, nerr := fp.Need(s)
+					if nerr != nil || s.VRAMMiB != int(math.Ceil(v)) {
+						t.Errorf("%s on %d, %v: %v needs %d MiB, Need says %.1f (%v)", op, vram, list, s, s.VRAMMiB, v, nerr)
+					}
+				}
+				s, err := Choose(fp, rm, w)
+				check("Choose", s, err)
+				for _, kv := range []string{"f16", "q8_0", "q4_0"} {
+					for _, cpu := range []bool{false, true} {
+						cur := Shape{Slots: 2, CtxPerSlot: 8192, KVType: kv, CPUOnly: cpu}
+						s, err = MissRetry(fp, cur, 500, rm, w)
+						check("MissRetry", s, err)
+						s, err = StepDown(fp, cur, rm, w)
+						check("StepDown", s, err)
+						if s, grew, err := Grow(fp, cur, rm, w); grew { // else it answers cur as given
+							check("Grow", s, err)
+						}
+					}
+				}
+			}
+		}
+	}
+}

@@ -237,7 +237,7 @@ type Footprint struct {
 	// KVType is the cache type the per-token terms are priced at; "" when they cannot be priced
 	// at another (measured numbers). DequantPerTokenMiB is the part of ComputePerTokenMiB a
 	// quantised cache adds on a card (the f16 expansion of the widest layer), whatever KVType is;
-	// a run with no card prices none (settle).
+	// a CPU-only shape is priced without it (fig.allHost), and the figures always keep it.
 	KVType             string  `json:"kv_type"`
 	DequantPerTokenMiB float64 `json:"dequant_per_token_mib"`
 	// WeightsMiB is the weights on the card with no expert moved (one allocation); 0 = unknown.
@@ -684,17 +684,7 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 	if fp.KVType == "" && len(st.w.KVTypes) == 0 {
 		t = "" // measured figures: taken as given
 	}
-	src := *fp
-	if fp.KVType != "" && ((room != nil && room.NoGPU) || (s != nil && s.CPUOnly)) {
-		// No card: a processor lays no f16 expansion of a quantised cache, so none is priced at
-		// any type (neither price nor fig.at can add it back). This is the one place that decides
-		// it; a card's figures, and measured figures taken as given, must never lose the term.
-		if quantised(src.KVType) {
-			src.ComputePerTokenMiB -= src.DequantPerTokenMiB
-		}
-		src.DequantPerTokenMiB = 0
-	}
-	f, err := price(src, t)
+	f, err := price(*fp, t)
 	if err != nil {
 		return st, err
 	}
@@ -790,9 +780,16 @@ func (fp fig) expertRAM(nCpuMoe int) float64 {
 	return per * float64(nCpuMoe)
 }
 
-// allHost is the RAM use of a CPU-only run.
+// allHost is the RAM use of a CPU-only run. Such a run lays nothing on a card, and only a card
+// lays the f16 expansion of a quantised cache, so it is left out here, for the shape priced: this
+// is the one place that decides it. It must never alter the figures, which keep the term for any
+// card shape priced from them; measured figures (no type) are taken as given.
 func (fp fig) allHost(slots, ctxPerSlot int) float64 {
-	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
+	h := fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot) + fp.ScratchMiB
+	if fp.KVType != "" && quantised(fp.KVType) {
+		h -= fp.DequantPerTokenMiB * float64(slots*ctxPerSlot)
+	}
+	return h
 }
 
 // Need is the predicted memory in MiB of shape s, priced at its own cache type: card memory and
@@ -1457,7 +1454,9 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 		e.CapCtxTotal = ctxTotal
 		miss := 0
 		if failed.Slots > 0 {
-			miss = max(0, ceilMiB(f.kvAt(failed.Slots, failed.CtxPerSlot)-f.kvAt(failed.Slots, ctxTotal/failed.Slots)))
+			under := failed
+			under.CtxPerSlot = ctxTotal / failed.Slots
+			miss = max(0, ceilMiB(f.need(failed)-f.need(under)))
 		}
 		e.Lift = &CapLift{RoomMiB: rm.capRoom(), MissMiB: miss, NoGPU: rm.NoGPU, Build: build}
 	}

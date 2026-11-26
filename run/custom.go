@@ -204,6 +204,8 @@ func (s *Supervisor) UseCustom(path string) error {
 		return nil
 	}
 	if !ext {
+		// Say so at once: the old model's "ready" must not stand for the new file.
+		s.setPhase("starting", "Switching to "+plan.CustomName(abs))
 		go s.reloadSelected()
 	}
 	return nil
@@ -266,6 +268,7 @@ func (s *Supervisor) ClearCustom() {
 		lc()
 	}
 	if wasOn && !ext {
+		s.setPhase("starting", "Stopping your own file")
 		go s.reloadSelected()
 	}
 }

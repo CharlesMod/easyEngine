@@ -82,6 +82,9 @@ func TestCustomUseRestartMissingClear(t *testing.T) {
 	if code, out := post(t, srv.URL, "custom/use", jsonPath(p)); code != 202 || !strings.Contains(out, "started") {
 		t.Fatalf("use: %d %s", code, out)
 	}
+	if st := s.Status(); st.Phase == "ready" {
+		t.Fatalf("phase still ready right after custom/use (stale): %s", st.Message)
+	}
 	servedCustom := func(name string) func() bool {
 		return func() bool {
 			st := s.Status()

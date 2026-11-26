@@ -406,6 +406,8 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   too, and read alone would shrink the model with nothing else on the card. A change reshapes
   the model only when **held**: two consecutive reads of the reserve (others plus host) agree
   within 64 MiB. Other programs are never touched. The game's room wins over ctx.
+  The shrink goes in one restart to the shape the room fits (`fit.Choose`), or, when no shape
+  fits, to the smallest the steps reach; the model keeps serving there until the room comes back.
   A held shortfall of 256 MiB or more (`DrainMinMiB`) does not wait for a pause: llama-server
   holds its memory from load, so the reply in flight is safe to finish. New requests get
   "Loading model" (phase `resizing`) while it does, and the model shrinks once the slots are

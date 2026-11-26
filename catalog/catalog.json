@@ -1,16 +1,16 @@
 {
-  "version": 6,
+  "version": 7,
   "llamacpp": {
-    "tag": "b12680",
+    "tag": "b12651",
     "assets": [
       {
         "id": "cuda-linux-x64",
         "os": "linux",
         "arch": "amd64",
         "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "sha256": "0eb25efe0c16da6eec9a58dfdd1ba5ecfd67df22648e35c8617079189e5064a1",
-        "size": 220399512,
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "sha256": "cb099350c6a025e67eefaa13f2b67b2dcce53e38a0da22476e070d166ef367ea",
+        "size": 220195495,
         "extra": [
           "cudart-linux-x64"
         ]
@@ -20,36 +20,36 @@
         "os": "linux",
         "arch": "amd64",
         "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-b12680-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "sha256": "11a964834ab1bf83385543a3509bb2b5c10826345550245c158ad839937f4429",
-        "size": 594371571
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "sha256": "485df8f0b0ab30c15807d25fd23a821aeaef62a3947722c683429491a5e0d027",
+        "size": 594371475
       },
       {
         "id": "vulkan-linux-x64",
         "os": "linux",
         "arch": "amd64",
         "accel": "vulkan",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-vulkan-x64.tar.gz",
-        "sha256": "cba44b0656cbcb912570fad9427a6840c171cea934cabef98a8c9a53411a8396",
-        "size": 37067528
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-vulkan-x64.tar.gz",
+        "sha256": "0bbcf2093f15c64c8a9bf54b809c9b2c812b982992dc2fbc9b36720c1d32cf13",
+        "size": 36976824
       },
       {
         "id": "cpu-linux-x64",
         "os": "linux",
         "arch": "amd64",
         "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-ubuntu-x64.tar.gz",
-        "sha256": "91968c0feedb560428b798d37fa9a34732563900dba7876cb234d879d4e96085",
-        "size": 23378427
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-x64.tar.gz",
+        "sha256": "17b242259181d5b1b1f7719aba27929700a8b0dab39bfaef1b971a992b397b38",
+        "size": 23297838
       },
       {
         "id": "cuda-win-x64",
         "os": "windows",
         "arch": "amd64",
         "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cuda-12.4-x64.zip",
-        "sha256": "69dd907090f6c5b2d01279a5b8cd530e1774f462477b80e9fdbf0c78567d90de",
-        "size": 358327050,
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-12.4-x64.zip",
+        "sha256": "1a6c090f76fab41260b5b7597c6fb1add1fad2efaac692ae2673a22366220a29",
+        "size": 358031654,
         "extra": [
           "cudart-win-x64"
         ]
@@ -59,7 +59,7 @@
         "os": "windows",
         "arch": "amd64",
         "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-12.4-x64.zip",
         "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
         "size": 391443627
       },
@@ -68,9 +68,9 @@
         "os": "windows",
         "arch": "amd64",
         "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cuda-13.5-x64.zip",
-        "sha256": "7aebf7c42cb2c5d841dd2690899c7bee7c73b5a1299fa3095e68ce29d2b81db7",
-        "size": 225953261,
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-13.5-x64.zip",
+        "sha256": "5ad87e0771f3a129f6461b5fc706d8c2c5e5b71b2bd1f953a4221ca4d7797fef",
+        "size": 225702093,
         "extra": [
           "cudart13-win-x64"
         ]
@@ -80,7 +80,7 @@
         "os": "windows",
         "arch": "amd64",
         "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/cudart-llama-bin-win-cuda-13.5-x64.zip",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-13.5-x64.zip",
         "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
         "size": 426314199
       },
@@ -89,36 +89,36 @@
         "os": "windows",
         "arch": "amd64",
         "accel": "vulkan",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-vulkan-x64.zip",
-        "sha256": "cd659f5443977280dd82c5906a999723dd5bc8eed959580e1dc810c6df43ac21",
-        "size": 39065295
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-vulkan-x64.zip",
+        "sha256": "e58fa9a137d8046c69334005ad6fb3e904ddc7e56f2a61ad1b844335826ef3f4",
+        "size": 38939211
       },
       {
         "id": "cpu-win-x64",
         "os": "windows",
         "arch": "amd64",
         "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-win-cpu-x64.zip",
-        "sha256": "78604b34f3580d331352d9ea8cb81db25f64c49e53f273e8b60c6cc1cf744d45",
-        "size": 25216296
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cpu-x64.zip",
+        "sha256": "b2d794fa7587aba29f654d717ff9b73e31caeabf50a7766692903008bbe0855d",
+        "size": 25096571
       },
       {
         "id": "metal-mac-arm64",
         "os": "darwin",
         "arch": "arm64",
         "accel": "metal",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-macos-arm64.tar.gz",
-        "sha256": "c1a79ede3620510f8ab648290a0e8182f8289f6dd64fb79dd8ebc11ae73c119a",
-        "size": 16820164
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-arm64.tar.gz",
+        "sha256": "264fd872de61679c45ad57e1e21c2a2a54e29b35734ecf3d50f24166447ab8d2",
+        "size": 16644358
       },
       {
         "id": "cpu-mac-x64",
         "os": "darwin",
         "arch": "amd64",
         "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12680/llama-b12680-bin-macos-x64.tar.gz",
-        "sha256": "76b526754e834b48087a2c82a867f9f02675e502504c074f65f4c2a6de6a663e",
-        "size": 12540847
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-x64.tar.gz",
+        "sha256": "34c19771545479a783d3b68c446383ab703033890c052d3ff0b860a5c9f59e56",
+        "size": 12434934
       }
     ]
   },

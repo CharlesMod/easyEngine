@@ -41,7 +41,9 @@ const (
 
 // comCall calls slot n of obj's vtable.
 func comCall(obj uintptr, n int, args ...uintptr) uintptr {
-	vt := *(*unsafe.Pointer)(unsafe.Pointer(&obj))
+	// obj points at the object, whose first word points at its vtable.
+	p := *(*unsafe.Pointer)(unsafe.Pointer(&obj))
+	vt := *(*unsafe.Pointer)(p)
 	fn := *(*uintptr)(unsafe.Add(vt, n*int(unsafe.Sizeof(uintptr(0)))))
 	r, _, _ := syscall.SyscallN(fn, append([]uintptr{obj}, args...)...)
 	return r

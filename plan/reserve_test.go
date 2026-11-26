@@ -13,6 +13,7 @@ import (
 var (
 	rtx3050 = gpusense.Adapter{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "NVIDIA GeForce RTX 3050 Laptop GPU", DedicatedMiB: 4096, UsedMiB: 300, Source: "nvidia-smi"}
 	irisXe  = gpusense.Adapter{Index: 1, Vendor: "intel", VendorID: 0x8086, Name: "Intel(R) Iris(R) Xe Graphics", DedicatedMiB: 128, SharedMiB: 7900, UsedMiB: 200, Integrated: true, Source: "dxgi"}
+	hwBare  = probe.Hardware{OS: "windows", RAMTotalMiB: 16000, RAMAvailMiB: 9000} // the probe listed no GPU
 	hwLap   = probe.Hardware{OS: "windows", RAMTotalMiB: 16000, RAMAvailMiB: 9000, GPUs: []probe.GPU{
 		{Index: 0, Vendor: "nvidia", Name: "NVIDIA GeForce RTX 3050 Laptop GPU", VRAMTotalMiB: 4096, VRAMUsedMiB: 300, Source: "nvidia-smi"},
 		{Index: 1, Vendor: "intel", Name: "Intel(R) Iris(R) Xe Graphics", VRAMTotalMiB: 128, Source: "wmi"}}}
@@ -72,18 +73,18 @@ func TestMeasureReserve(t *testing.T) {
 		{name: "other apps hold memory (per process), ours and the host excluded",
 			pic: gpusense.Picture{Adapters: []gpusense.Adapter{{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "RTX 3050", DedicatedMiB: 8192, UsedMiB: 5329}},
 				Processes: []gpusense.Process{ours, {PID: 99, Adapter: 0, DedicatedMiB: 1000, Host: true}, {PID: 7, Name: "chrome.exe", Adapter: 0, DedicatedMiB: 1229}, {PID: 8, Adapter: 0, DedicatedMiB: 100}}},
-			hw: hwLap, host: HostInfo{PID: 99}, est: 500,
+			hw: hwBare, host: HostInfo{PID: 99}, est: 500,
 			want: want{engine: 0, hostAd: 0, hostMiB: 1000, hostBasis: "measured", othersMiB: 1329, hInt: "no", othersBasis: "processes", free: 8192 - 1329 - 1000 - 512 - 0, note: true},
 			gpu:  -1},
-				{name: "other apps hold memory (per process), the card counts memory no listed process accounts for",
+		{name: "other apps hold memory (per process), the card counts memory no listed process accounts for",
 			pic: gpusense.Picture{Adapters: []gpusense.Adapter{{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "RTX 3050", DedicatedMiB: 8192, UsedMiB: 6000}},
 				Processes: []gpusense.Process{ours, {PID: 99, Adapter: 0, DedicatedMiB: 1000, Host: true}, {PID: 7, Name: "chrome.exe", Adapter: 0, DedicatedMiB: 1229}, {PID: 8, Adapter: 0, DedicatedMiB: 100}}},
-			hw: hwLap, host: HostInfo{PID: 99}, est: 500,
+			hw: hwBare, host: HostInfo{PID: 99}, est: 500,
 			want: want{engine: 0, hostAd: 0, hostMiB: 1000, hostBasis: "measured", othersMiB: 2000, hInt: "no", othersBasis: "processes", free: 8192 - 2000 - 1000 - 512 - 0, note: true},
 			gpu:  -1},
 		{name: "no per-process data: the card's use less ours",
 			pic: gpusense.Picture{Adapters: []gpusense.Adapter{{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "RTX 3050", DedicatedMiB: 8192, UsedMiB: 4000}}},
-			hw:  hwLap, est: 0,
+			hw:  hwBare, est: 0,
 			want: want{engine: 0, hostAd: -1, othersMiB: 4000, hostBasis: "none", hInt: "unknown", othersBasis: "card", free: 8192 - 4000 - 512, note: true},
 			gpu:  -1},
 		{name: "iGPU-only machine: a pool of system memory bounded by shared+dedicated and the RAM",
@@ -179,5 +180,24 @@ func TestIntegratedNeverTakenAsVRAM(t *testing.T) {
 	sum, g := MeasureReserve(gpusense.Picture{}, hw, HostInfo{}, 0)
 	if g != 1 || sum.Adapters[sum.EngineAdapter].Vendor != "nvidia" {
 		t.Fatalf("engine on %d (%d)", g, sum.EngineAdapter)
+	}
+}
+
+// DESKTOP, live: DXGI says 3965 MiB for the 4 GB 3050 and the stand-in host on the Iris Xe holds
+// shared memory only. The card keeps the probe's 4096 and the host is found on the Iris Xe.
+func TestMeasureReserveDXGICardAndSharedOnlyHost(t *testing.T) {
+	pic := gpusense.Picture{Adapters: []gpusense.Adapter{
+		{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "NVIDIA GeForce RTX 3050 Laptop GPU", DedicatedMiB: 3965, SharedMiB: 16226, UsedMiB: 0, Source: "dxgi"},
+		{Index: 1, Vendor: "intel", VendorID: 0x8086, Name: "Intel(R) Iris(R) Xe Graphics", DedicatedMiB: 128, SharedMiB: 16226, UsedMiB: 0, Integrated: true, Source: "dxgi"}},
+		Processes: []gpusense.Process{{PID: 16288, Name: "fakehost.exe", Adapter: 1, SharedMiB: 6, Host: true}}}
+	sum, gi := MeasureReserve(pic, hwLap, HostInfo{PID: 16288}, 1500)
+	if gi != 0 || sum.Reserve.TotalMiB != 4096 {
+		t.Fatalf("engine gpu %d total %d, want 0 and 4096", gi, sum.Reserve.TotalMiB)
+	}
+	if sum.HostAdapter != 1 || sum.HostIntegrated != "yes" || sum.Reserve.HostMiB != 0 || sum.Reserve.HostBasis != "other-adapter" {
+		t.Fatalf("host %d %s %+v, want the Iris Xe, integrated, no host share", sum.HostAdapter, sum.HostIntegrated, sum.Reserve)
+	}
+	if sum.FreeForModelMiB != 4096-512 {
+		t.Fatalf("free %d, want %d", sum.FreeForModelMiB, 4096-512)
 	}
 }

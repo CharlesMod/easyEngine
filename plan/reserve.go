@@ -106,6 +106,12 @@ func pooled(a gpusense.Adapter) bool { return a.Unified || a.Integrated }
 // adapter takes the probe's own figure where it has one.
 func capacity(a gpusense.Adapter, hw probe.Hardware) int {
 	if !pooled(a) {
+		// A card the probe lists keeps the probe's total (nvidia-smi on NVIDIA), the figure the
+		// footprints and the planner's thresholds were set against; Windows' DXGI reports a
+		// little less for the same card (3965 of 4096 MiB on a 4 GB laptop part).
+		if i := hwIndex(hw, a); i >= 0 && hw.GPUs[i].VRAMTotalMiB > 0 {
+			return hw.GPUs[i].VRAMTotalMiB
+		}
 		return a.DedicatedMiB
 	}
 	if a.Unified {
@@ -137,7 +143,7 @@ func capacity(a gpusense.Adapter, hw probe.Hardware) int {
 //	         what the host measurably holds on E and estimateMiB ("measured" | "estimate")
 //	margin = fit.DefaultMargin
 //
-// The host's adapter is where its pid holds memory (the most), else the one host.Adapter names,
+// The host's adapter is where its pid holds memory (the most, dedicated plus shared), else the one host.Adapter names,
 // else unknown (the estimate is held). An empty picture (nothing sensed) is read from hw's GPUs
 // with the card's used memory standing for the whole card, as before the engine sensed.
 // engineGPU is E's index in hw.GPUs, -1 when E is not one of them or there is no E (CPU).
@@ -225,9 +231,10 @@ func MeasureReserve(pic gpusense.Picture, hw probe.Hardware, host HostInfo, esti
 func hostAdapter(pic gpusense.Picture, host HostInfo) (int, string) {
 	idx, held := -1, 0
 	for _, p := range pic.Processes {
-		if (p.Host || (host.PID > 0 && p.PID == host.PID)) && p.DedicatedMiB > held {
+		// any memory counts: on an integrated adapter a renderer holds shared memory only
+		if m := p.DedicatedMiB + p.SharedMiB; (p.Host || (host.PID > 0 && p.PID == host.PID)) && m > held {
 			if _, ok := adapterByIndex(pic.Adapters, p.Adapter); ok {
-				idx, held = p.Adapter, p.DedicatedMiB
+				idx, held = p.Adapter, m
 			}
 		}
 	}

@@ -15,8 +15,3 @@
 api/api_test.go
 api/custom_test.go
 api/yield_test.go
-app/app.go
-app/app_test.go
-cmd/easy-engine/main.go
-cmd/easy-engine/main_test.go
-web/index.html

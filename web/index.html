@@ -53,7 +53,7 @@ pre{margin:8px 0 0;max-height:260px;overflow:auto;background:var(--bg);border:1p
 </head>
 <body>
 <main>
-<header><span id="light" class="light"></span><div class="hmsg"><div class="phase" id="phase">Connecting</div><div class="mut" id="msg"></div></div></header>
+<header><span id="light" class="light"></span><div class="hmsg"><div class="phase" id="phase">Connecting</div><div class="mut" id="msg"></div></div><button id="bReconn" class="hide">Reconnect</button></header>
 <div id="errs" class="errs"></div>
 <div id="fbwarn" class="warn" role="status"></div>
 
@@ -205,14 +205,14 @@ function loadPlan(){
 }
 
 function render(){
-  var eb=$('errs');eb.textContent='';
+  var eb=$('errs');eb.textContent='';$('bReconn').classList.add('hide');
   if(needToken){
     $('phase').textContent='token needed';$('msg').textContent='This engine needs its token: run `easy-engine token`, then open this page as http://host:port/#token=TOKEN';setLight($('light'),'red');
     return;
   }
   if(unreachable){
-    $('phase').textContent='engine not reachable';$('msg').textContent='Retrying every second.';setLight($('light'),'red');
-    eb.textContent='engine not reachable';return;
+    $('phase').textContent='engine not reachable';$('msg').textContent='The engine did not answer. Press Reconnect to try again.';setLight($('light'),'red');
+    eb.textContent='engine not reachable';$('bReconn').classList.remove('hide');return;
   }
   if(!st)return;
   $('phase').textContent=st.phase||'?';
@@ -271,12 +271,75 @@ function renderSampler(sm){
   el.style.whiteSpace='pre-wrap';el.textContent=t;
 }
 
+// poll re-reads the status once. It runs on an event (a batch of events arrived, a click answered,
+// a reconnect), never on a clock. A read asked for while one is in flight folds into one more read.
+var reading=false,again=false;
 function poll(){
+  if(reading){again=true;return Promise.resolve()}
+  reading=true;
   return call('GET','status').then(function(s){
     var was=unreachable;unreachable=false;needToken=false;st=s;render();
     if(was||!plan){loadPlan();loadHW()}
-  }).catch(function(e){needToken=!!(e&&e.status===401);unreachable=!needToken;render()});
+  }).catch(function(e){needToken=!!(e&&e.status===401);unreachable=!needToken;render()}).then(function(){
+    reading=false;
+    if(again){again=false;return poll()}
+  });
 }
+
+// The page follows the engine's event stream: facts once (life and seq), then events?life&since held
+// open. A 409, a {"gap":true} line, or the stream's end reads the facts again and follows again. An
+// engine that cannot be reached is shown, with a Reconnect button; the person's click, the browser's
+// 'online' and the page becoming visible again are the events that try again.
+var life='',seq=0,ctl=null,quick=0;
+function refreshLogs(){Array.prototype.forEach.call(dets,function(d){if(d.open)loadLog(d)})}
+function down(e){
+  if(e&&e.status===401){needToken=true;unreachable=false}else{unreachable=true;needToken=false}
+  render();
+}
+function sync(){
+  if(ctl){try{ctl.abort()}catch(e){}}
+  var mine=ctl=new AbortController();
+  return call('GET','facts').then(function(f){
+    if(mine!==ctl)return;
+    life=f.life;seq=f.seq;
+    return poll().then(function(){if(mine===ctl&&!unreachable&&!needToken)follow(mine)});
+  }).catch(function(e){if(mine===ctl)down(e)});
+}
+function follow(mine){
+  var o={headers:{},signal:mine.signal};
+  if(TOKEN)o.headers['Authorization']='Bearer '+TOKEN;
+  var got=false;
+  fetch(API+'events?life='+encodeURIComponent(life)+'&since='+seq,o).then(function(r){
+    if(r.status===409)return 'resync';
+    if(!r.ok){var er=new Error('HTTP '+r.status);er.status=r.status;throw er}
+    var rd=r.body.getReader(),dec=new TextDecoder(),buf='';
+    function chunk(){
+      return rd.read().then(function(x){
+        if(x.done)return got?'resync':'ended';
+        buf+=dec.decode(x.value,{stream:true});
+        var lines=buf.split('\n');buf=lines.pop();
+        var n=0,gap=false;
+        lines.forEach(function(l){
+          if(!l)return;
+          var e;try{e=JSON.parse(l)}catch(x){return}
+          if(e.gap){gap=true;return}
+          if(e.seq>seq)seq=e.seq;
+          n++;
+        });
+        if(n){got=true;poll();refreshLogs()}
+        if(gap)return 'resync';
+        return chunk();
+      });
+    }
+    return chunk();
+  }).then(function(how){
+    if(mine!==ctl)return;
+    if(how==='ended'){if(++quick>=3){quick=0;down(new Error('stream ended'));return}}else quick=0;
+    return sync();
+  }).catch(function(e){if(mine===ctl)down(e)});
+}
+window.addEventListener('online',function(){sync()});
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')sync()});
 
 function settings(extra){
   var body={mode:st?st.mode:'local',external:{base_url:$('xUrl').value.trim(),model:$('xModel').value.trim(),api_key:$('xKey').value},
@@ -315,10 +378,8 @@ function loadLog(d){
 }
 var dets=document.querySelectorAll('details');
 Array.prototype.forEach.call(dets,function(d){d.addEventListener('toggle',function(){if(d.open)loadLog(d)})});
-setInterval(function(){Array.prototype.forEach.call(dets,function(d){if(d.open)loadLog(d)})},3000);
-
-poll();
-setInterval(poll,1000);
+$('bReconn').addEventListener('click',function(){sync()});
+sync();
 })();
 </script>
 </body>

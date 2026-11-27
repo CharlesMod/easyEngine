@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
@@ -34,6 +35,14 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 	}
 	defer func() { parent.Process.Kill(); parent.Wait() }()
 
+	// the lock's changes are watched before the engine starts, so none is missed
+	lockPath := filepath.Join(home, "engine.lock")
+	lockChanged, release, err := host.Changes(lockPath)
+	if err != nil {
+		t.Fatalf("watching the lock: %v", err)
+	}
+	defer release()
+
 	or, ow, _ := os.Pipe()
 	er, ew, _ := os.Pipe()
 	cmd := exec.Command(bin, "serve", "--port", "47650", "--parent-pid", strconv.Itoa(parent.Process.Pid))
@@ -48,37 +57,52 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 	go func() { exited <- cmd.Wait() }()
 	defer cmd.Process.Kill()
 
+	// the engine listens before it writes its lock, so a call once the lock names the port is
+	// answered as soon as the engine serves: the lock's change is the event, the call is held
 	base := ""
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && base == "" {
-		if d, err := lifecycle.ReadLock(filepath.Join(home, "engine.lock")); err == nil && d.Port > 0 {
-			if r, err := http.Get("http://127.0.0.1:" + strconv.Itoa(d.Port) + "/engine/v1/status"); err == nil {
-				r.Body.Close()
-				base = "http://127.0.0.1:" + strconv.Itoa(d.Port)
-			}
+	for base == "" {
+		if d, err := lifecycle.ReadLock(lockPath); err == nil && d.Port > 0 {
+			base = "http://127.0.0.1:" + strconv.Itoa(d.Port)
+			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-lockChanged:
+		case err := <-exited:
+			t.Fatalf("engine ended before it came up: %v", err)
+		case <-time.After(10 * time.Second): // watchdog for silence: a broken engine fails the test, it does not hang it
+			t.Fatal("engine did not come up")
+		}
 	}
-	if base == "" {
-		t.Fatal("engine did not come up")
+	client := &http.Client{Timeout: 10 * time.Second} // network timeout
+	r, err := client.Get(base + "/engine/v1/status")
+	if err != nil {
+		t.Fatalf("engine did not answer: %v", err)
 	}
+	r.Body.Close()
 	// the readers go away, then the engine logs
 	or.Close()
 	er.Close()
 	for i := 0; i < 3; i++ {
 		req, _ := http.NewRequest("POST", base+"/engine/v1/sleep", nil)
 		req.Header.Set("X-Easy-Engine", "1")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("engine died after its pipes closed: %v", err)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
+	// the engine answered each call after it logged (the pipes were closed by then); one more
+	// answer is the marker that it still lives, and it has not exited
+	if r, err := client.Get(base + "/engine/v1/status"); err != nil {
+		t.Fatalf("engine died after its pipes closed: %v", err)
+	} else {
+		r.Body.Close()
+	}
 	select {
 	case err := <-exited:
 		t.Fatalf("engine exited after the pipes closed: %v", err)
-	case <-time.After(300 * time.Millisecond):
+	default:
 	}
 	b, _ := os.ReadFile(filepath.Join(home, "logs", "engine.log"))
 	if !strings.Contains(string(b), "phase") {
@@ -91,7 +115,7 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unclean exit: %v", err)
 		}
-	case <-time.After(6 * time.Second):
+	case <-time.After(6 * time.Second): // watchdog for silence: the engine must end when its parent does
 		t.Fatal("engine did not exit after its parent died")
 	}
 	if _, err := os.Stat(filepath.Join(home, "engine.lock")); err == nil {

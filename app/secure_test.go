@@ -28,6 +28,7 @@ func TestServesStartedTogetherMakeOneEngine(t *testing.T) {
 		}
 		var started atomic.Int32
 		var attached atomic.Int32
+		settled := make(chan struct{}, 2*n)
 		var wg sync.WaitGroup
 		release := make(chan struct{})
 		for i := 0; i < n; i++ {
@@ -36,18 +37,26 @@ func TestServesStartedTogetherMakeOneEngine(t *testing.T) {
 				defer wg.Done()
 				<-release
 				r, err := app.Serve(context.Background(), app.Options{DataDir: dir, Profile: prof(), ParentPIDs: []int{parents[i].pid}, Port: 47620, Version: "t",
-					Started: func(int) { started.Add(1) }})
+					Started: func(int) { started.Add(1); settled <- struct{}{} }})
 				if err != nil {
 					t.Errorf("serve %d: %v", i, err)
+					settled <- struct{}{}
 					return
 				}
 				if r.Attached {
 					attached.Add(1)
+					settled <- struct{}{}
 				}
 			}(i)
 		}
 		close(release)
-		waitFor(t, func() bool { return started.Load()+attached.Load() == n }, "every serve to settle")
+		for i := 0; i < n; i++ {
+			select {
+			case <-settled:
+			case <-time.After(20 * time.Second): // watchdog for silence: a serve neither started nor attached
+				t.Fatal("timed out waiting for every serve to settle")
+			}
+		}
 		if started.Load() != 1 {
 			t.Fatalf("round %d: %d engines started, %d attached", round, started.Load(), attached.Load())
 		}
@@ -77,6 +86,7 @@ func TestServesStartedTogetherOverCorruptLockMakeOneEngine(t *testing.T) {
 			parents = append(parents, newSleeper(t))
 		}
 		var started, attached atomic.Int32
+		settled := make(chan struct{}, 2*n)
 		var wg sync.WaitGroup
 		release := make(chan struct{})
 		for i := 0; i < n; i++ {
@@ -85,18 +95,26 @@ func TestServesStartedTogetherOverCorruptLockMakeOneEngine(t *testing.T) {
 				defer wg.Done()
 				<-release
 				r, err := app.Serve(context.Background(), app.Options{DataDir: dir, Profile: prof(), ParentPIDs: []int{parents[i].pid}, Port: 47640, Version: "t",
-					Started: func(int) { started.Add(1) }})
+					Started: func(int) { started.Add(1); settled <- struct{}{} }})
 				if err != nil {
 					t.Errorf("serve %d: %v", i, err)
+					settled <- struct{}{}
 					return
 				}
 				if r.Attached {
 					attached.Add(1)
+					settled <- struct{}{}
 				}
 			}(i)
 		}
 		close(release)
-		waitFor(t, func() bool { return started.Load()+attached.Load() == n }, "every serve to settle")
+		for i := 0; i < n; i++ {
+			select {
+			case <-settled:
+			case <-time.After(20 * time.Second): // watchdog for silence: a serve neither started nor attached
+				t.Fatal("timed out waiting for every serve to settle")
+			}
+		}
 		if started.Load() != 1 {
 			t.Fatalf("corrupt %q: %d engines started, %d attached", corrupt, started.Load(), attached.Load())
 		}

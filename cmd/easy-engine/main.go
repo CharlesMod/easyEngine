@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,6 +22,8 @@ import (
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/event"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/probe"
@@ -233,7 +237,7 @@ func cmdInstall(args []string) int {
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- s.InstallSync(ctx, *model, *backend) }()
-	return waitBar(done, func() run.Status { return s.Status() })
+	return waitBar(s, done)
 }
 
 func installVia(tg app.Target, model, backend string) int {
@@ -256,56 +260,57 @@ func installVia(tg app.Target, model, backend string) int {
 		fmt.Fprintf(os.Stderr, "install: %s %s\n", resp.Status, b)
 		return 1
 	}
-	// get reads the engine's status; a transport error, a non-200 answer or an unreadable body
-	// is an error (a dead engine must not look like a finished install).
-	get := func() (run.Status, error) {
-		var st run.Status
-		req, err := tg.NewRequest("GET", "/engine/v1/status", nil)
-		if err != nil {
-			return st, err
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	var result error
+	err = follow(ctx, tg, "", func(st standing, _ *event.Event) bool {
+		var ph struct{ Phase, Message string }
+		if e, ok := st.get("phase"); ok {
+			json.Unmarshal(e.Body, &ph)
 		}
-		r, err := c.Do(req)
-		if err != nil {
-			return st, err
+		bar := run.Status{Message: ph.Message}
+		if e, ok := st.get("install.progress"); ok {
+			var p run.Progress
+			if json.Unmarshal(e.Body, &p) == nil {
+				bar.Progress = &p
+			}
 		}
-		defer r.Body.Close()
-		if r.StatusCode != 200 {
-			return st, fmt.Errorf("status: %s", r.Status)
+		fmt.Fprint(os.Stderr, "\r\033[K"+renderBar(bar))
+		if _, running := st.get("job"); running || ph.Phase == "downloading" || ph.Phase == "installing" {
+			return false
 		}
-		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
-			return st, fmt.Errorf("status: %v", err)
+		switch ph.Phase {
+		case "error":
+			result = fmt.Errorf("%s", ph.Message)
+		case "stopping":
+			result = fmt.Errorf("the engine is stopping")
 		}
-		return st, nil
+		return true
+	})
+	fmt.Fprint(os.Stderr, "\r\033[K")
+	if err == errEngineEnded {
+		err = fmt.Errorf("lost the engine: %v", err)
 	}
-	done := make(chan error, 1)
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		for {
-			st, err := get()
-			if err != nil {
-				done <- fmt.Errorf("lost the engine: %v", err)
-				return
-			}
-			if st.Phase != "downloading" && st.Phase != "installing" {
-				switch st.Phase {
-				case "error":
-					done <- fmt.Errorf("%s", st.Message)
-				case "stopping":
-					done <- fmt.Errorf("the engine is stopping")
-				default:
-					done <- nil
-				}
-				return
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	}()
-	return waitBar(done, func() run.Status { st, _ := get(); return st })
+	if err == nil {
+		err = result
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install failed:", err)
+		return 1
+	}
+	fmt.Println("Installed.")
+	return 0
 }
 
-func waitBar(done chan error, status func() run.Status) int {
-	t := time.NewTicker(300 * time.Millisecond)
-	defer t.Stop()
+// waitBar draws the install bar of an in-process install: it wakes on the supervisor's phase,
+// job and install.progress words, redraws each time, and ends when the install returns.
+func waitBar(s *run.Supervisor, done chan error) int {
+	w, err := s.Hub().Wake("install.progress", "phase", "job")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer w.Close()
 	for {
 		select {
 		case err := <-done:
@@ -316,9 +321,8 @@ func waitBar(done chan error, status func() run.Status) int {
 			}
 			fmt.Println("Installed.")
 			return 0
-		case <-t.C:
-			st := status()
-			fmt.Fprint(os.Stderr, "\r\033[K"+renderBar(st))
+		case <-w.C():
+			fmt.Fprint(os.Stderr, "\r\033[K"+renderBar(s.Status()))
 		}
 	}
 }
@@ -424,19 +428,42 @@ func cmdStop() int {
 		fmt.Println("No engine is running.")
 		return 0
 	}
+	// the engine's exit is the event: watched before the shutdown is asked, so it cannot be missed.
+	// (lifecycle.PidStart and host.StartOf agree on linux, not on darwin or windows, so the lock's
+	// start is checked with PidStart and the watch is host.Exits.)
+	var ended <-chan struct{}
+	if st, err := lifecycle.PidStart(d.Pid); err == nil && (d.Start == "" || st == d.Start) {
+		if ch, release, err := host.Exits(d.Pid); err == nil {
+			defer release()
+			ended = ch
+		}
+	}
 	req, _ := tg.NewRequest("POST", "/engine/v1/shutdown", nil)
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
-	for i := 0; i < 100; i++ {
-		if !lifecycle.PidAlive(d.Pid) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if ended == nil {
+		// no process event here: the engine's own event stream ends when the engine does, and a
+		// refused connection says it is already gone
+		err := follow(ctx, tg, "", func(standing, *event.Event) bool { return false })
+		var ue *url.Error
+		if err == errEngineEnded || errors.As(err, &ue) {
 			fmt.Println("Stopped.")
 			return 0
 		}
-		time.Sleep(100 * time.Millisecond)
+		fmt.Fprintln(os.Stderr, "engine did not stop:", err)
+		return 1
 	}
-	fmt.Fprintln(os.Stderr, "engine did not stop in 10 s")
-	return 1
+	select {
+	case <-ended:
+		fmt.Println("Stopped.")
+		return 0
+	case <-ctx.Done():
+		fmt.Fprintln(os.Stderr, "interrupted before the engine stopped")
+		return 1
+	}
 }
 
 // cmdGPU prints the adapters, the processes holding memory on them and the reserve the engine

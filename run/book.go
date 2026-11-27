@@ -31,7 +31,7 @@ var book = []event.Decl{
 	{Name: "network", Kind: event.Happening, What: "the system said a network link or address changed"},
 	{Name: "pairing", Kind: event.Fact, Keyed: true, What: "a pairing request waiting for a person's Allow or Deny (key: the request id): {name, code, from}; never a token; gone when answered, withdrawn or pushed out"},
 	{Name: "client", Kind: event.Fact, Keyed: true, What: "a paired client seen in this life (key: its client id): {name}; never a token"},
-	{Name: "mark", Kind: event.Happening,What: "a marker said from outside (a test, a client) to order what came before it: {what}"},
+	{Name: "mark", Kind: event.Happening, What: "a marker said from outside (a test, a client) to order what came before it: {what}"},
 }
 
 // say puts one event on the hub. A refusal is a programming error (an undeclared name, a body

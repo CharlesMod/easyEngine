@@ -148,6 +148,7 @@ type settingsFile struct {
 	listen, startListen settings.Listen
 	yield, startYield   settings.Yield
 	streamer            string // on | off: read by the proxy per request, so an edit applies at once
+	name, discovery     string // the engine's name and the mDNS announce (on | off): the app reads them at start and on each reload
 	err                 string // settings.json cannot be used: the previous settings stand
 	note                string // a listen or yield edit that waits for a restart
 }
@@ -155,6 +156,7 @@ type settingsFile struct {
 func (f *settingsFile) begin(file settings.File, serr *settings.Error) {
 	f.listen, f.startListen, f.yield, f.startYield = file.Listen, file.Listen, file.Yield, file.Yield
 	f.streamer = file.Streamer
+	f.name, f.discovery = file.Name, file.Discovery
 	if serr != nil {
 		f.err = serr.Error() + "; using the defaults"
 	}
@@ -180,8 +182,22 @@ func (s *Supervisor) fileLocked() settings.File {
 	return settings.File{
 		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
 		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
-		Streamer: s.sf.streamer, Listen: s.sf.listen, Yield: s.sf.yield,
+		Streamer: s.sf.streamer, Name: s.sf.name, Discovery: s.sf.discovery, Listen: s.sf.listen, Yield: s.sf.yield,
 	}.Normalize()
+}
+
+// EngineName is the settings name for this engine ("" means the host name; docs/ENGINE.md "Pairing").
+func (s *Supervisor) EngineName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sf.name
+}
+
+// Discovery reports whether a non-loopback listener announces itself by mDNS (settings "discovery").
+func (s *Supervisor) Discovery() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sf.discovery != "off"
 }
 
 // Streamer reports whether the token streamer is on (settings.json "streamer"; docs/STREAMING.md).
@@ -272,6 +288,7 @@ func (s *Supervisor) ReloadSettings() {
 	}
 	s.mu.Lock()
 	s.sf.listen, s.sf.yield, s.sf.streamer = f.Listen, f.Yield, f.Streamer
+	s.sf.name, s.sf.discovery = f.Name, f.Discovery
 	var what []string
 	if f.Listen != s.sf.startListen {
 		what = append(what, "listen address")

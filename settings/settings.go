@@ -69,8 +69,13 @@ type File struct {
 	// Streamer is the token streamer (docs/STREAMING.md): on (default) | off. Off is the proxy's
 	// plain byte copy, kept as a way back.
 	Streamer string `json:"streamer"`
-	Listen   Listen `json:"listen"`
-	Yield    Yield  `json:"yield"`
+	// Name is this engine's human name, shown to clients that find it on the network (hello, the
+	// mDNS name); empty is the host name.
+	Name string `json:"name"`
+	// Discovery is the mDNS/DNS-SD announce of a non-loopback listener: on (default) | off.
+	Discovery string `json:"discovery"`
+	Listen    Listen `json:"listen"`
+	Yield     Yield  `json:"yield"`
 }
 
 // KVTypes are the cache types llama-server takes.
@@ -82,10 +87,13 @@ var Policies = []string{"enforce", "fill", "off"}
 // Streamers are the streamer setting's values.
 var Streamers = []string{"on", "off"}
 
+// NameMax caps the name setting, in bytes.
+const NameMax = 63
+
 // Defaults is every setting at its default.
 func Defaults() File {
 	return File{
-		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on",
+		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on", Discovery: "on",
 		Listen: Listen{Host: "127.0.0.1", Port: DefaultPort},
 		Yield:  Yield{Except: []string{}, Ignore: []string{}, FloorMiB: 128, GraceS: 15, SteadyS: 60},
 	}
@@ -124,6 +132,10 @@ func (f File) Validate() (key, why string) {
 		return "sampler_policy", "sampler_policy must be enforce, fill or off"
 	case !in(Streamers, f.Streamer):
 		return "streamer", "streamer must be on or off"
+	case f.Discovery != "" && !in(Streamers, f.Discovery):
+		return "discovery", "discovery must be on or off"
+	case len(f.Name) > NameMax:
+		return "name", fmt.Sprintf("name must be at most %d bytes", NameMax)
 	case f.LingerS < 0:
 		return "linger_s", "linger_s must not be negative"
 	case f.Listen.Port < 1 || f.Listen.Port > 65535:
@@ -152,6 +164,9 @@ func (f File) Normalize() File {
 	}
 	if f.Streamer == "" {
 		f.Streamer = "on" // never written empty: an unset streamer is the default
+	}
+	if f.Discovery == "" {
+		f.Discovery = "on" // never written empty, like streamer
 	}
 	return f
 }

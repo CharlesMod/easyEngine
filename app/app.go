@@ -18,9 +18,11 @@ import (
 	"github.com/CharlesMod/easyEngine/api"
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/discover"
 	osevents "github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/pair"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/settings"
 )
@@ -59,6 +61,9 @@ type Options struct {
 	// its tooltip, and closes it at the end. Menu says what the three items act on.
 	Tray Tray
 	Menu MenuOptions
+	// Discovery is passed to the mDNS responder (tests give it an in-memory transport). The
+	// responder runs only on a listener that is not loopback (Discoverable) with discovery on.
+	Discovery discover.Options
 }
 
 // Result of Serve.
@@ -406,8 +411,30 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	if tk != nil {
 		a.Tokens = tk
 	}
+	// Who this engine is to a client on the network (hello, mDNS), and pairing where tokens are
+	// in force on a non-loopback listener (with --open there is nothing to pair for).
+	eid, err := pair.EngineID(dir)
+	if err != nil {
+		log.Printf("easy-engine: engine id: %v", err)
+	}
+	a.EngineID = eid
+	a.Name = func() string { return engineName(sup) }
+	var pr *pair.Pairer
+	if tk != nil {
+		pr = pair.New(sup.Hub(), tk, pair.DefaultMax)
+		a.Pair = pr
+		if ctl != nil {
+			ctl.pair = pr
+		}
+	}
+	an := &announcer{eligible: Discoverable(host) && eid != "", opts: o.Discovery}
+	info := func() discover.Info {
+		return discover.Info{ID: eid, Name: engineName(sup), API: run.APIVersion, Port: port}
+	}
 	srv := &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second} // network timeout
 	go srv.Serve(ln)
+	an.apply(sup.Discovery(), info())
+	defer an.close()
 	sup.Run()
 	if o.Started != nil {
 		o.Started(port)
@@ -465,6 +492,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 					return
 				case <-ch:
 					sup.ReloadSettings()
+					an.apply(sup.Discovery(), info()) // the name or discovery may have changed
 					ctl.refresh()
 				}
 			}
@@ -485,6 +513,12 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		defer o.Tray.Close()
 	}
 	wcancel()
+	// Waiting pairing requests end: each held GET pair/{id} is answered 410 and no token is
+	// issued after this; the network hears the goodbye before the listener closes.
+	if pr != nil {
+		pr.Close()
+	}
+	an.close()
 	sup.Shutdown()
 	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
 	if srv.Shutdown(sctx) != nil {

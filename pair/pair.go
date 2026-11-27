@@ -36,7 +36,7 @@ const FactName = "pairing"
 
 // Errors the callers turn into statuses.
 var (
-	ErrNoRequest = errors.New("no such pairing request")                  // 404 to the answerer, 410 to the client
+	ErrNoRequest = errors.New("no such pairing request")                 // 404 to the answerer, 410 to the client
 	ErrAmbiguous = errors.New("that code matches more than one request") // refused: answer by id
 	ErrClosed    = errors.New("the engine is ending")
 )

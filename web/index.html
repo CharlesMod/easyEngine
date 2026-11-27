@@ -56,6 +56,7 @@ pre{margin:8px 0 0;max-height:260px;overflow:auto;background:var(--bg);border:1p
 <header><span id="light" class="light"></span><div class="hmsg"><div class="phase" id="phase">Connecting</div><div class="mut" id="msg"></div></div><button id="bReconn" class="hide">Reconnect</button></header>
 <div id="errs" class="errs"></div>
 <div id="fbwarn" class="warn" role="status"></div>
+<section id="pairs" class="card hide"><h2 style="margin:0 0 6px">Pairing</h2><div class="mut">A device asks to use this engine. Allow it only if it shows the same code.</div><div id="pairList"></div></section>
 
 <section class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Hardware</h2><button id="hwref">Refresh</button></div><div id="hw" class="hw" style="margin-top:10px"></div></section>
 
@@ -136,6 +137,28 @@ function act(path,body,method){return call(method||'POST',path,body).then(functi
 function fmtMiB(m){if(m==null||isNaN(m))return '?';return m>=1024?(m/1024).toFixed(1)+' GB':Math.round(m)+' MB'}
 function fmtB(b){return b==null?'?':(b/1048576).toFixed(b>=1073741824?0:1)+' MB'}
 function fmtEta(s){if(s==null||s<0)return '?';s=Math.round(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m?m+'m '+(s%60)+'s':s+'s'}
+
+// Pairing requests: shown while one waits; a pairing event on the stream says when to look again.
+function loadPairs(){
+  return call('GET','pairing').then(function(r){
+    var list=(r&&r.requests)||[],box=$('pairList');
+    box.textContent='';
+    list.forEach(function(q){
+      var row=el('div','row');row.style.margin='10px 0 0';
+      var code=el('strong',null,q.code.slice(0,3)+' '+q.code.slice(3));code.style.fontSize='1.4em';code.style.letterSpacing='.08em';
+      row.appendChild(code);
+      row.appendChild(el('span',null,q.name+(q.from?' ('+q.from+')':'')));
+      var ok=el('button','pri','Allow'),no=el('button',null,'Deny');
+      ok.addEventListener('click',function(){answerPair(q.key,true)});
+      no.addEventListener('click',function(){answerPair(q.key,false)});
+      row.appendChild(ok);row.appendChild(no);box.appendChild(row);
+    });
+    $('pairs').className='card'+(list.length?'':' hide');
+  }).catch(function(){$('pairs').className='card hide'});
+}
+function answerPair(key,allow){
+  return call('POST','pairing/answer',{key:key,allow:allow}).catch(function(e){toast=String(e.message||e);render()}).then(loadPairs);
+}
 
 function setLight(e,c){e.className='light'+(c?' '+c:'')}
 function phaseColor(p){
@@ -302,7 +325,7 @@ function sync(){
   return call('GET','facts').then(function(f){
     if(mine!==ctl)return;
     life=f.life;seq=f.seq;
-    return poll().then(function(){if(mine===ctl&&!unreachable&&!needToken)follow(mine)});
+    return poll().then(function(){if(mine===ctl&&!unreachable&&!needToken){loadPairs();follow(mine)}});
   }).catch(function(e){if(mine===ctl)down(e)});
 }
 function follow(mine){
@@ -318,15 +341,17 @@ function follow(mine){
         if(x.done)return got?'resync':'ended';
         buf+=dec.decode(x.value,{stream:true});
         var lines=buf.split('\n');buf=lines.pop();
-        var n=0,gap=false;
+        var n=0,gap=false,pairs=false;
         lines.forEach(function(l){
           if(!l)return;
           var e;try{e=JSON.parse(l)}catch(x){return}
           if(e.gap){gap=true;return}
           if(e.seq>seq)seq=e.seq;
+          if(e.name==='pairing')pairs=true;
           n++;
         });
         if(n){got=true;poll();refreshLogs()}
+        if(pairs)loadPairs();
         if(gap)return 'resync';
         return chunk();
       });

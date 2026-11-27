@@ -100,7 +100,7 @@ func (d *diskFix) installBackend(t *testing.T) {
 		bin += ".exe"
 	}
 	os.WriteFile(filepath.Join(dir, bin), []byte("x"), 0o755)
-	os.WriteFile(filepath.Join(dir, ".installed"), []byte("sha"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".installed"), []byte(d.be.SHA256), 0o644)
 }
 
 func TestSetupNeedFresh(t *testing.T) {

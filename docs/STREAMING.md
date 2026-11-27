@@ -16,6 +16,11 @@ A request is streamed when all of these hold, and only then:
 - its JSON body says `"stream": true`;
 - the streamer is on.
 
+In external mode the proxy forwards only `/v1/*`, so only `/v1/chat/completions` and
+`/v1/completions` reach an endpoint there; the other three paths are answered `404`
+(`Only /v1 is forwarded in external mode`) before the streamer is asked. In local mode all five
+reach the model server.
+
 Everything else (`stream` false or missing, a body that is not JSON, any other path, any other
 method) is forwarded exactly as before: the same status, headers and bytes.
 
@@ -162,3 +167,14 @@ What never gets a terminal event:
 - A reply that ends without `[DONE]` (or `"stop": true`) and without an error event did not come
   through the streamer (it is off, or the reply was compressed).
 - Ignore lines that start with `:`.
+
+## 7. Checked against a real model server
+
+2026-11-27, build `1d80bfb`, external mode in front of llama-server build 12680 (one slot), each
+reply compared byte for byte with the same request sent to llama-server directly: a chat stream
+with `include_usage`, `return_progress`, a grammar, tools with `tool_choice: required`, `id_slot`
+and a non-streamed request were identical. A request queued behind another began with
+`: easy waiting` at 2.0 s (direct, its first byte came at 10.3 s) and got the comment again every
+15 s, always between events. A client's disconnect freed the slot within 0.5 s, as a direct
+disconnect does. Not yet checked this way: local mode (the engine's own model server), the quiet
+word, and the four terminal events, which the tests cover against the fake model server.

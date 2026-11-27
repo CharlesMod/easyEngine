@@ -1,0 +1,21 @@
+
+==============NVSMI LOG==============
+
+Attached GPUs                                          : 2
+GPU 00000000:01:00.0
+    Processes                                          : None
+
+GPU 00000000:65:00.0
+    Processes
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 777
+            Type                          : C
+            Name                          : /usr/bin/some tool
+            Used GPU Memory               : 512 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 778
+            Type                          : G
+            Name                          : Game.exe
+            Used GPU Memory               : Not Available

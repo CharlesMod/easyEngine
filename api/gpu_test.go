@@ -21,14 +21,14 @@ func gpuEnv(t *testing.T, calls *atomic.Int32) (*testkit.Env, *run.Supervisor, s
 	e.InstallFake()
 	cfg := e.Config()
 	cfg.Sense = func(ctx context.Context, ours []int, host int) gpusense.Picture {
-		calls.Add(1)
+		n := calls.Add(1) // each reading carries its number, so a report says which reading it is
 		return gpusense.Picture{
 			Adapters: []gpusense.Adapter{
 				{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "Fake GPU", DedicatedMiB: 16384, UsedMiB: 1300},
 				{Index: 1, Vendor: "intel", VendorID: 0x8086, Name: "Intel(R) Iris(R) Xe Graphics", DedicatedMiB: 128, SharedMiB: 8000, UsedMiB: 100, Integrated: true},
 			},
 			Processes: []gpusense.Process{{PID: 4242, Name: "browser", Adapter: 0, DedicatedMiB: 1300, Kind: "graphics"}},
-			Sources:   map[string]string{"fake": "ok"},
+			Sources:   map[string]string{"fake": "ok", "call": fmt.Sprint(n)},
 		}
 	}
 	cfg.Others = func(context.Context, probe.GPU, []int) (int, error) { return 0, nil }
@@ -54,13 +54,26 @@ func TestGPURoute(t *testing.T) {
 	if rep.Reserve.OthersMiB != 1300 || rep.Reserve.OthersBasis != "processes" || rep.OthersNote == "" || rep.FreeForModelMiB != 16384-1300-655 {
 		t.Fatalf("reserve %+v free %d note %q", rep.Reserve, rep.FreeForModelMiB, rep.OthersNote)
 	}
-	n := calls.Load()
-	do(t, "GET", url+"/engine/v1/gpu", "", nil) // cached for 5 s
-	if calls.Load() != n {
-		t.Fatalf("a plain GET sensed again (%d -> %d)", n, calls.Load())
+	// Cached for 5 s: a plain GET answers the reading it already has, refresh=1 a new one. The
+	// watchdog senses through the same hook on its own ticks, so the count of calls cannot tell
+	// the two apart; the number the reading carries can.
+	reading := func(query string) string {
+		t.Helper()
+		c, body, _ := do(t, "GET", url+"/engine/v1/gpu"+query, "", nil)
+		var r gpusense.GPUReport
+		if err := json.Unmarshal([]byte(body), &r); c != 200 || err != nil || r.Sources["call"] == "" {
+			t.Fatalf("gpu%s: %d %v %s", query, c, err, body)
+		}
+		return r.Sources["call"]
 	}
-	do(t, "GET", url+"/engine/v1/gpu?refresh=1", "", nil)
-	if calls.Load() == n {
+	first := rep.Sources["call"]
+	if first == "" {
+		t.Fatalf("report names no reading: %s", body)
+	}
+	if got := reading(""); got != first {
+		t.Fatalf("a plain GET sensed again (reading %s -> %s)", first, got)
+	}
+	if got := reading("?refresh=1"); got == first {
 		t.Fatal("refresh=1 did not sense")
 	}
 	if c, _, _ := do(t, "POST", url+"/engine/v1/gpu", "", csrf); c != 405 {

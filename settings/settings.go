@@ -66,8 +66,11 @@ type File struct {
 	LingerS       int      `json:"linger_s"`
 	KVType        string   `json:"kv_type"`
 	SamplerPolicy string   `json:"sampler_policy"` // enforce | fill | off
-	Listen        Listen   `json:"listen"`
-	Yield         Yield    `json:"yield"`
+	// Streamer is the token streamer (docs/STREAMING.md): on (default) | off. Off is the proxy's
+	// plain byte copy, kept as a way back.
+	Streamer string `json:"streamer"`
+	Listen   Listen `json:"listen"`
+	Yield    Yield  `json:"yield"`
 }
 
 // KVTypes are the cache types llama-server takes.
@@ -76,10 +79,13 @@ var KVTypes = []string{"q4_0", "q8_0", "f16", "q4_1", "q5_0", "q5_1", "iq4_nl", 
 // Policies are the sampler policies (docs/SAMPLERS.md).
 var Policies = []string{"enforce", "fill", "off"}
 
+// Streamers are the streamer setting's values.
+var Streamers = []string{"on", "off"}
+
 // Defaults is every setting at its default.
 func Defaults() File {
 	return File{
-		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce",
+		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on",
 		Listen: Listen{Host: "127.0.0.1", Port: DefaultPort},
 		Yield:  Yield{Except: []string{}, Ignore: []string{}, FloorMiB: 128, GraceS: 15, SteadyS: 60},
 	}
@@ -116,6 +122,8 @@ func (f File) Validate() (key, why string) {
 		return "kv_type", fmt.Sprintf("unknown kv_type %q", f.KVType)
 	case !in(Policies, f.SamplerPolicy):
 		return "sampler_policy", "sampler_policy must be enforce, fill or off"
+	case !in(Streamers, f.Streamer):
+		return "streamer", "streamer must be on or off"
 	case f.LingerS < 0:
 		return "linger_s", "linger_s must not be negative"
 	case f.Listen.Port < 1 || f.Listen.Port > 65535:
@@ -141,6 +149,9 @@ func (f File) Normalize() File {
 	}
 	if f.Yield.Ignore == nil {
 		f.Yield.Ignore = []string{}
+	}
+	if f.Streamer == "" {
+		f.Streamer = "on" // never written empty: an unset streamer is the default
 	}
 	return f
 }
@@ -209,6 +220,9 @@ func Parse(text []byte) (File, error) {
 	}
 	if f.SamplerPolicy == "" {
 		f.SamplerPolicy = "enforce"
+	}
+	if f.Streamer == "" {
+		f.Streamer = "on"
 	}
 	if f.Listen.Host == "" {
 		f.Listen.Host = "127.0.0.1"

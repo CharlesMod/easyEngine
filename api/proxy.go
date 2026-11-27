@@ -40,6 +40,8 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	done := a.S.Begin() // count first, so a resize cannot slip in between Route and the forward
 	defer done()
+	id := requestID(r)
+	w.Header().Set(RequestIDHeader, id)
 	rt := a.S.Route()
 	switch rt.Kind {
 	case "unavailable":
@@ -85,7 +87,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(a.hearing(w), r)
+		forward(w, r, rp, a.fwd(true, id))
 	default:
 		target, err := url.Parse(rt.URL)
 		if err != nil {
@@ -106,7 +108,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(a.hearing(w), r)
+		forward(w, r, rp, a.fwd(false, id))
 	}
 }
 

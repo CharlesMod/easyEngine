@@ -80,6 +80,7 @@ fsync and rename:
   "linger_s": 0,
   "kv_type": "q4_0",
   "sampler_policy": "enforce",
+  "streamer": "on",
   "listen": {
     "host": "127.0.0.1",
     "port": 47480,
@@ -930,6 +931,7 @@ answers **503** with `Retry-After: 10` and
 where `<reason>` is, for example, `AppId 123 (game.exe)`. The string code tells "paused for
 another program" apart from "loading". In external mode, `/v1/*` is forwarded
 to the external base URL with its key added, so the agent always talks to the engine.
+Streamed completion replies go through the token streamer, on by default (`"streamer": "off"` in settings.json turns it off): see `docs/STREAMING.md`.
 
 ### Sampler policy
 

@@ -37,6 +37,7 @@ type fakeTray struct {
 	items   []tray.Item
 	tooltip string
 	closed  bool
+	notes   []string      // every Notify body, in order
 	drawn   chan struct{} // a signal for each SetItems
 	changed chan struct{} // a signal for each SetItems and SetTooltip (one pending is enough)
 }
@@ -83,9 +84,15 @@ func (f *fakeTray) SetItems(items []tray.Item) {
 	}
 	f.signal()
 }
-func (f *fakeTray) SetTooltip(s string)             { f.mu.Lock(); f.tooltip = s; f.mu.Unlock(); f.signal() }
-func (f *fakeTray) Notify(title, body string) error { return nil }
-func (f *fakeTray) Close()                          { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
+func (f *fakeTray) SetTooltip(s string) { f.mu.Lock(); f.tooltip = s; f.mu.Unlock(); f.signal() }
+func (f *fakeTray) Notify(title, body string) error {
+	f.mu.Lock()
+	f.notes = append(f.notes, body)
+	f.mu.Unlock()
+	f.signal()
+	return nil
+}
+func (f *fakeTray) Close() { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
 func (f *fakeTray) snap() ([]tray.Item, string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

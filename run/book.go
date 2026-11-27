@@ -31,6 +31,8 @@ var book = []event.Decl{
 	{Name: "context", Kind: event.Happening, Keyed: true, What: "the prompt cache across a reshape (key: the slot, or \"all\" for a save that did not happen for any slot, slot -1): {what: saved|laid_back|let_go|not_saved, slot, tokens, bytes, why}; status contexts lists what is kept"},
 	{Name: "nudge", Kind: event.Happening, What: "a word that could change an outcome: a request at the door, a client's start or install: {why}"},
 	{Name: "network", Kind: event.Happening, What: "the system said a network link or address changed"},
+	{Name: "pairing", Kind: event.Fact, Keyed: true, What: "a pairing request waiting for a person's Allow or Deny (key: the request id): {name, code, from}; never a token; gone when answered, withdrawn or pushed out"},
+	{Name: "client", Kind: event.Fact, Keyed: true, What: "a paired client seen in this life (key: its client id): {name}; never a token"},
 	{Name: "mark", Kind: event.Happening, What: "a marker said from outside (a test, a client) to order what came before it: {what}"},
 }
 

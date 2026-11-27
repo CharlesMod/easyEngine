@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/CharlesMod/easyEngine/autostart"
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/openfile"
+	"github.com/CharlesMod/easyEngine/pair"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/settings"
 	"github.com/CharlesMod/easyEngine/tray"
@@ -100,18 +103,36 @@ func ExePath() string {
 // view is what the menu is drawn from.
 type view struct {
 	autostart bool
-	chat      bool // a model is ready to talk to, and this engine's chat page can be reached
+	chat      bool      // a model is ready to talk to, and this engine's chat page can be reached
+	pairs     []pending // pairing requests that wait for an answer, oldest first
 }
 
-// menu is the whole menu as a function of state: four items, nothing else. A later slice
-// adds an item (a pairing request that waits) by adding a field to view and a line here.
+// pending is a pairing request as the tray shows it (from the hub's pairing fact).
+type pending struct {
+	key, name, code string
+	quiet           bool // its source was denied in this life: listed, never notified
+}
+
+func (p pending) label() string { return p.name + " (" + pair.SpacedCode(p.code) + ")" }
+
+// menu is the whole menu as a function of state: the four standing items, and above them, only
+// while pairing requests wait, an Allow and a Deny item for each and a separator.
 func menu(v view) []tray.Item {
-	return []tray.Item{
-		{ID: "chat", Title: "Chat", Disabled: !v.chat},
-		{ID: "autostart", Title: "Launch at Startup", Checkable: true, Checked: v.autostart},
-		{ID: "settings", Title: "Settings"},
-		{ID: "quit", Title: "Quit"},
+	var items []tray.Item
+	for _, p := range v.pairs {
+		items = append(items,
+			tray.Item{ID: "allow:" + p.key + ":" + p.code, Title: "Allow " + p.label()},
+			tray.Item{ID: "deny:" + p.key + ":" + p.code, Title: "Deny " + p.label()})
 	}
+	if len(items) > 0 {
+		items = append(items, tray.Item{ID: "pairing-sep", Separator: true})
+	}
+	return append(items,
+		tray.Item{ID: "chat", Title: "Chat", Disabled: !v.chat},
+		tray.Item{ID: "autostart", Title: "Launch at Startup", Checkable: true, Checked: v.autostart},
+		tray.Item{ID: "settings", Title: "Settings"},
+		tray.Item{ID: "quit", Title: "Quit"},
+	)
 }
 
 // StartTray shows the tray icon. It returns an error wrapping tray.ErrNoTray when this session
@@ -134,11 +155,15 @@ type controller struct {
 	quit func()
 	chat string // the chat page ("" when this engine's page cannot be reached from here)
 
-	mu    sync.Mutex
-	v     view
-	names map[string]string
-	last  string
-	drawn []tray.Item // the menu as last drawn
+	// pair answers the pairing requests the menu shows; nil where pairing is not offered.
+	pair *pair.Pairer
+
+	mu       sync.Mutex
+	v        view
+	names    map[string]string
+	last     string
+	drawn    []tray.Item     // the menu as last drawn
+	notified map[string]bool // pairing requests already said in a notification
 }
 
 func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir, chat string, quit func()) *controller {
@@ -189,8 +214,72 @@ func (c *controller) click(id string) {
 		}()
 	case "quit":
 		c.quit()
+	default:
+		if rest, ok := strings.CutPrefix(id, "allow:"); ok {
+			c.answer(rest, true)
+		} else if rest, ok := strings.CutPrefix(id, "deny:"); ok {
+			c.answer(rest, false)
+		}
 	}
 	c.refresh()
+}
+
+// answer is the person's Allow or Deny from the menu. The item's id carries the key and the code
+// the item showed ("<key>:<code>"), so a press answers the request the person compared and not
+// a replacement that took its key since the menu was drawn.
+func (c *controller) answer(keyCode string, allow bool) {
+	if c.pair == nil {
+		return
+	}
+	key, code, _ := strings.Cut(keyCode, ":")
+	if _, err := c.pair.Answer(key, code, allow); err != nil {
+		log.Printf("easy-engine: pairing answer: %v", err)
+	}
+}
+
+// pendingPairs reads the pairing requests that stand on the hub, oldest first.
+func (c *controller) pendingPairs() []pending {
+	if c.pair == nil {
+		return nil
+	}
+	evs := c.sup.Hub().Facts(pair.FactName)
+	sort.Slice(evs, func(i, j int) bool { return evs[i].Seq < evs[j].Seq })
+	var out []pending
+	for _, e := range evs {
+		var b struct {
+			Name, Code string
+			Quiet      bool
+		}
+		if json.Unmarshal(e.Body, &b) == nil {
+			out = append(out, pending{key: e.Key, name: b.Name, code: b.Code, quiet: b.Quiet})
+		}
+	}
+	return out
+}
+
+// notifyLocked picks the pairing requests not yet said, each once as it arrives, and returns the
+// notifications to send (after the lock): "Allow <name> (493 201)?".
+func (c *controller) notifyLocked(ps []pending) (says []string) {
+	if c.notified == nil {
+		c.notified = map[string]bool{}
+	}
+	now := map[string]bool{}
+	for _, p := range ps {
+		now[p.key] = true
+		if !c.notified[p.key] {
+			c.notified[p.key] = true // a replacement by the same source keeps the key: said once
+			if p.quiet {
+				continue
+			}
+			says = append(says, "Allow "+p.label()+"?")
+		}
+	}
+	for k := range c.notified {
+		if !now[k] {
+			delete(c.notified, k)
+		}
+	}
+	return says
 }
 
 // toggleAutostart flips Launch at Startup, then shows what the system now says.
@@ -232,22 +321,28 @@ func listenAddr(host string, port int) string {
 	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 }
 
-// watch redraws the menu and tooltip when the supervisor's "phase", "model" or "door" fact
-// changes (Chat turns on when a model is ready; the tooltip says the model and the requests the
-// door holds), until ctx ends. It is driven by the engine's own event hub (Wake, then read the
+// watch redraws the menu and tooltip when the supervisor's "phase", "model", "door" or "pairing"
+// fact changes (Chat turns on when a model is ready; the tooltip says the model and the requests the
+// door holds; a pairing request adds its Allow and Deny items and one notification), until ctx ends. It is driven by the engine's own event hub (Wake, then read the
 // state), not a clock.
 func (c *controller) watch(ctx context.Context) {
-	w, err := c.sup.Hub().Wake("phase", "model", "door") // made before the first read, so no change slips between
+	w, err := c.sup.Hub().Wake("phase", "model", "door", pair.FactName) // made before the first read, so no change slips between
 	if err != nil {
 		log.Printf("easy-engine: tray cannot follow the phase: %v", err)
 		return
 	}
 	defer w.Close()
 	for {
+		ps := c.pendingPairs()
 		c.mu.Lock()
 		c.v.chat = c.chatReady()
+		c.v.pairs = ps
+		says := c.notifyLocked(ps)
 		stale := c.tooltip() != c.last || !reflect.DeepEqual(menu(c.v), c.drawn)
 		c.mu.Unlock()
+		for _, s := range says {
+			_ = c.t.Notify("easy-engine", s)
+		}
 		if stale {
 			c.refresh()
 		}
@@ -266,7 +361,9 @@ func (c *controller) refresh() {
 	if c == nil {
 		return
 	}
+	ps := c.pendingPairs()
 	c.mu.Lock()
+	c.v.pairs = ps
 	c.v.chat = c.chatReady()
 	items := menu(c.v)
 	c.drawn = items

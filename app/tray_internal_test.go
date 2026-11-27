@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/internal/testkit"
 	"github.com/CharlesMod/easyEngine/tray"
+	"github.com/CharlesMod/easyEngine/web"
 )
 
 func TestMenuChatSitsAboveSettingsAndFollowsReadiness(t *testing.T) {
@@ -151,5 +153,12 @@ func TestListenAddr(t *testing.T) {
 	}
 	if got := listenAddr("::1", 47481); got != "[::1]:47481" {
 		t.Fatal(got)
+	}
+}
+
+// The chat page's tab icon is the tray's icon: web/icon.png is a copy, kept equal here.
+func TestChatIconIsTheTrayIcon(t *testing.T) {
+	if !bytes.Equal(web.Icon, tray.DefaultIcon().PNG) {
+		t.Fatal("web/icon.png differs from tray/icons/tray.png; copy it again")
 	}
 }

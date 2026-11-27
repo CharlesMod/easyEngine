@@ -28,7 +28,8 @@ const (
 
 // notReadyPage is what /chat/ shows while there is no local model to talk to.
 const notReadyPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat</title>
+<title>easyEngine</title>
+<link rel="icon" type="image/png" href="/chat/icon.png">
 <style>body{font:16px system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;color:#444;background:#fafafa}
 @media(prefers-color-scheme:dark){body{color:#ccc;background:#1b1b1b}}p{max-width:24em;text-align:center;padding:1em}</style>
 <p>No model is ready to chat yet.<br>Reload this page once one is. <a href="">Reload</a></p>
@@ -59,6 +60,10 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Write(web.Chat)
+	case path == chatPath+"icon.png":
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Write(web.Icon)
 	case strings.HasPrefix(path, uiPrefix+"/"):
 		if !a.chatReady() {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")

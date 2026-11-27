@@ -12,6 +12,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/api"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/web"
 )
 
 // chatServer is a ready engine.
@@ -32,6 +33,13 @@ func TestChatServesWrapperAndStripsThePrefix(t *testing.T) {
 	c, body, h := do(t, "GET", srv.URL+"/chat/", "", nil)
 	if c != 200 || !strings.Contains(body, `<iframe`) || h.Get("Cache-Control") != "no-store" {
 		t.Fatalf("wrapper: %d %s %v", c, body, h)
+	}
+	// The tab is ours, not llama's: the wrapper is the top page, so its title and icon show.
+	if !strings.Contains(body, "<title>easyEngine</title>") || !strings.Contains(body, `rel="icon"`) {
+		t.Errorf("wrapper has no easyEngine title and icon: %s", body)
+	}
+	if c, icon, h := do(t, "GET", srv.URL+"/chat/icon.png", "", nil); c != 200 || h.Get("Content-Type") != "image/png" || icon != string(web.Icon) || !strings.HasPrefix(icon, "\x89PNG") {
+		t.Errorf("icon: %d %q", c, h.Get("Content-Type"))
 	}
 	// The UI and its assets come from llama-server with /chat/ui stripped.
 	if c, body, _ := do(t, "GET", srv.URL+"/chat/ui/", "", nil); c != 200 || body != "fake llama web ui path=/" {
@@ -132,6 +140,9 @@ func TestChatWhenNoModelIsReady(t *testing.T) {
 	}
 	if c != 200 || !strings.Contains(body, "No model is ready") || strings.Contains(body, "<iframe") || strings.Contains(h.Get("Content-Type"), "json") {
 		t.Fatalf("want a plain not-ready page, got %d %s", c, body)
+	}
+	if !strings.Contains(body, "<title>easyEngine</title>") || !strings.Contains(body, `href="/chat/icon.png"`) {
+		t.Errorf("not-ready page lacks the easyEngine title and icon: %s", body)
 	}
 	if c, body, _ := do(t, "GET", srv.URL+"/chat/ui/", "", nil); c != 503 || !strings.Contains(body, "No model is ready") {
 		t.Fatalf("ui while loading: %d %s", c, body)

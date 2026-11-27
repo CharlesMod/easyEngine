@@ -8,6 +8,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/host"
+	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
@@ -33,10 +34,26 @@ func sameRoom(a, b roomRead) bool {
 	return a.room.NoGPU == b.room.NoGPU && d <= heldTolMiB && -d <= heldTolMiB
 }
 
+// roomDevices are the globs of the device nodes whose opens the room watch hears (a test points
+// them at a temp dir).
+var roomDevices = []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/card*"}
+
+// Test seams (run/export_room_test.go): a test hears that a read of the room has ended, and that
+// the goroutine reading the opens of an arming has ended, by those events and never by a clock.
+var (
+	roomReadDone atomic.Pointer[func()]
+	roomOpensEnd atomic.Pointer[func()]
+)
+
+func hook(p *atomic.Pointer[func()]) {
+	if f := p.Load(); f != nil {
+		(*f)()
+	}
+}
+
 type roomWatch struct {
 	s     *Supervisor
 	level *host.Level[roomRead]
-	self  atomic.Bool // our own read just opened the card (nvidia-smi): its open is not a stranger's
 
 	mu        sync.Mutex
 	armed     bool
@@ -54,15 +71,28 @@ func newRoomWatch(s *Supervisor) *roomWatch {
 // read senses the room once (never under opMu: the reactor and the level call it outside it).
 func (rw *roomWatch) read() (roomRead, bool) {
 	s := rw.s
+	defer hook(&roomReadDone)
 	if s.root.Err() != nil {
 		return roomRead{}, false
 	}
-	hw, err := s.cfg.Probe(s.root)
+	// The probe and the sense each run nvidia-smi, which opens the card's device: those opens are
+	// ours, and host.Own keeps every Opens watch (this one and the yield level's) from hearing
+	// them, however late the kernel's events are read.
+	var (
+		hw   probe.Hardware
+		err  error
+		room fit.Room
+		sn   sensed
+	)
+	host.Own(func() {
+		if hw, err = s.cfg.Probe(s.root); err != nil {
+			return
+		}
+		room, sn = s.roomSensed(s.root, hw, s.launching.pids())
+	})
 	if err != nil {
 		return roomRead{}, false
 	}
-	room, sn := s.roomSensed(s.root, hw, s.launching.pids())
-	rw.self.Store(true)
 	var strangers []int
 	for _, p := range sn.pic.Processes {
 		if !p.Ours && p.PID > 0 && p.PID != os.Getpid() {
@@ -93,7 +123,7 @@ func (rw *roomWatch) arm() {
 	rw.level.Arm()
 	rw.level.Now() // a second read at once, so the baseline holds without waiting a period
 	var paths []string
-	for _, g := range []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/card*"} {
+	for _, g := range roomDevices {
 		m, _ := filepath.Glob(g)
 		paths = append(paths, m...)
 	}
@@ -104,18 +134,20 @@ func (rw *roomWatch) arm() {
 	if err != nil { // host.ErrNoEvent off Linux: the level's watchdog keeps it alone
 		return
 	}
-	rw.opensStop = stop
+	done := make(chan struct{}) // disarm ends the goroutine below: it never outlives its arming
+	var once sync.Once
+	rw.opensStop = func() { stop(); once.Do(func() { close(done) }) }
 	go func() {
+		defer hook(&roomOpensEnd)
 		for {
 			select {
+			case <-done:
+				return
 			case <-rw.s.root.Done():
 				return
 			case _, ok := <-ch:
 				if !ok {
 					return
-				}
-				if rw.self.Swap(false) { // the open our own read made (nvidia-smi)
-					continue
 				}
 				rw.event()
 			}

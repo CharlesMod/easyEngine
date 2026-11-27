@@ -228,6 +228,7 @@ type yieldReactor struct {
 	baseEngine int
 	words      yield.Words
 	wordsPCI   string
+	wordsSet   atomic.Value // string: the nodes the watch was made on (the level's read compares)
 	wordsStop  chan struct{}
 	launchWord atomic.Bool // the OS says its launchers by a word: they are read when it comes
 	stopMoment func() bool
@@ -306,6 +307,9 @@ func (r *yieldReactor) lookLocked(v yieldView) (launches []yield.Launch, skip fu
 	if pci := enginePCI(v); pci != "" {
 		r.o.Adapter(pci)
 	}
+	if r.armed.Load() && r.nodesMoved() { // Adapter found other nodes than the watch holds
+		r.wake()
+	}
 	launches = r.o.Launches()
 	_, except := r.split(launches)
 	skip = r.s.yieldExcluded(r.o, except)
@@ -324,7 +328,9 @@ func (r *yieldReactor) read() (yieldSeen, bool) {
 	v := s.yieldState()
 	var mem []gpusense.Process
 	if v.engine >= 0 && len(v.adapters) > 0 {
-		mem = r.y.Procs(s.root, v.adapters)
+		// the memory read runs nvidia-smi, which opens the card's device: our own open, kept
+		// from every Opens watch (the room's too) by the one gate
+		host.Own(func() { mem = r.y.Procs(s.root, v.adapters) })
 	}
 	r.osMu.Lock()
 	launches, skip, openers := r.lookLocked(v)
@@ -425,7 +431,15 @@ func (r *yieldReactor) startWords(pci string) {
 	if !ok {
 		return
 	}
+	// The nodes are the OS's own (Adapter sets them on the level's read goroutine); the set is
+	// noted so a watch made before they were known is made again when they are.
+	pre := r.nodeSet()
 	r.words = w.Watch()
+	set := r.words.Set
+	if set == "" {
+		set = pre // no watch was made on them (or the OS names none): look again only if they move
+	}
+	r.wordsSet.Store(set)
 	r.launchWord.Store(r.words.Launches != nil)
 	done := make(chan struct{})
 	r.wordsStop = done
@@ -437,13 +451,35 @@ func (r *yieldReactor) startWords(pci string) {
 				return
 			case <-r.s.root.Done():
 				return
-			case <-opens:
+			case _, ok := <-opens:
+				if !ok { // the watch has ended: no more words from it
+					opens = nil
+					continue
+				}
 				r.opened()
 			case <-launches:
 				r.wake()
 			}
 		}
 	}()
+}
+
+// nodeSet is the set of nodes the OS would watch now ("" where it does not say).
+func (r *yieldReactor) nodeSet() string {
+	if n, ok := r.o.(yield.Noder); ok {
+		return n.NodeSet()
+	}
+	return ""
+}
+
+// nodesMoved says the nodes the OS would watch are not those the watch was made on.
+func (r *yieldReactor) nodesMoved() bool {
+	n, ok := r.o.(yield.Noder)
+	if !ok {
+		return false
+	}
+	set, _ := r.wordsSet.Load().(string)
+	return n.NodeSet() != set
 }
 
 func (r *yieldReactor) stopWords() {
@@ -459,7 +495,7 @@ func (r *yieldReactor) stopWords() {
 // arm starts the level and the words while a model is loaded or the card is yielded.
 func (r *yieldReactor) arm(pci string) {
 	if r.armed.Load() {
-		if pci != r.wordsPCI { // the adapter became known or changed: its nodes are others
+		if pci != r.wordsPCI || r.nodesMoved() { // the adapter became known or changed, or its nodes were found since: the nodes are others
 			r.startWords(pci)
 		}
 		return

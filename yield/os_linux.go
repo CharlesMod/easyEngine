@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/host"
@@ -23,14 +24,17 @@ func gpuNode(link string) bool {
 }
 
 type linuxOS struct {
-	root  string
-	sys   string // /sys and /proc/driver roots, for mapping nodes to an adapter
-	drv   string
+	root string
+	sys  string // /sys and /proc/driver roots, for mapping nodes to an adapter
+	drv  string
+	dev  string
+
+	mu    sync.Mutex      // pci and nodes: Adapter (the level's read) and Watch (the reactor) meet
 	nodes map[string]bool // the engine adapter's nodes; nil: any GPU node
 	pci   string
-	dev   string
-	seen  map[int]seenProc
-	now   func() time.Time
+
+	seen map[int]seenProc
+	now  func() time.Time
 }
 
 // seenProc caches what a pid's argv said, so a scan reads only new pids' cmdline. A pid is
@@ -59,6 +63,12 @@ func (o *linuxOS) Close() {}
 // Nodes are the device nodes whose opens say another program took the card: the engine's
 // adapter's (once Adapter knew it), else every NVIDIA and DRM node under /dev.
 func (o *linuxOS) Nodes() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.nodesLocked()
+}
+
+func (o *linuxOS) nodesLocked() []string {
 	if len(o.nodes) > 0 {
 		out := make([]string, 0, len(o.nodes))
 		for n := range o.nodes {
@@ -90,8 +100,12 @@ func (o *linuxOS) Watch() Words {
 	if err != nil {
 		return Words{}
 	}
-	return Words{Opens: ch, Stop: stop}
+	return Words{Opens: ch, Stop: stop, Set: strings.Join(paths, ",")}
 }
+
+// NodeSet names the nodes Watch would watch now, in the form Words.Set has: the caller compares
+// the two to know the watch is on other nodes than the adapter's now.
+func (o *linuxOS) NodeSet() string { return strings.Join(o.Nodes(), ",") }
 
 func (o *linuxOS) pids() []int {
 	ents, err := os.ReadDir(o.root)
@@ -148,13 +162,23 @@ func (o *linuxOS) Launches() []Launch {
 // resolves to that address.
 func (o *linuxOS) Adapter(pci string) {
 	pci = strings.ToLower(strings.TrimSpace(pci))
-	if pci == o.pci {
+	o.mu.Lock()
+	same, known := pci == o.pci, o.nodes != nil
+	o.mu.Unlock()
+	if same && known { // an address whose nodes were not found is looked at again: they may appear
 		return
 	}
-	o.pci, o.nodes = pci, nil
-	if pci == "" || o.sys == "" {
-		return
+	var found map[string]bool
+	if pci != "" && o.sys != "" {
+		found = o.adapterNodes(pci)
 	}
+	o.mu.Lock()
+	o.pci, o.nodes = pci, found
+	o.mu.Unlock()
+}
+
+// adapterNodes reads the nodes of the adapter at pci (nil: none found).
+func (o *linuxOS) adapterNodes(pci string) map[string]bool {
 	nodes := map[string]bool{}
 	if b, err := os.ReadFile(filepath.Join(o.drv, pci, "information")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
@@ -174,14 +198,17 @@ func (o *linuxOS) Adapter(pci string) {
 		}
 	}
 	if len(nodes) > 0 {
-		o.nodes = nodes
+		return nodes
 	}
+	return nil
 }
 
 func (o *linuxOS) wanted(link string) bool {
 	if !gpuNode(link) {
 		return false
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.nodes == nil || o.nodes[link]
 }
 

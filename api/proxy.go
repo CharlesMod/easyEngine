@@ -85,7 +85,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(w, r)
+		rp.ServeHTTP(a.hearing(w), r)
 	default:
 		target, err := url.Parse(rt.URL)
 		if err != nil {
@@ -106,8 +106,34 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(w, r)
+		rp.ServeHTTP(a.hearing(w), r)
 	}
+}
+
+// heardWriter tells heard on every Write: the model server's reply bytes are flowing, so the
+// watchdog for silence on the requests in flight is put back. It stays a Flusher (a stream must not
+// sit in a buffer), and Unwrap lets http.ResponseController reach the real writer (flush, hijack).
+type heardWriter struct {
+	http.ResponseWriter
+	heard func()
+}
+
+func (h *heardWriter) Write(b []byte) (int, error) {
+	h.heard()
+	return h.ResponseWriter.Write(b)
+}
+
+func (h *heardWriter) Flush() { http.NewResponseController(h.ResponseWriter).Flush() }
+
+func (h *heardWriter) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+// hearing wraps w so each reply write counts as the model server being heard from.
+func (a *API) hearing(w http.ResponseWriter) http.ResponseWriter {
+	heard := a.heard
+	if heard == nil {
+		heard = a.S.Heard
+	}
+	return &heardWriter{ResponseWriter: w, heard: heard}
 }
 
 // dropCORS removes every Access-Control-* header the upstream sent: the model server reflects

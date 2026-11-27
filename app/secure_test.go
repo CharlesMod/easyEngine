@@ -58,6 +58,55 @@ func TestServesStartedTogetherMakeOneEngine(t *testing.T) {
 	}
 }
 
+// Several serves started together over a corrupt lock file: it goes once, and exactly one runs
+// the engine (no serve deletes the fresh lock another has just written).
+func TestServesStartedTogetherOverCorruptLockMakeOneEngine(t *testing.T) {
+	for _, corrupt := range []string{`{"pid": 12`, "not json at all", ""} {
+		dir := t.TempDir()
+		lock := filepath.Join(dir, "engine.lock")
+		if err := os.WriteFile(lock, []byte(corrupt), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-time.Hour) // an empty file is stale only once it is no longer brand new
+		if err := os.Chtimes(lock, old, old); err != nil {
+			t.Fatal(err)
+		}
+		const n = 4
+		var parents []*sleeperProc
+		for i := 0; i < n; i++ {
+			parents = append(parents, newSleeper(t))
+		}
+		var started, attached atomic.Int32
+		var wg sync.WaitGroup
+		release := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-release
+				r, err := app.Serve(context.Background(), app.Options{DataDir: dir, Profile: prof(), ParentPIDs: []int{parents[i].pid}, Port: 47640, Version: "t",
+					Started: func(int) { started.Add(1) }})
+				if err != nil {
+					t.Errorf("serve %d: %v", i, err)
+					return
+				}
+				if r.Attached {
+					attached.Add(1)
+				}
+			}(i)
+		}
+		close(release)
+		waitFor(t, func() bool { return started.Load()+attached.Load() == n }, "every serve to settle")
+		if started.Load() != 1 {
+			t.Fatalf("corrupt %q: %d engines started, %d attached", corrupt, started.Load(), attached.Load())
+		}
+		for _, p := range parents {
+			p.kill()
+		}
+		wg.Wait()
+	}
+}
+
 // An engine that has begun shutting down must not be attached to: the new serve waits for it
 // to end and runs its own engine.
 func TestServeDoesNotAttachToStoppingEngine(t *testing.T) {

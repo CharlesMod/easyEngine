@@ -37,6 +37,8 @@ type API struct {
 	stopping atomic.Bool
 	// settingsMu serialises the read-merge-write of a partial settings update.
 	settingsMu sync.Mutex
+	// heard, when set, stands in for S.Heard (a test counts the calls).
+	heard func()
 	// Client is used by POST test (default: a plain client with no overall timeout).
 	Client *http.Client
 }
@@ -160,6 +162,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
+			a.S.Nudge("host")
 			w.WriteHeader(http.StatusNoContent)
 		}
 	case "plan":
@@ -249,6 +252,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "start":
 		if need("POST") {
+			a.S.Nudge("start")
 			go a.S.Start()
 			writeJSON(w, 202, map[string]string{"status": "starting"})
 		}
@@ -264,6 +268,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "wake":
 		if need("POST") {
+			a.S.Nudge("wake")
 			go a.S.Wake()
 			writeJSON(w, 202, map[string]string{"status": "waking"})
 		}
@@ -284,6 +289,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
+			a.S.Nudge("settings")
 			writeJSON(w, 200, a.S.Settings())
 		default:
 			fail(w, 405, "use GET or PUT")
@@ -311,6 +317,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
+			a.S.Nudge("attach")
 			writeJSON(w, 200, map[string]any{"status": "attached", "pid": in.Pid})
 		}
 	case "logs":

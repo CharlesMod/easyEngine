@@ -1,139 +1,212 @@
 {
-  "version": 9,
-  "llamacpp": {
-    "tag": "b12651",
-    "assets": [
-      {
-        "id": "cuda-linux-x64",
-        "os": "linux",
-        "arch": "amd64",
-        "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "sha256": "cb099350c6a025e67eefaa13f2b67b2dcce53e38a0da22476e070d166ef367ea",
-        "size": 220195495,
-        "unpacked_size": 281907200,
-        "extra": [
-          "cudart-linux-x64"
-        ]
-      },
-      {
-        "id": "cudart-linux-x64",
-        "os": "linux",
-        "arch": "amd64",
-        "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-b12651-bin-ubuntu-cuda-12.8-x64.tar.gz",
-        "sha256": "485df8f0b0ab30c15807d25fd23a821aeaef62a3947722c683429491a5e0d027",
-        "size": 594371475,
-        "unpacked_size": 868909056
-      },
-      {
-        "id": "vulkan-linux-x64",
-        "os": "linux",
-        "arch": "amd64",
-        "accel": "vulkan",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-vulkan-x64.tar.gz",
-        "sha256": "0bbcf2093f15c64c8a9bf54b809c9b2c812b982992dc2fbc9b36720c1d32cf13",
-        "size": 36976824,
-        "unpacked_size": 103936000
-      },
-      {
-        "id": "cpu-linux-x64",
-        "os": "linux",
-        "arch": "amd64",
-        "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-x64.tar.gz",
-        "sha256": "17b242259181d5b1b1f7719aba27929700a8b0dab39bfaef1b971a992b397b38",
-        "size": 23297838,
-        "unpacked_size": 59944960
-      },
-      {
-        "id": "cuda-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-12.4-x64.zip",
-        "sha256": "1a6c090f76fab41260b5b7597c6fb1add1fad2efaac692ae2673a22366220a29",
-        "size": 358031654,
-        "unpacked_size": 833679360,
-        "extra": [
-          "cudart-win-x64"
-        ]
-      },
-      {
-        "id": "cudart-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-12.4-x64.zip",
-        "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
-        "size": 391443627,
-        "unpacked_size": 574152704
-      },
-      {
-        "id": "cuda13-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "cuda",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cuda-13.5-x64.zip",
-        "sha256": "5ad87e0771f3a129f6461b5fc706d8c2c5e5b71b2bd1f953a4221ca4d7797fef",
-        "size": 225702093,
-        "unpacked_size": 282218496,
-        "extra": [
-          "cudart13-win-x64"
-        ]
-      },
-      {
-        "id": "cudart13-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "cudart",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-bin-win-cuda-13.5-x64.zip",
-        "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
-        "size": 426314199,
-        "unpacked_size": 554876928
-      },
-      {
-        "id": "vulkan-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "vulkan",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-vulkan-x64.zip",
-        "sha256": "e58fa9a137d8046c69334005ad6fb3e904ddc7e56f2a61ad1b844335826ef3f4",
-        "size": 38939211,
-        "unpacked_size": 110895104
-      },
-      {
-        "id": "cpu-win-x64",
-        "os": "windows",
-        "arch": "amd64",
-        "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cpu-x64.zip",
-        "sha256": "b2d794fa7587aba29f654d717ff9b73e31caeabf50a7766692903008bbe0855d",
-        "size": 25096571,
-        "unpacked_size": 66027520
-      },
-      {
-        "id": "metal-mac-arm64",
-        "os": "darwin",
-        "arch": "arm64",
-        "accel": "metal",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-arm64.tar.gz",
-        "sha256": "264fd872de61679c45ad57e1e21c2a2a54e29b35734ecf3d50f24166447ab8d2",
-        "size": 16644358,
-        "unpacked_size": 42975232
-      },
-      {
-        "id": "cpu-mac-x64",
-        "os": "darwin",
-        "arch": "amd64",
-        "accel": "cpu",
-        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-macos-x64.tar.gz",
-        "sha256": "34c19771545479a783d3b68c446383ab703033890c052d3ff0b860a5c9f59e56",
-        "size": 12434934,
-        "unpacked_size": 30466048
-      }
-    ]
-  },
+  "version": 10,
+  "llama": [
+    {
+      "tag": "b12651-easy1",
+      "repo": "CharlesMod/llama.cpp",
+      "patched": true,
+      "assets": [
+        {
+          "id": "cuda-linux-x64",
+          "os": "linux",
+          "arch": "amd64",
+          "accel": "cuda",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "sha256": "eab2e3aca4d4d6a620b3bad134087eb91526738540a5bee2ae5e5727970350c2",
+          "size": 220199882,
+          "unpacked_size": 281919488,
+          "extra": [
+            "cudart-linux-x64"
+          ]
+        },
+        {
+          "id": "cudart-linux-x64",
+          "os": "linux",
+          "arch": "amd64",
+          "accel": "cudart",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/cudart-llama-b12651-easy1-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "sha256": "2410b0ad9381af601e7d8613846250f6a150c09ceccbe53db7324d1d21c9c6a7",
+          "size": 594378924,
+          "unpacked_size": 868909056
+        },
+        {
+          "id": "vulkan-linux-x64",
+          "os": "linux",
+          "arch": "amd64",
+          "accel": "vulkan",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-ubuntu-vulkan-x64.tar.gz",
+          "sha256": "21379b4ebb28f9bd7c6fa0f487f20d228d050bd446c59be1050c06a9d3c3ee83",
+          "size": 36980409,
+          "unpacked_size": 103940096
+        },
+        {
+          "id": "cpu-linux-x64",
+          "os": "linux",
+          "arch": "amd64",
+          "accel": "cpu",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-ubuntu-x64.tar.gz",
+          "sha256": "4de10a5cdcf48549ebd0abed5b83ff299e78d0f2dc7b412be4a12c985e85e7e5",
+          "size": 23293973,
+          "unpacked_size": 59949056
+        },
+        {
+          "id": "cuda-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "cuda",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-win-cuda-12.4-x64.zip",
+          "sha256": "28982cb0f501d3ef58ae73f670eb4135158f38ee40ab07cce3a73bbb4e49d97c",
+          "size": 358035966,
+          "unpacked_size": 833683456,
+          "extra": [
+            "cudart-win-x64"
+          ]
+        },
+        {
+          "id": "cudart-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "cudart",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/cudart-llama-bin-win-cuda-12.4-x64.zip",
+          "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+          "size": 391443627,
+          "unpacked_size": 574152704
+        },
+        {
+          "id": "cuda13-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "cuda",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-win-cuda-13.5-x64.zip",
+          "sha256": "21a5b7eff80d5bc9f01aed14eb135b85fb87f5fedf655ff5ed8700d948e15004",
+          "size": 225712470,
+          "unpacked_size": 282230784,
+          "extra": [
+            "cudart13-win-x64"
+          ]
+        },
+        {
+          "id": "cudart13-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "cudart",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/cudart-llama-bin-win-cuda-13.5-x64.zip",
+          "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
+          "size": 426314199,
+          "unpacked_size": 554876928
+        },
+        {
+          "id": "vulkan-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "vulkan",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-win-vulkan-x64.zip",
+          "sha256": "a7981daa8f3a45f8396e86cdf8ba629cef440f98d806cc56fdbb7c365e6c4f0a",
+          "size": 38938474,
+          "unpacked_size": 110895104
+        },
+        {
+          "id": "cpu-win-x64",
+          "os": "windows",
+          "arch": "amd64",
+          "accel": "cpu",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-win-cpu-x64.zip",
+          "sha256": "fcd457d9627174f8eb67d2d541243a69e80efd2cf5a57453084667d5ad2e529c",
+          "size": 25097655,
+          "unpacked_size": 66027520
+        },
+        {
+          "id": "metal-mac-arm64",
+          "os": "darwin",
+          "arch": "arm64",
+          "accel": "metal",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-macos-arm64.tar.gz",
+          "sha256": "6cf5f3e0378b33fee20e12eb1554afd82df13a7bcf0ac779503277d188efb83a",
+          "size": 16646296,
+          "unpacked_size": 42975232
+        },
+        {
+          "id": "cpu-mac-x64",
+          "os": "darwin",
+          "arch": "amd64",
+          "accel": "cpu",
+          "url": "https://github.com/CharlesMod/llama.cpp/releases/download/b12651-easy1/llama-b12651-easy1-bin-macos-x64.tar.gz",
+          "sha256": "d48de8128ae1c35b49e52bf5a2b9858a6f5ea0afe285b2d77a1931c9a5cd31b0",
+          "size": 12436865,
+          "unpacked_size": 30466048
+        }
+      ]
+    },
+    {
+      "tag": "b12651",
+      "repo": "ggml-org/llama.cpp",
+      "assets": [
+        {
+          "id": "cpu-linux-arm64",
+          "os": "linux",
+          "arch": "arm64",
+          "accel": "cpu",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-arm64.tar.gz",
+          "sha256": "b4a8d17e16a1b42f6a1395dc5cd6967ec0d98005eb3be85b7eb893b082306ed4",
+          "size": 18813487,
+          "unpacked_size": 44470272
+        },
+        {
+          "id": "vulkan-linux-arm64",
+          "os": "linux",
+          "arch": "arm64",
+          "accel": "vulkan",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-vulkan-arm64.tar.gz",
+          "sha256": "138f97d9d448b7a55c4b839366bba6e2ac7fba634f9160c9a4775a2051a1c7cb",
+          "size": 29928246,
+          "unpacked_size": 80060416
+        },
+        {
+          "id": "cuda13-linux-arm64",
+          "os": "linux",
+          "arch": "arm64",
+          "accel": "cuda",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "sha256": "e631c7a4b665bc123040f2edbd8e2084686ce497d5d3e7b5c69e7e6afe356cfa",
+          "size": 219392133,
+          "unpacked_size": 271097856,
+          "extra": [
+            "cudart13-linux-arm64"
+          ]
+        },
+        {
+          "id": "cudart13-linux-arm64",
+          "os": "linux",
+          "arch": "arm64",
+          "accel": "cudart",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/cudart-llama-b12651-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "sha256": "1781bd5577c4439aea5f5e7f8bcac9f85b670c5c98529fe9f7c53b92d0e91442",
+          "size": 559873124,
+          "unpacked_size": 726609920
+        },
+        {
+          "id": "cpu-win-arm64",
+          "os": "windows",
+          "arch": "arm64",
+          "accel": "cpu",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-cpu-arm64.zip",
+          "sha256": "756a62761e476536f007c866d46fa14125f6ca32d98cee6af14685659bd9f244",
+          "size": 13190749,
+          "unpacked_size": 30154752
+        },
+        {
+          "id": "vulkan-win-arm64",
+          "os": "windows",
+          "arch": "arm64",
+          "accel": "vulkan",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-win-vulkan-arm64.zip",
+          "sha256": "430849ca03a2a891baa90091670df45f29b90c2ec445aab2ad7d830ff423303c",
+          "size": 26601338,
+          "unpacked_size": 75202560
+        }
+      ]
+    }
+  ],
   "uv": [
     {
       "id": "uv-linux-amd64",

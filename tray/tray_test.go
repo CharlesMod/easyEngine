@@ -16,8 +16,12 @@ type fakeBackend struct {
 	click  func(string)
 }
 
-func (f *fakeBackend) setMenu(items []Item) { f.mu.Lock(); f.menus = append(f.menus, items); f.mu.Unlock() }
-func (f *fakeBackend) setTooltip(s string)  { f.mu.Lock(); f.tips = append(f.tips, s); f.mu.Unlock() }
+func (f *fakeBackend) setMenu(items []Item) {
+	f.mu.Lock()
+	f.menus = append(f.menus, items)
+	f.mu.Unlock()
+}
+func (f *fakeBackend) setTooltip(s string) { f.mu.Lock(); f.tips = append(f.tips, s); f.mu.Unlock() }
 func (f *fakeBackend) notify(_, _ string) error {
 	return nil
 }

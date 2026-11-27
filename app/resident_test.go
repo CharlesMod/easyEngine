@@ -53,7 +53,7 @@ func (f *fakeTray) SetItems(items []tray.Item) {
 	default:
 	}
 }
-func (f *fakeTray) SetTooltip(s string) { f.mu.Lock(); f.tooltip = s; f.mu.Unlock() }
+func (f *fakeTray) SetTooltip(s string)             { f.mu.Lock(); f.tooltip = s; f.mu.Unlock() }
 func (f *fakeTray) Notify(title, body string) error { return nil }
 func (f *fakeTray) Close()                          { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
 func (f *fakeTray) snap() ([]tray.Item, string, bool) {
@@ -162,7 +162,10 @@ func TestTrayMenuClicksAndQuit(t *testing.T) {
 		Open: func(p string) error { mu.Lock(); opened = append(opened, p); mu.Unlock(); return nil },
 	}})
 	// Exactly three items, in this order, and a tooltip that says what stands.
-	waitFor(t, func() bool { items, tip, _ := ft.snap(); return len(items) == 3 && strings.HasPrefix(tip, "easy-engine: ") }, "the menu")
+	waitFor(t, func() bool {
+		items, tip, _ := ft.snap()
+		return len(items) == 3 && strings.HasPrefix(tip, "easy-engine: ")
+	}, "the menu")
 	items, tip, _ := ft.snap()
 	want := []string{"Launch at Startup", "Settings", "Quit"}
 	for i, it := range items {

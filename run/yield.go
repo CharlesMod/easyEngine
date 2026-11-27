@@ -129,7 +129,7 @@ func (s *Supervisor) yieldExcluded(o yield.OS, except []yield.Launch) func(pid i
 		fixed[host.PID] = true
 	}
 	ignore := map[string]bool{}
-	for _, n := range y.Ignore {
+	for _, n := range append(append([]string{}, builtinIgnore...), y.Ignore...) {
 		ignore[normName(n)] = true
 	}
 	return func(pid int, name string) bool {
@@ -144,6 +144,11 @@ func (s *Supervisor) yieldExcluded(o yield.OS, except []yield.Launch) func(pid i
 		return false
 	}
 }
+
+// builtinIgnore is never a reason to yield: nvidia-smi opens the card to read it (the engine,
+// monitors and dashboards run it every second, and on a two-card machine one call outlives the
+// 200 ms second look), but it allocates nothing a game would miss.
+var builtinIgnore = []string{"nvidia-smi"}
 
 func normName(n string) string {
 	n = strings.ToLower(filepath.Base(strings.ReplaceAll(strings.TrimSpace(n), `\`, "/")))
@@ -166,6 +171,7 @@ func (s *Supervisor) yieldLoop() {
 	}
 	var (
 		lastMem, lastOpen time.Time
+		baseEngine        = -2 // the engine adapter the baseline was taken on (-1: none known)
 		mem               []gpusense.Process
 		games, except     []yield.Launch
 		changes           []yield.Change
@@ -237,6 +243,14 @@ func (s *Supervisor) yieldLoop() {
 		cur := make([]yield.Use, 0, len(uses))
 		for _, u := range uses {
 			cur = append(cur, *u)
+		}
+		memKnown := v.engine >= 0 && len(v.adapters) > 0
+		if memKnown && lastMem.IsZero() {
+			continue // the first memory read has not run: no baseline without it
+		}
+		if v.engine != baseEngine && !m.Yielded() { // the adapter became known or changed: look afresh
+			tr = &yield.Tracker{Floor: y.Policy.Floor, MinNew: y.MinNewMiB}
+			baseEngine = v.engine
 		}
 		switch {
 		case !tr.Baselined() || (!v.loaded && !m.Yielded()):

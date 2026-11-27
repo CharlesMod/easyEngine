@@ -372,3 +372,42 @@ func TestStopWhileYielded(t *testing.T) {
 	f.setLaunches(game) // the watch is back
 	testkit.WaitPhase(t, s, "yielded", 5*time.Second)
 }
+
+// A program already on the card when the engine starts is baseline, even when the first looks
+// come before the engine knows its adapter (a slow first sense): it must not read as growth.
+func TestYieldBaselineWaitsForMemory(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	f := newFakeYieldOS()
+	f.setProcs(gpusense.Process{PID: 9, Name: "resident", Adapter: 0, DedicatedMiB: 2000})
+	f.open(9, "resident")
+	e.InstallFake()
+	cfg := e.Config()
+	var once sync.Once
+	cfg.Sense = func(ctx context.Context, ours []int, host int) gpusense.Picture {
+		once.Do(func() { time.Sleep(800 * time.Millisecond) })
+		return f.sense(ctx, ours, host)
+	}
+	y := &run.YieldConfig{Every: 50 * time.Millisecond, OS: func() yield.OS { return f }, Procs: f.memProcs}
+	y.Policy = yield.Config{Grace: 400 * time.Millisecond, Steady: time.Minute, Floor: 128}
+	cfg.Yield = y
+	s := e.StartSup(cfg)
+	testkit.WaitFor(t, 15*time.Second, "ready or yielded", func() bool { p := s.Phase(); return p == "ready" || p == "yielded" })
+	time.Sleep(1500 * time.Millisecond)
+	if st := s.Status(); st.Phase != "ready" || st.Yield != nil || len(e.Starts()) != 1 {
+		t.Fatalf("a program there from the start yielded the engine: %s %+v starts %d", st.Phase, st.Yield, len(e.Starts()))
+	}
+}
+
+func TestYieldIgnoresNvidiaSMI(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	f := newFakeYieldOS()
+	s := yieldSup(t, e, f, nil)
+	settled(t, s)
+	f.open(7000, "nvidia-smi") // a monitor that outlives the second look
+	time.Sleep(time.Second)
+	if s.Phase() != "ready" {
+		t.Fatalf("nvidia-smi yielded the engine: %+v", s.Status().Yield)
+	}
+}

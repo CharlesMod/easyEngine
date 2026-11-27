@@ -53,7 +53,10 @@ func TestSwitchKeepsServingThenSwaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.release()
-	st = waitStatus(t, sup, "swap", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "target" && st.Previous != nil })
+	// the swap is over when its upgrade is done (said after previous is saved to state.json)
+	st = waitStatus(t, sup, "swap", func(st run.Status) bool {
+		return st.Phase == "ready" && st.Model == "target" && st.Previous != nil && (st.Upgrade == nil || st.Upgrade.State == "done")
+	})
 	if p := st.Previous; p.ID != "starter" || p.File != "starter.gguf" || p.Name != "Starter" || p.Bytes != int64(len(s.starter)) {
 		t.Errorf("previous = %+v", p)
 	}

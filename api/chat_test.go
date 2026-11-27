@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bufio"
+	"compress/gzip"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,43 @@ func TestChatServesWrapperAndStripsThePrefix(t *testing.T) {
 	}
 }
 
+// The wrapper is cross-origin isolated like the UI it frames; the not-ready page is not.
+func TestChatWrapperIsCrossOriginIsolated(t *testing.T) {
+	srv, _ := chatServer(t)
+	_, _, h := do(t, "GET", srv.URL+"/chat/", "", nil)
+	if h.Get("Cross-Origin-Embedder-Policy") != "require-corp" || h.Get("Cross-Origin-Opener-Policy") != "same-origin" {
+		t.Fatalf("headers %v", h)
+	}
+}
+
+// The proxy hands the client's Accept-Encoding to llama-server and the gzip body back with its
+// Content-Encoding untouched, as a browser needs (the real UI answers 415 without gzip).
+func TestChatUIPassesGzipThrough(t *testing.T) {
+	srv, _ := chatServer(t)
+	cl := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	req, _ := http.NewRequest("GET", srv.URL+"/chat/ui/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("%d %v", resp.StatusCode, resp.Header)
+	}
+	if resp.Header.Get("Cross-Origin-Embedder-Policy") != "require-corp" {
+		t.Errorf("the UI's own isolation headers must pass: %v", resp.Header)
+	}
+	zr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(zr)
+	if string(b) != "fake llama web ui path=/" {
+		t.Fatalf("body %q", b)
+	}
+}
+
 func TestChatStreamsUnbuffered(t *testing.T) {
 	srv, _ := chatServer(t)
 	req, _ := http.NewRequest("POST", srv.URL+"/chat/ui/v1/chat/completions", strings.NewReader(`{"stream":true}`))
@@ -94,6 +132,9 @@ func TestChatWhenNoModelIsReady(t *testing.T) {
 	s, srv := serve(t, e, e.Config())
 	testkit.WaitFor(t, 10*time.Second, "loading phase", func() bool { return s.Phase() == "loading" })
 	c, body, h := do(t, "GET", srv.URL+"/chat/", "", nil)
+	if h.Get("Cross-Origin-Embedder-Policy") != "" {
+		t.Errorf("the not-ready page carries isolation headers")
+	}
 	if c != 200 || !strings.Contains(body, "No model is ready") || strings.Contains(body, "<iframe") || strings.Contains(h.Get("Content-Type"), "json") {
 		t.Fatalf("want a plain not-ready page, got %d %s", c, body)
 	}

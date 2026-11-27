@@ -41,6 +41,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -361,7 +362,17 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		fmt.Fprintf(w, "fake llama web ui path=%s", r.URL.Path)
+		// Like the real UI: gzip only (415 without it), isolation headers on the page.
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			http.Error(w, "Error: gzip is not supported by this browser", http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		fmt.Fprintf(zw, "fake llama web ui path=%s", r.URL.Path)
+		zw.Close()
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !loading(w) {

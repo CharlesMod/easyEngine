@@ -58,6 +58,9 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(notReadyPage))
 			return
 		}
+		// llama's UI sends these two; framed, it is cross-origin isolated only if this top page is too.
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Write(web.Chat)
 	case strings.HasPrefix(path, uiPrefix+"/"):
 		if !a.chatReady() {

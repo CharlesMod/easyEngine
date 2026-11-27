@@ -75,7 +75,7 @@ var withValue = map[string]bool{
 	"--typical": true, "--repeat-last-n": true, "--presence-penalty": true, "--frequency-penalty": true,
 	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
 	"--slot-save-path": true,
-	"-ub": true, "--ubatch-size": true, "--top-n-sigma": true, "--spec-type": true,
+	"-ub":              true, "--ubatch-size": true, "--top-n-sigma": true, "--spec-type": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 

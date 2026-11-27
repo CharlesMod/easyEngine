@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strconv"
 
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // Sampler policy modes (docs/SAMPLERS.md).

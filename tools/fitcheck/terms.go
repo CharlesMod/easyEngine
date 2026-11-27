@@ -9,7 +9,7 @@ import (
 	"sort"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // Reference shape of the speed rows: 3 slots x 65536, q4_0.

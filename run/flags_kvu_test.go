@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // The real llama-server help lists "-kvu,  --kv-unified, -no-kvu, --no-kv-unified" (bare switches).

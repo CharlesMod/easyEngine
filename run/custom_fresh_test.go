@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // A fresh machine: custom/use installs llama.cpp and the agent (no catalog model), then serves the file.

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/api"
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/api"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func serve(t *testing.T, e *testkit.Env, cfg run.Config) (*run.Supervisor, *httptest.Server) {
@@ -44,7 +44,7 @@ func do(t *testing.T, method, url, body string, hdr map[string]string) (int, str
 	return resp.StatusCode, string(b), resp.Header
 }
 
-var csrf = map[string]string{"X-Hermes-Engine": "1"}
+var csrf = map[string]string{"X-Easy-Engine": "1"}
 
 func readyEnv(t *testing.T) (*testkit.Env, *run.Supervisor, *httptest.Server) {
 	testkit.SkipWindows(t)
@@ -60,7 +60,7 @@ func TestCSRFAndHost(t *testing.T) {
 	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/sleep", "", nil); c != 403 {
 		t.Fatalf("POST without the header: %d", c)
 	}
-	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/cancel", "", map[string]string{"X-Hermes-Engine": "1", "Origin": "http://evil.example"}); c != 403 {
+	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/cancel", "", map[string]string{"X-Easy-Engine": "1", "Origin": "http://evil.example"}); c != 403 {
 		t.Fatalf("foreign origin: %d", c)
 	}
 	if c, _, _ := do(t, "GET", srv.URL+"/engine/v1/status", "", map[string]string{"Host": "evil.example"}); c != 403 {

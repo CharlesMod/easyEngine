@@ -1,7 +1,7 @@
 package main
 
 import (
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 func f64(v float64) *float64 { return &v }

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
-	"hermesengine/yield"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/yield"
 )
 
 // fakeYieldOS is the other programs on a pretend machine.

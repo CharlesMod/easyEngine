@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
-	"hermesengine/yield"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/yield"
 )
 
 // gameOS reports one launcher game while on is set, and nothing else.

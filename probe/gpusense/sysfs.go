@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 var cardDevRe = regexp.MustCompile(`/card(\d+)/device$`)

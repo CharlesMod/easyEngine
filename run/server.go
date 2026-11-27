@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/catalog"
-	"hermesengine/lifecycle"
-	"hermesengine/plan"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 type loadCtx struct {

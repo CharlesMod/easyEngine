@@ -8,17 +8,17 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/catalog"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // SamplerHeader names the sampler profile a request wants (rp | structured | official, or a
 // name the game's profile adds). Missing or unknown means rp.
-const SamplerHeader = "X-Hermes-Sampler"
+const SamplerHeader = "X-Easy-Sampler"
 
 // AppliedHeader is set on every proxied response: "<profile>;<mode>" when the request was
 // subject to the policy, "none;<reason>" when it passed through untouched.
-const AppliedHeader = "X-Hermes-Sampler-Applied"
+const AppliedHeader = "X-Easy-Sampler-Applied"
 
 const maxSamplerBody = 64 << 20
 

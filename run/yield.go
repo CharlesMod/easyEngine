@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/yield"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/yield"
 )
 
 // YieldConfig turns on yielding the card to other programs (serve --yield-to-games):

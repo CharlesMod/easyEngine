@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-builds hermes-engine for the three desktop targets into engine/dist/.
+# Cross-builds easy-engine for the three desktop targets into engine/dist/.
 # Pure Go, no cgo: one toolchain builds all of them. Usage: ./build.sh [version]
 set -eu
 cd "$(dirname "$0")"
@@ -13,9 +13,9 @@ for t in linux/amd64 windows/amd64 darwin/arm64 darwin/amd64; do
   os=${t%/*}; arch=${t#*/}
   ext=""; [ "$os" = windows ] && ext=.exe
   dir="$OUT/$os-$arch"; mkdir -p "$dir"
-  echo "build $dir/hermes-engine$ext"
-  CGO_ENABLED=0 GOOS=$os GOARCH=$arch "$GO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$dir/hermes-engine$ext" ./cmd/hermes-engine
+  echo "build $dir/easy-engine$ext"
+  CGO_ENABLED=0 GOOS=$os GOARCH=$arch "$GO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$dir/easy-engine$ext" ./cmd/easy-engine
 done
-# Layout is what the game mods expect: dist/<os>-<arch>/hermes-engine[.exe] (ENGINE.md section 10).
-( cd "$OUT" && sha256sum */hermes-engine* > SHA256SUMS )
+# Layout is what the game mods expect: dist/<os>-<arch>/easy-engine[.exe] (ENGINE.md section 10).
+( cd "$OUT" && sha256sum */easy-engine* > SHA256SUMS )
 echo "done: $OUT/"

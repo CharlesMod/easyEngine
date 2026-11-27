@@ -13,7 +13,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 //go:embed catalog.json

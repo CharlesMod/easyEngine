@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/catalog"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 var (

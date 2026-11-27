@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/fetch"
-	"hermesengine/plan"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/fetch"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 func (s *Supervisor) jobProgress(step string) func(fetch.Progress) {
@@ -137,7 +137,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 		return fmt.Errorf("unknown model %q", modelID)
 	}
 	if m.URL == "" && !s.modelInstalled(m) {
-		return fmt.Errorf("%s is import-only: run `hermes-engine import <path>` (or POST /engine/v1/import)", m.Name)
+		return fmt.Errorf("%s is import-only: run `easy-engine import <path>` (or POST /engine/v1/import)", m.Name)
 	}
 	hw, err := s.Hardware(ctx, false)
 	if err != nil {

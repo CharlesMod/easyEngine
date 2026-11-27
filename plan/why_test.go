@@ -6,8 +6,8 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
-	"hermesengine/catalog"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // Each "no" names what really stops the model.

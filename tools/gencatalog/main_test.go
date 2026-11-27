@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 	"os"
 	"path/filepath"
 	"strings"

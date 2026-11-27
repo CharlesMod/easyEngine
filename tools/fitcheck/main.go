@@ -20,8 +20,8 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
-	"hermesengine/catalog"
-	"hermesengine/plan"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/plan"
 )
 
 // Row is one measured run.

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func TestParseOOMPatterns(t *testing.T) {

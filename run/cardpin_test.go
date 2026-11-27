@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // twoCards senses two equal NVIDIA cards, the first busy: the plan picks the second (the emptier).

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/lifecycle"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // Serve mode with stdout and stderr as pipes whose read end is closed (the game
@@ -24,7 +24,7 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 		t.Skip("unix pipes")
 	}
 	home := t.TempDir()
-	bin := filepath.Join(t.TempDir(), "hermes-engine")
+	bin := filepath.Join(t.TempDir(), "easy-engine")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
@@ -37,7 +37,7 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 	or, ow, _ := os.Pipe()
 	er, ew, _ := os.Pipe()
 	cmd := exec.Command(bin, "serve", "--port", "47650", "--parent-pid", strconv.Itoa(parent.Process.Pid))
-	cmd.Env = append(os.Environ(), "HERMES_ENGINE_HOME="+home)
+	cmd.Env = append(os.Environ(), "EASY_ENGINE_HOME="+home)
 	cmd.Stdout, cmd.Stderr = ow, ew
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestServeSurvivesClosedStdioPipes(t *testing.T) {
 	er.Close()
 	for i := 0; i < 3; i++ {
 		req, _ := http.NewRequest("POST", base+"/engine/v1/sleep", nil)
-		req.Header.Set("X-Hermes-Engine", "1")
+		req.Header.Set("X-Easy-Engine", "1")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("engine died after its pipes closed: %v", err)

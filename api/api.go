@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/run"
-	"hermesengine/web"
+	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/web"
 )
 
 // API wires the supervisor to HTTP.
@@ -84,13 +84,13 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// csrfOK: every non-GET request needs X-Hermes-Engine: 1, and an Origin, if
+// csrfOK: every non-GET request needs X-Easy-Engine: 1, and an Origin, if
 // there is one, must be the engine's own.
 func (a *API) csrfOK(r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return true
 	}
-	if r.Header.Get("X-Hermes-Engine") != "1" {
+	if r.Header.Get("X-Easy-Engine") != "1" {
 		return false
 	}
 	if o := r.Header.Get("Origin"); o != "" {
@@ -116,7 +116,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.csrfOK(r) {
-		fail(w, http.StatusForbidden, "missing X-Hermes-Engine header or foreign origin")
+		fail(w, http.StatusForbidden, "missing X-Easy-Engine header or foreign origin")
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/engine/v1/")

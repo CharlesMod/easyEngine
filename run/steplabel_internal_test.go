@@ -3,7 +3,7 @@ package run
 import (
 	"testing"
 
-	"hermesengine/fetch"
+	"github.com/CharlesMod/easyEngine/fetch"
 )
 
 func TestStepLabelShowsTheVerifyPass(t *testing.T) {

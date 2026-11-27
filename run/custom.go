@@ -9,9 +9,9 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
-	"hermesengine/catalog"
-	"hermesengine/plan"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // customID is state.Model while the user's own GGUF file serves.

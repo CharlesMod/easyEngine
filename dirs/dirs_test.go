@@ -13,12 +13,12 @@ func TestDataFor(t *testing.T) {
 		home string
 		want string
 	}{
-		{"linux", nil, "/home/u", "/home/u/.local/share/hermes-engine"},
-		{"linux", map[string]string{"XDG_DATA_HOME": "/x"}, "/home/u", "/x/hermes-engine"},
-		{"windows", map[string]string{"LOCALAPPDATA": "/L"}, "/h", filepath.Join("/L", "HermesEngine")},
-		{"windows", nil, "/h", filepath.Join("/h", "AppData", "Local", "HermesEngine")},
-		{"darwin", nil, "/Users/u", "/Users/u/Library/Application Support/HermesEngine"},
-		{"darwin", map[string]string{"HERMES_ENGINE_HOME": "/t"}, "/Users/u", "/t"},
+		{"linux", nil, "/home/u", "/home/u/.local/share/easy-engine"},
+		{"linux", map[string]string{"XDG_DATA_HOME": "/x"}, "/home/u", "/x/easy-engine"},
+		{"windows", map[string]string{"LOCALAPPDATA": "/L"}, "/h", filepath.Join("/L", "EasyEngine")},
+		{"windows", nil, "/h", filepath.Join("/h", "AppData", "Local", "EasyEngine")},
+		{"darwin", nil, "/Users/u", "/Users/u/Library/Application Support/EasyEngine"},
+		{"darwin", map[string]string{"EASY_ENGINE_HOME": "/t"}, "/Users/u", "/t"},
 	}
 	for _, c := range cases {
 		if got := dataFor(c.goos, env(c.env), c.home); got != c.want {
@@ -29,7 +29,7 @@ func TestDataFor(t *testing.T) {
 
 func TestDataEnv(t *testing.T) {
 	d := t.TempDir()
-	t.Setenv("HERMES_ENGINE_HOME", d)
+	t.Setenv("EASY_ENGINE_HOME", d)
 	if Data() != d || Models() != filepath.Join(d, "models") {
 		t.Fatal("env override ignored")
 	}

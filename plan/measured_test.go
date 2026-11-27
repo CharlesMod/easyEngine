@@ -6,7 +6,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 func measuredFP() *catalog.Footprint {

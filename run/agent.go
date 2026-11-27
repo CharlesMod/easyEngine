@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"hermesengine/lifecycle"
+	"github.com/CharlesMod/easyEngine/lifecycle"
 )
 
 type agentMgr struct {
@@ -169,7 +169,7 @@ func (s *Supervisor) agentURLEnv() string {
 	if ag := s.cfg.Profile.Agent; ag != nil && ag.LLMURLEnv != "" {
 		return ag.LLMURLEnv
 	}
-	return "HERMESVOICE_LLM_URL"
+	return "EASY_ENGINE_LLM_URL"
 }
 
 func (s *Supervisor) agentEnv() []string {
@@ -192,7 +192,7 @@ func (s *Supervisor) agentEnv() []string {
 			env = append(env, prefix+"_MODEL="+ext.Model)
 		}
 	}
-	env = append(env, urlEnv+"="+url, "HERMES_ENGINE_URL="+base)
+	env = append(env, urlEnv+"="+url, "EASY_ENGINE_URL="+base)
 	if agentNoVenv {
 		env = append(env, "PYTHONPATH="+filepath.Join(venvDir(s.dir, ag), "site"), "PYTHONNOUSERSITE=1")
 	}

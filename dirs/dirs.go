@@ -7,7 +7,7 @@ import (
 	"runtime"
 )
 
-// Data returns the engine data dir: HERMES_ENGINE_HOME when set, else the per-OS default.
+// Data returns the engine data dir: EASY_ENGINE_HOME when set, else the per-OS default.
 func Data() string {
 	return dataFor(runtime.GOOS, os.Getenv, homeDir())
 }
@@ -21,7 +21,7 @@ func homeDir() string {
 }
 
 func dataFor(goos string, getenv func(string) string, home string) string {
-	if v := getenv("HERMES_ENGINE_HOME"); v != "" {
+	if v := getenv("EASY_ENGINE_HOME"); v != "" {
 		return v
 	}
 	switch goos {
@@ -30,15 +30,15 @@ func dataFor(goos string, getenv func(string) string, home string) string {
 		if base == "" {
 			base = filepath.Join(home, "AppData", "Local")
 		}
-		return filepath.Join(base, "HermesEngine")
+		return filepath.Join(base, "EasyEngine")
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "HermesEngine")
+		return filepath.Join(home, "Library", "Application Support", "EasyEngine")
 	default:
 		base := getenv("XDG_DATA_HOME")
 		if base == "" {
 			base = filepath.Join(home, ".local", "share")
 		}
-		return filepath.Join(base, "hermes-engine")
+		return filepath.Join(base, "easy-engine")
 	}
 }
 

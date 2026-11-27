@@ -15,10 +15,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"hermesengine/api"
-	"hermesengine/dirs"
-	"hermesengine/lifecycle"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/api"
+	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // DefaultPort is the control API's first port.
@@ -73,7 +73,7 @@ func statusOK(port int) bool {
 func PostAttach(port, pid int) error {
 	b, _ := json.Marshal(map[string]int{"pid": pid})
 	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/attach", port), bytes.NewReader(b))
-	req.Header.Set("X-Hermes-Engine", "1")
+	req.Header.Set("X-Easy-Engine", "1")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := statusClient.Do(req)
 	if err != nil {

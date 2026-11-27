@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // ListedDevice is one line of `llama-server --list-devices`: "  CUDA0: Tesla P40 (24438 MiB, 24208 MiB free)".

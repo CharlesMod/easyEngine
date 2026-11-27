@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // serveStarter installs the small model alone (nothing smaller exists, so no staging) and waits for ready.

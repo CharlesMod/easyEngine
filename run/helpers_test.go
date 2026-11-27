@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func withShortHTTP(c run.Config) run.Config {

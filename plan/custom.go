@@ -12,7 +12,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // CustomExtraMarginMiB is the room left over and above the usual margin for a file the catalog

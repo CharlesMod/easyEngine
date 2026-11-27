@@ -68,6 +68,6 @@ GPU 00000000:01:00.0
         Compute instance ID               : N/A
         Process ID                        : 1290082
             Type                          : C
-            Name                          : /home/user/.local/share/hermes-engine/backends/cuda-linux-x64/llama-b12651/llama-server
+            Name                          : /home/user/.local/share/easy-engine/backends/cuda-linux-x64/llama-b12651/llama-server
             Used GPU Memory               : 10332 MiB
 

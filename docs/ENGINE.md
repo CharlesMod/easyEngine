@@ -1164,13 +1164,14 @@ host, origin and preflight rules of the gate still apply). 200:
 
 ```json
 {"name":"den-pc","engine":"easy-engine","api":1,"version":"0.4.0","engine_id":"9f2c...32 hex",
- "model_name":"Gemma 4 26B","phase":"ready","card":"NVIDIA GeForce RTX 4080",
+ "model_name":"Gemma 4 26B","model_id":"gemma-4-26b","phase":"ready","card":"NVIDIA GeForce RTX 4080",
  "pairing":true,"token_required":true}
 ```
 
 `name` is the `name` setting or the host name; `engine_id` is a stable random id made once and
 kept in `<data dir>/engine-id`; `model_name` the human name of the selected model (its id when it
-has none); `card` the adapter the engine uses ("" before the first reading, or on CPU);
+has none); `model_id` its catalog id (`""` when none is selected, or when a custom GGUF serves,
+which has no catalog id); `card` the adapter the engine uses ("" before the first reading, or on CPU);
 `pairing` is true only on a non-loopback listener with tokens in force; `token_required` the same
 condition without the pairer. With an `Authorization: Bearer` header the engine checks: a valid
 token adds `"paired":true,"client_id":"<id>"` (`"master"` for the master token); a revoked one

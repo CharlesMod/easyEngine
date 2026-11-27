@@ -21,9 +21,12 @@ type Transport interface {
 	Read() (Packet, error)                    // blocks; returns an error after Close
 	Multicast(data []byte, ifIndex int) error // to 224.0.0.251:5353 / [ff02::fb]:5353 on that interface (0 = all)
 	Unicast(data []byte, to *net.UDPAddr) error
-	// Addrs gives the non-loopback addresses to advertise for a packet that came
-	// in on ifIndex (0 or unknown means all up non-loopback interfaces).
+	// Addrs gives the non-loopback addresses that belong to the interface ifIndex and no
+	// other (0 means every up, multicast-capable interface's). An unknown interface has none.
 	Addrs(ifIndex int) []net.IP
+	// Reach gives the addresses of the interfaces whose subnet holds from: the ones a peer at
+	// from can reach us on. It serves a unicast question whose arrival interface is unknown.
+	Reach(from net.IP) []net.IP
 	Refresh() error // re-read interfaces and join the groups on new ones
 	Close() error
 }
@@ -41,12 +44,19 @@ type Options struct {
 	Transport Transport
 	// NetChanges, when non-nil, replaces host.NetworkChanges.
 	NetChanges func() (<-chan struct{}, func(), error)
+	// Listen is the set of addresses the listener answers on. nil means a wildcard listener:
+	// every address of every up, multicast-capable interface. A non-nil set is announced as it
+	// is, each address only on the interface that owns it (RFC 6762 section 6.2); an interface
+	// holding none of them announces nothing and answers nothing. An empty non-nil set
+	// announces nothing at all.
+	Listen []net.IP
 }
 
 // Responder announces one engine and answers queries for it.
 type Responder struct {
-	t    Transport
-	stop func() // stops the network-change watch
+	t      Transport
+	listen []net.IP // nil: wildcard
+	stop   func()   // stops the network-change watch
 
 	mu     sync.Mutex // guards info, closed and every send
 	info   Info
@@ -76,7 +86,7 @@ func start(info Info, o Options, port int) (*Responder, error) {
 		}
 		t = rt
 	}
-	r := &Responder{t: t, info: info, done: make(chan struct{}), stop: func() {}}
+	r := &Responder{t: t, listen: o.Listen, info: info, done: make(chan struct{}), stop: func() {}}
 
 	nc := o.NetChanges
 	if nc == nil {
@@ -106,7 +116,26 @@ func start(info Info, o Options, port int) (*Responder, error) {
 	return r, nil
 }
 
-// announceLocked sends info on every interface; ttl 0 is a goodbye.
+// only keeps the addresses the listener listens on.
+func (r *Responder) only(in []net.IP) []net.IP {
+	if r.listen == nil {
+		return in
+	}
+	var out []net.IP
+	for _, ip := range in {
+		for _, l := range r.listen {
+			if ip.Equal(l) {
+				out = append(out, ip)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// announceLocked sends info on every interface, each carrying only its own addresses out of
+// the listen set (an interface with none is skipped); ttl 0 is a goodbye. The sets are read
+// afresh each time, so a network change (which calls this) makes them again.
 func (r *Responder) announceLocked(info Info, ttl uint32) {
 	ifs := []int{0}
 	if it, ok := r.t.(interfacer); ok {
@@ -115,7 +144,9 @@ func (r *Responder) announceLocked(info Info, ttl uint32) {
 		}
 	}
 	for _, i := range ifs {
-		_ = r.t.Multicast(Announcement(info, r.t.Addrs(i), ttl), i)
+		if addrs := r.only(r.t.Addrs(i)); len(addrs) > 0 {
+			_ = r.t.Multicast(Announcement(info, addrs, ttl), i)
+		}
 	}
 }
 
@@ -138,14 +169,43 @@ func (r *Responder) handle(p Packet) {
 		return
 	}
 	legacy := p.From.Port != mdnsPort
-	reply, ok, qu := answer(r.info, p.Data, r.t.Addrs(p.IfIndex), legacy)
+	if !legacy && p.IfIndex == 0 {
+		// A multicast question whose interface is unknown (a platform that cannot tell):
+		// answer on each interface with that interface's own addresses.
+		ifs := []int{0}
+		if it, ok := r.t.(interfacer); ok {
+			ifs = it.Interfaces()
+		}
+		for _, i := range ifs {
+			r.reply(p, i, r.only(r.t.Addrs(i)), legacy)
+		}
+		return
+	}
+	var addrs []net.IP
+	if p.IfIndex > 0 {
+		addrs = r.only(r.t.Addrs(p.IfIndex))
+	} else {
+		// Legacy unicast where the arrival interface cannot be told (Windows, where the
+		// control message may fail): the listen set's addresses that share a subnet with the
+		// querier, the ones it can reach us on.
+		addrs = r.only(r.t.Reach(p.From.IP))
+	}
+	r.reply(p, p.IfIndex, addrs, legacy)
+}
+
+// reply answers p with addrs on interface ifIndex; no addresses, no answer.
+func (r *Responder) reply(p Packet, ifIndex int, addrs []net.IP, legacy bool) {
+	if len(addrs) == 0 {
+		return
+	}
+	reply, ok, qu := answer(r.info, p.Data, addrs, legacy)
 	if !ok {
 		return
 	}
 	if legacy || qu {
 		_ = r.t.Unicast(reply, p.From)
 	} else {
-		_ = r.t.Multicast(reply, p.IfIndex)
+		_ = r.t.Multicast(reply, ifIndex)
 	}
 }
 

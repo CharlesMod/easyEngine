@@ -25,6 +25,40 @@ func Discoverable(host string) bool {
 	return true
 }
 
+// lookupIP resolves a host name (a seam for tests).
+var lookupIP = net.LookupIP
+
+// ListenSet is the addresses a listener on host answers on, for the announcer: nil for a wildcard
+// host (empty, 0.0.0.0, ::: every address of every up multicast-capable interface); the one
+// address for an IP; for a host name, what net.Listen does with it, resolved once here: the
+// first IPv4 address it names, else the first address. A name that does not resolve gives an
+// empty non-nil set (the listener could not have bound it either): nothing is announced.
+func ListenSet(host string) []net.IP {
+	h := strings.Trim(host, "[]")
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i] // an IPv6 zone is no part of the address
+	}
+	if h == "" {
+		return nil
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		if ip.IsUnspecified() {
+			return nil
+		}
+		return []net.IP{ip}
+	}
+	ips, err := lookupIP(h)
+	if err != nil || len(ips) == 0 {
+		return []net.IP{}
+	}
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return []net.IP{ip}
+		}
+	}
+	return []net.IP{ips[0]}
+}
+
 // engineName is this engine's human name: the settings name, else the host name's first label.
 func engineName(sup *run.Supervisor) string {
 	if n := strings.TrimSpace(sup.EngineName()); n != "" {

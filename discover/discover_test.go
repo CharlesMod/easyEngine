@@ -526,3 +526,5 @@ func TestStartWithoutNetworkEvents(t *testing.T) {
 		t.Errorf("goodbye %+v", s)
 	}
 }
+
+func (f *fake) Reach(net.IP) []net.IP { return testAddrs }

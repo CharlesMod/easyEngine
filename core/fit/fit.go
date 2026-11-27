@@ -42,6 +42,31 @@ var ErrNoKVType = errors.New("fit: the footprint names no cache type to price ot
 // the card (Footprint.WeightsMiB), so its largest single allocation cannot be told.
 var ErrNoWeights = errors.New("fit: the footprint cannot tell its largest allocation (no weights figure)")
 
+// ErrNoHostFigure means Room.CardHostFree was given and the footprint cannot tell the machine's
+// memory a start on the card takes (Footprint.HostBaseMiB is 0: a footprint from measured numbers,
+// from SeedFromBytes, which reads no header, or seeded with a set lacking HostBaseMiB), so the
+// start cannot be held to it. Since core v0.1.4. The figure is never taken as zero.
+var ErrNoHostFigure = errors.New("fit: the footprint cannot tell the host memory of a start on the card")
+
+// HostShortError means a start on the card takes more of the machine's memory than the room has
+// free for it (Room.CardHostFree less the reserve): NeedMiB is the least host memory any start of
+// the model on the card takes (no expert layer moved, at any ctx: Shape.HostMiB), FreeMiB what
+// stands, Basis the basis of NeedMiB (Predicted from every planning entry). It is ErrTooBig to
+// errors.Is, so a caller that only tells too big from the rest reads it as before; errors.As
+// gives the figures. Since core v0.1.4.
+type HostShortError struct {
+	NeedMiB int   `json:"need_mib"`
+	FreeMiB int   `json:"free_mib"`
+	Basis   Basis `json:"basis"`
+}
+
+func (e *HostShortError) Error() string {
+	return fmt.Sprintf("fit: a start on the card needs about %d MiB of the machine's memory (%s), %d MiB free after the OS reserve", e.NeedMiB, e.Basis, e.FreeMiB)
+}
+
+// Is makes a HostShortError ErrTooBig to errors.Is.
+func (e *HostShortError) Is(target error) bool { return target == ErrTooBig }
+
 // UnreadError means the caller marked a room field as not read (Room.Unread): it is never taken
 // as zero, and no shape is chosen until it is read.
 type UnreadError struct{ Field string }
@@ -69,6 +94,9 @@ type Basis string
 const (
 	Predicted Basis = "predicted"
 	Measured  Basis = "measured"
+	// Unknown: the core cannot tell the figure, and it is 0 only as a placeholder, never a size.
+	// Only Shape.HostBasis takes it (since core v0.1.4).
+	Unknown Basis = "unknown"
 )
 
 const (
@@ -98,9 +126,17 @@ const (
 	OffloadMiB ConstName = "offload_mib"
 	// ExpertRAMFactor: host RAM taken per expert layer moved off the card, against its tensor bytes.
 	ExpertRAMFactor ConstName = "expert_ram_factor"
+	// HostBaseMiB: the machine's memory a start on the card holds beyond the weights the header
+	// says stay in RAM (Footprint.HostMiB) and the expert layers moved there: the runtime, the
+	// input embedding and the host compute buffers, read as the process's resident memory. A set
+	// may lack it (it is not in constNames): the host memory of a card start is then not known
+	// (Footprint.HostBaseMiB 0). It has no part in the card's fixed part, so the book does not key
+	// on it (sameSet). Since core v0.1.4.
+	HostBaseMiB ConstName = "host_base_mib"
 )
 
-// constNames is every constant a set must hold, in the order a lacking one is named.
+// constNames is every constant a set must hold, in the order a lacking one is named. HostBaseMiB
+// is not among them: a set may lack it.
 var constNames = []ConstName{BaseOverheadMiB, VocabMiBPer1k, RuntimeMiB, MaskMiBPer1k, DequantBytes, OffloadMiB, ExpertRAMFactor}
 
 // Const is one measured constant and a word of where its reading came from.
@@ -133,6 +169,7 @@ func DefaultConsts() Consts {
 		DequantBytes:    {2.0, "the f16 width; the sweep's quantised-cache rows agree"},
 		OffloadMiB:      {180, "RTX 5080 at b12680: read as 90 to 230 MiB once any expert layer was in RAM"},
 		ExpertRAMFactor: {1.25, "RTX 5080 at b12680: read as 1.02 to 1.23, taken above the highest"},
+		HostBaseMiB:     {1536, "RTX 5080 at b12680: a card start's resident memory less its host-resident weights, read as 974 to 1520 MiB over the four Gemma E-series sweeps (rss_used less host_mib, every row), taken above the highest"},
 	}}
 }
 
@@ -174,7 +211,8 @@ type Wants struct {
 	// Unset: expert layers may move to RAM (section 5, step 3).
 	Whole bool `json:"whole"`
 	// KVTypes is the cache types, best first: the shape takes the first type at which CtxMax fits
-	// at Slots; where none does, the last type with the most ctx that fits down to the floor.
+	// at Slots; where none does, the last type with the most ctx that fits down to the floor. The
+	// core orders the list itself, most bytes per element first (Norm), so any order means the same.
 	// Each type is priced from the footprint (Footprint.KVType), never tried. When set, KVType is
 	// not read. Unset: KVType alone, as given.
 	KVTypes []string `json:"kv_types,omitempty"`
@@ -211,6 +249,14 @@ type Room struct {
 	// planner from where the catalog's curve was measured).
 	SpeedScale float64 `json:"speed_scale"`
 	GPUName    string  `json:"gpu_name"`
+	// CardHostFree is the machine's free memory (MiB) a start on the card is held to: the start's
+	// host memory (Shape.HostMiB) must fit in it less the reserve (Reserve), or the entries that plan
+	// (Choose, MissRetry, StepDown, Grow) answer *HostShortError (ErrTooBig to errors.Is), and no
+	// expert layer is moved past it. Negative: read, and none free. A footprint that cannot tell the
+	// host memory (Footprint.HostBaseMiB 0) is ErrNoHostFigure where it is given. Not read with
+	// NoGPU (a CPU-only run is held to RAMAvail). 0: not read, and a card start is held to nothing
+	// but RAMAvail for its expert layers, as before. Since core v0.1.4.
+	CardHostFree int `json:"card_host_free,omitempty"`
 }
 
 // Footprint models the memory of (model, device, backend):
@@ -228,6 +274,12 @@ type Footprint struct {
 	MoESchedMiB        float64 `json:"moe_sched_mib"`         // extra GPU use when any expert layer is on the CPU
 	ExpertRAMPerLayer  float64 `json:"expert_ram_per_layer"`  // host RAM per expert layer moved; 0 = ExpertMiBPerLayer
 	HostMiB            float64 `json:"host_mib"`              // weights that stay in RAM even when the model is on the card (they count in a CPU-only run)
+	// HostBaseMiB is the machine's memory a start on the card holds beyond HostMiB and the moved
+	// expert layers (the set's HostBaseMiB, which Seed and SeedWith carry over). 0: not known (a
+	// footprint built by hand, from measured numbers or by an older build; SeedFromBytes, which
+	// reads no header and so cannot tell HostMiB either; a set lacking the constant): the host
+	// memory of a card start is then Unknown (Shape.HostBasis), never priced as zero. Since core v0.1.4.
+	HostBaseMiB float64 `json:"host_base_mib,omitempty"`
 
 	// Speed on the machine the footprint was measured on (zero when unknown).
 	TPS *TPSCurve `json:"tps,omitempty"`
@@ -284,6 +336,16 @@ type Shape struct {
 	// reading. A card shape's RAMMiB (its expert layers in RAM) is never read, so always predicted.
 	// "" (a shape built by hand, or by an older build) says nothing.
 	RAMBasis Basis `json:"ram_basis,omitempty"`
+	// HostMiB is the machine's memory the start holds in all, as its process's resident memory: for
+	// a card shape, the footprint's HostBaseMiB, its host-resident weights (HostMiB) and the expert
+	// layers moved to RAM (RAMMiB), the same at any ctx; for a CPU-only shape, RAMMiB. HostBasis is
+	// of it: Predicted from the planner; Measured from Book.Mark, where the book holds a reading of
+	// this very shape that carries the process's resident memory (Book.CalibrateCard; any host
+	// reading of a CPU-only shape); Unknown where the footprint cannot tell it (Footprint.HostBaseMiB
+	// 0), and HostMiB is then 0. "" (a shape built by hand, or by an older build) says nothing.
+	// Room.CardHostFree holds a card start to it. Since core v0.1.4.
+	HostMiB   int   `json:"host_mib,omitempty"`
+	HostBasis Basis `json:"host_basis,omitempty"`
 	// ConstsBackend and ConstsCard name the set of constants the predicted figures were built
 	// with (Consts.Backend, Consts.Card); where they are not the build and card it runs on, the
 	// figures were measured elsewhere.
@@ -295,6 +357,8 @@ type Shape struct {
 func (s Shape) CtxTotal() int { return s.Slots * s.CtxPerSlot }
 
 // Norm is w with every default filled in and every bound made consistent: what Choose plans with.
+// KVTypes is taken once and best first (each type once, empty names dropped, most bytes per
+// element first; since core v0.1.4).
 // CtxMax is taken down to the step of context (1024 tokens); CtxFloor is kept exactly as asked,
 // on the step or not (never under 1024), and where it is above CtxMax, CtxMax is the floor. So a
 // shape planned from it never holds less context per slot than the floor asked.
@@ -327,6 +391,7 @@ func (w Wants) Norm() Wants {
 	if w.MinTPS == 0 {
 		w.MinTPS = DefaultMinTPS
 	}
+	w.KVTypes = kvTypes(w.KVTypes)
 	return w
 }
 
@@ -453,6 +518,7 @@ func SeedWith(info gguf.Info, kvType string, c Consts) (fp Footprint, notes []st
 	fp = Footprint{
 		FixedMiB:       float64(info.DenseBytes+info.ExpertBytes-info.HostBytes)/mib + k.base + float64(info.VocabSize)/1000*k.vocab,
 		HostMiB:        float64(info.HostBytes) / mib,
+		HostBaseMiB:    k.hostBase,
 		PerTokenMiB:    full * b / mib,
 		SWAPerTokenMiB: swa * b / mib,
 		SWAWindow:      info.SlidingWindow + ubatchTokens,
@@ -559,10 +625,13 @@ type fig struct {
 type constFig struct {
 	backend, card                                           string
 	base, vocab, runtime, mask, dequant, offload, expertRAM float64
+	hostBase                                                float64 // 0: the set lacks HostBaseMiB
 }
 
 // sameSet reports whether two sets hold the same build, card and constants (nil is the default
-// set); a word of where a reading came from does not change a price, so it is not compared.
+// set); a word of where a reading came from does not change a price, so it is not compared. Only
+// the constants every set holds (constNames) are compared: the others (HostBaseMiB) have no part in
+// the card's fixed part the book keys on them, and a book an older build wrote lacks them.
 func sameSet(a, b *Consts) bool {
 	d := DefaultConsts()
 	if a == nil {
@@ -571,8 +640,33 @@ func sameSet(a, b *Consts) bool {
 	if b == nil {
 		b = &d
 	}
-	return a.Backend == b.Backend && a.Card == b.Card &&
-		maps.EqualFunc(a.Of, b.Of, func(x, y Const) bool { return x.Value == y.Value })
+	if a.Backend != b.Backend || a.Card != b.Card {
+		return false
+	}
+	for _, n := range constNames {
+		x, okx := a.Of[n]
+		y, oky := b.Of[n]
+		if okx != oky || x.Value != y.Value {
+			return false
+		}
+	}
+	return true
+}
+
+// bookSet is the set as the book keeps it beside a fixed part: a copy holding only the constants
+// every set holds (constNames), so an older build reading it finds the set it knows.
+func bookSet(c *Consts) *Consts {
+	if c == nil {
+		return nil
+	}
+	n := *c
+	n.Of = make(map[ConstName]Const, len(constNames))
+	for _, k := range constNames {
+		if v, ok := c.Of[k]; ok {
+			n.Of[k] = v
+		}
+	}
+	return &n
 }
 
 // cloneSet is a copy of a set sharing no map with it: a book handed to a writer keeps its own.
@@ -609,9 +703,16 @@ func readConsts(set *Consts) (constFig, error) {
 		}
 		v[n] = c.Value
 	}
+	var hostBase float64
+	if c, ok := set.Of[HostBaseMiB]; ok { // a set may lack it; where it holds it, it holds its word
+		if c.From == "" {
+			return constFig{}, &ConstError{Name: HostBaseMiB, NoFrom: true}
+		}
+		hostBase = max(c.Value, 0)
+	}
 	return constFig{backend: set.Backend, card: set.Card,
 		base: v[BaseOverheadMiB], vocab: v[VocabMiBPer1k], runtime: v[RuntimeMiB], mask: v[MaskMiBPer1k],
-		dequant: v[DequantBytes], offload: v[OffloadMiB], expertRAM: v[ExpertRAMFactor]}, nil
+		dequant: v[DequantBytes], offload: v[OffloadMiB], expertRAM: v[ExpertRAMFactor], hostBase: hostBase}, nil
 }
 
 // roomFig is a room every field of which was read, with its budgets in MiB.
@@ -619,6 +720,25 @@ type roomFig struct {
 	Room
 	budget float64 // card a shape may take: VRAMTotal less Others, GameReserve and the margin
 	ram    float64 // host RAM a CPU-only run or the moved expert layers may take: RAMAvail less the reserve
+	// host is the machine's memory a start on the card may hold in all (CardHostFree less the
+	// reserve) where held is true: CardHostFree given, on a card.
+	host float64
+	held bool
+}
+
+// hostOK reports whether a card start with n expert layers moved fits the machine's free memory
+// the room holds it to (always, where the room holds it to none).
+func (fp fig) hostOK(room roomFig, n int) bool {
+	return !room.held || fp.cardHost(n) <= room.host
+}
+
+// hostShort is the refusal of a room whose free memory no card start of fp fits: the least such
+// start, with no expert moved. nil where one fits or the room holds starts to nothing.
+func (fp fig) hostShort(room roomFig) error {
+	if fp.hostOK(room, 0) {
+		return nil
+	}
+	return &HostShortError{NeedMiB: ceilMiB(fp.cardHost(0)), FreeMiB: int(math.Floor(room.host)), Basis: Predicted}
 }
 
 // settled is what one entry prices from: the footprint priced at the type its numbers are taken
@@ -643,7 +763,8 @@ func runKV(s Shape) string {
 // settle is the one checked place. Each argument is nil where the entry takes none (with wants,
 // a footprint is always given). In this order it refuses: a room with a field marked unread
 // (*UnreadError naming the first: never taken as zero); with wants, a largest block the
-// footprint cannot be held to (ErrNoWeights); wants it cannot resolve (ErrNoCtxTrain,
+// footprint cannot be held to (ErrNoWeights), then a free host memory it cannot be held to
+// (ErrNoHostFigure: Room.CardHostFree given, Footprint.HostBaseMiB 0); wants it cannot resolve (ErrNoCtxTrain,
 // ErrCtxTrainUnder, *KVTypeError for KVType or any of KVTypes); a shape whose cache type has no
 // price (*KVTypeError); a type the footprint cannot be priced at (ErrNoKVType, *KVTypeError);
 // figures no footprint can hold (*FigureError, see coherent); a footprint whose set of constants
@@ -667,6 +788,9 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 		if w != nil && room.LargestBlock > 0 && !room.NoGPU && fp.WeightsMiB <= 0 {
 			return st, ErrNoWeights
 		}
+		if w != nil && room.CardHostFree != 0 && !room.NoGPU && fp.HostBaseMiB <= 0 {
+			return st, ErrNoHostFigure
+		}
 		m := room.Margin
 		if m == 0 {
 			m = DefaultMargin(room.VRAMTotal)
@@ -677,7 +801,9 @@ func settle(fp *Footprint, s *Shape, room *Room, w *Wants) (settled, error) {
 		}
 		st.room = roomFig{Room: *room,
 			budget: float64(room.VRAMTotal - room.Others - room.GameReserve - max(m, 0)),
-			ram:    float64(room.RAMAvail - max(r, 0))}
+			ram:    float64(room.RAMAvail - max(r, 0)),
+			host:   float64(room.CardHostFree - max(r, 0)),
+			held:   room.CardHostFree != 0 && !room.NoGPU}
 	}
 	if w != nil {
 		rw, err := resolve(*fp, *w)
@@ -857,6 +983,34 @@ func (fp fig) allHost(slots, ctxPerSlot int) float64 {
 	return fp.FixedMiB + fp.HostMiB + fp.kvAt(slots, ctxPerSlot, true) + fp.ScratchMiB
 }
 
+// cardHost is the machine's memory a start on the card holds with nCpuMoe expert layers moved:
+// the process's base, the host-resident weights and the moved layers. Only where hostKnown.
+func (fp fig) cardHost(nCpuMoe int) float64 {
+	return fp.HostBaseMiB + fp.HostMiB + fp.expertRAM(nCpuMoe)
+}
+
+// hostKnown reports whether the footprint can tell the host memory of a card start.
+func (fp fig) hostKnown() bool { return fp.HostBaseMiB > 0 }
+
+// HostNeed is the predicted machine memory in MiB a start of shape s holds, priced at its own
+// cache type: for a card shape the footprint's HostBaseMiB, its host-resident weights and the
+// expert layers s moves to RAM (Shape.HostMiB); for a CPU-only shape the whole run's host memory
+// (as Need). ErrNoHostFigure where the footprint cannot tell it for a card shape
+// (Footprint.HostBaseMiB 0), never 0; and settle's refusals. Since core v0.1.4.
+func (fp Footprint) HostNeed(s Shape) (float64, error) {
+	st, err := settle(&fp, &s, nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	if s.CPUOnly {
+		return st.fp.allHost(s.Slots, s.CtxPerSlot), nil
+	}
+	if !st.fp.hostKnown() {
+		return 0, ErrNoHostFigure
+	}
+	return st.fp.cardHost(s.NCpuMoe), nil
+}
+
 // Need is the predicted memory in MiB of shape s, priced at its own cache type: card memory and
 // the host memory of the expert layers it moves, or for a CPU-only shape no card and the whole
 // run's host memory. It refuses as settle does (an unknown type, a type the footprint cannot be
@@ -898,10 +1052,15 @@ func (fp fig) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 	if cpuOnly {
 		s.NCpuMoe = 0
 		s.RAMMiB = ceilMiB(fp.allHost(slots, ctx))
+		s.HostMiB, s.HostBasis = s.RAMMiB, Predicted
 		return s
 	}
 	s.VRAMMiB = ceilMiB(fp.vram(slots, ctx, n))
 	s.RAMMiB = ceilMiB(fp.expertRAM(n))
+	s.HostBasis = Unknown
+	if fp.hostKnown() {
+		s.HostMiB, s.HostBasis = ceilMiB(fp.cardHost(n)), Predicted
+	}
 	return s
 }
 
@@ -951,8 +1110,13 @@ func (room Room) Budget() (vram, ram float64, err error) {
 	return st.room.budget, st.room.ram, nil
 }
 
-// kvTypes is a list of cache types taken once: each type at its first place, repeats and empty
-// names dropped. Every reading of Wants.KVTypes goes through it (resolve).
+// kvTypes is a list of cache types taken once and best first: repeats and empty names dropped,
+// then ordered by bytes per element, most first (a stable order: types of equal bytes, as f16 and
+// bf16, keep the caller's order; a name the core does not know goes last, and resolve refuses it).
+// Every reading of Wants.KVTypes goes through it (Norm, resolve). A smaller type after a larger one
+// could only ever be planned as the last type's fallback, with less context than the smaller type
+// gives, so the order a caller passes never changes what fits; the walk down and the least shape a
+// refusal is worded from (the last type's floor) are those of the list best first.
 func kvTypes(list []string) []string {
 	var types []string
 	for _, t := range list {
@@ -960,6 +1124,17 @@ func kvTypes(list []string) []string {
 			types = append(types, t)
 		}
 	}
+	slices.SortStableFunc(types, func(a, b string) int {
+		x, _ := kvBytes(a)
+		y, _ := kvBytes(b)
+		switch {
+		case x > y:
+			return -1
+		case x < y:
+			return 1
+		}
+		return 0
+	})
 	return types
 }
 
@@ -987,8 +1162,7 @@ func resolve(fp Footprint, w Wants) (Wants, error) {
 			w.CtxFloor = min(8192, fp.CtxTrain)
 		}
 	}
-	w = w.Norm()
-	w.KVTypes = kvTypes(w.KVTypes)
+	w = w.Norm() // the list taken once, best first (kvTypes)
 	if len(w.KVTypes) > 0 {
 		w.KVType = w.KVTypes[0]
 	}
@@ -1008,6 +1182,9 @@ func resolve(fp Footprint, w Wants) (Wants, error) {
 // With Wants.KVTypes it does all this at each type in turn (see there). No shape it answers holds
 // less context per slot than Wants.CtxFloor: above the floor ctx moves by the step (1024 tokens),
 // and a floor off the step is answered as itself where no aligned ctx at or above it fits.
+// Where the room holds card starts to the machine's free memory (Room.CardHostFree), a model none
+// of whose card starts fits it is *HostShortError (ErrTooBig to errors.Is), and expert layers move
+// to RAM only as far as it holds them.
 func Choose(fp Footprint, room Room, w Wants) (Shape, error) {
 	st, err := settle(&fp, nil, &room, &w)
 	if err != nil {
@@ -1072,6 +1249,11 @@ func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed boo
 	if room.noBlock() {
 		return Shape{}, ErrTooBig // no free block on the card: no layout on it holds
 	}
+	if !room.NoGPU {
+		if err := fp.hostShort(room); err != nil {
+			return Shape{}, err // the machine's free memory holds no start on the card, at any ctx
+		}
+	}
 	block := float64(room.LargestBlock)
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
 		ceil := fp.ctxCeiling(w, slots)
@@ -1106,6 +1288,11 @@ func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed boo
 			if per := fp.expertRAM(1); per > 0 {
 				if byRAM := int(ram / per); byRAM < maxN {
 					maxN = byRAM
+				}
+				if room.held { // and no more than the machine's free memory holds beside the rest
+					if byHost := int((room.host - fp.cardHost(0)) / per); byHost < maxN {
+						maxN = byHost
+					}
 				}
 			}
 			bestN, bestCtx := 0, 0
@@ -1197,7 +1384,9 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 // to its floor and ends at ErrTooBig there, never moving to a type it was not running. It never
 // plans the room afresh (Choose alone does): the load that failed disproved that plan.
 // A room whose card has no free block (Room.LargestBlock negative) is ErrTooBig at once for a
-// shape on the card: no smaller layout there holds either.
+// shape on the card: no smaller layout there holds either. Likewise a room whose free machine
+// memory (Room.CardHostFree) holds no start on the card is *HostShortError at once, and no step
+// moves an expert layer past it.
 //
 // The walk is monotone: each step strictly lowers the pair (types left after the shape's in the
 // list, then the predicted memory the shape is sized against, Footprint.need), compared in that
@@ -1213,6 +1402,11 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	w.KVType = st.kv    // every step keeps that type until the move to the next type of the list
 	if !cur.CPUOnly && st.room.noBlock() {
 		return Shape{}, ErrTooBig // no free block on the card: no smaller layout on it holds either
+	}
+	if !cur.CPUOnly {
+		if err := f.hostShort(st.room); err != nil {
+			return Shape{}, err // no start on the card fits the machine's free memory, smaller or not
+		}
 	}
 	if w.Whole {
 		cur.NCpuMoe = 0
@@ -1230,7 +1424,7 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	ram := st.room.ram
 	if !cur.CPUOnly && f.MoE && !st.room.Unified && !w.Whole && cur.NCpuMoe < f.ExpertLayers &&
-		f.expertRAM(cur.NCpuMoe+1) <= ram {
+		f.expertRAM(cur.NCpuMoe+1) <= ram && f.hostOK(st.room, cur.NCpuMoe+1) {
 		return f.shape(w, cur.Slots, cur.CtxPerSlot, cur.NCpuMoe+1, false), nil
 	}
 	if cur.Slots > w.MinSlots {
@@ -1361,7 +1555,8 @@ func (l CapLift) lifted(room roomFig, build string) bool {
 // Reading is the memory one shape held when its load came up, read by its process: for a shape on
 // a card, its card memory (VRAMMiB); for a CPU-only shape (CPUOnly), its host memory (RAMMiB), with
 // no expert layer counted (a CPU-only run moves none). A reading without CPUOnly, as every older
-// build wrote it, is a card reading.
+// build wrote it, is a card reading. A card reading may carry the process's resident memory
+// beside its card memory (HostMiB, Book.CalibrateCard; 0: not read). Since core v0.1.4.
 type Reading struct {
 	Slots      int    `json:"slots"`
 	CtxPerSlot int    `json:"ctx_per_slot"`
@@ -1370,6 +1565,7 @@ type Reading struct {
 	VRAMMiB    int    `json:"vram_mib"`
 	CPUOnly    bool   `json:"cpu_only,omitempty"`
 	RAMMiB     int    `json:"ram_mib,omitempty"`
+	HostMiB    int    `json:"host_mib,omitempty"`
 }
 
 // of is whether the reading was taken from this shape: a card reading only of a card shape and a
@@ -1420,8 +1616,10 @@ func (b *Book) Footprint(key string, seed Footprint) Footprint {
 
 // Mark is s with what the book holds of it: where key has a reading of this very shape, for a
 // card shape VRAMMiB is that reading and VRAMBasis Measured; for a CPU-only shape RAMMiB is that
-// reading (its host memory) and RAMBasis Measured. Otherwise s as given. It writes only a measured
-// figure, never a predicted one over it.
+// reading (its host memory) and RAMBasis Measured. The machine's memory of the start (HostMiB) is
+// that reading too, HostBasis Measured: a CPU-only shape's host reading, or the process's resident
+// memory a card reading carries (Book.CalibrateCard); a card reading without it leaves HostMiB as
+// given. Otherwise s as given. It writes only a measured figure, never a predicted one over it.
 func (b *Book) Mark(key string, s Shape) Shape {
 	if b == nil {
 		return s
@@ -1432,8 +1630,12 @@ func (b *Book) Mark(key string, s Shape) Shape {
 		case !r.of(s):
 		case s.CPUOnly:
 			s.RAMMiB, s.RAMBasis = r.RAMMiB, Measured
+			s.HostMiB, s.HostBasis = r.RAMMiB, Measured
 		default:
 			s.VRAMMiB, s.VRAMBasis = r.VRAMMiB, Measured
+			if r.HostMiB > 0 {
+				s.HostMiB, s.HostBasis = r.HostMiB, Measured
+			}
 		}
 	}
 	return s
@@ -1502,6 +1704,23 @@ func (c Calibration) String() string {
 // priced at its own cache type (settle), and a shape or seed settle refuses is that error, with
 // nothing recorded.
 func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, now time.Time) (Calibration, error) {
+	return b.calibrate(key, seed, s, measuredMiB, 0, now)
+}
+
+// CalibrateCard is Calibrate for a shape on a card with the process's resident memory read beside
+// its card memory: vramMiB is held to the seed and kept exactly as Calibrate keeps measuredMiB, and
+// hostMiB is kept beside it in the same reading (Reading.HostMiB; 0 or less: not read), so
+// Book.Mark gives the shape's HostMiB as Measured. For a CPU-only shape the reading is its host
+// memory, hostMiB, and vramMiB is not read: it is Calibrate with measuredMiB hostMiB. A card
+// reading of 0 MiB or less keeps nothing (NoReading), the host memory with it. Since core v0.1.4.
+func (b *Book) CalibrateCard(key string, seed Footprint, s Shape, vramMiB, hostMiB int, now time.Time) (Calibration, error) {
+	if s.CPUOnly {
+		return b.calibrate(key, seed, s, hostMiB, 0, now)
+	}
+	return b.calibrate(key, seed, s, vramMiB, max(hostMiB, 0), now)
+}
+
+func (b *Book) calibrate(key string, seed Footprint, s Shape, measuredMiB, hostMiB int, now time.Time) (Calibration, error) {
 	st, err := settle(&seed, &s, nil, nil)
 	if err != nil {
 		return Calibration{}, err
@@ -1538,14 +1757,14 @@ func (b *Book) Calibrate(key string, seed Footprint, s Shape, measuredMiB int, n
 			rs = append(rs, r)
 		}
 	}
-	r := Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB}
+	r := Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, NCpuMoe: s.NCpuMoe, KVType: s.KVType, VRAMMiB: measuredMiB, HostMiB: hostMiB}
 	if s.CPUOnly {
 		r = Reading{Slots: s.Slots, CtxPerSlot: s.CtxPerSlot, KVType: s.KVType, CPUOnly: true, RAMMiB: measuredMiB}
 	}
 	*old = append(rs, r)
 	if c.Taken() {
 		e.FixedMiB = c.ImpliedFixedMiB
-		e.Consts = cloneSet(seed.Consts)
+		e.Consts = bookSet(seed.Consts) // the constants the fixed part was worked out under, alone
 		e.Loads++
 	}
 	e.Updated = now

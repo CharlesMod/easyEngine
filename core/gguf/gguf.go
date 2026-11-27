@@ -128,7 +128,24 @@ const (
 	MaxIntArray = 1 << 16
 	maxCount    = 1 << 20 // keys, and tensors
 	maxRank     = 8
+	maxLayers   = 1 << 16 // block_count, and the block index in a tensor name
 )
+
+// What a header may claim, beyond the bounds above (each refusal is ErrMalformed or ErrPastSize):
+//
+//   - keys and tensors: at most 1<<20 each, and the table must fit the size given;
+//   - tensor rank: at most 8 dimensions (the format's own limit is 4), each dimension at least 1
+//     and at most MaxInt64; the element count and the byte size (elements / block elements * bytes
+//     per block, rounded up) must not pass MaxInt64, and nor may the sums of tensor bytes (dense,
+//     expert) or, for ParamCount, of element counts; a tensor offset must not pass MaxInt64;
+//   - <arch>.block_count, where present: 0 to 65536 layers (no real model has more than a few
+//     hundred); where absent, or 0 (read as not said, as before), the count is taken from the
+//     tensor names under the same bound;
+//   - the block index in a tensor name (blk.N.): at most 65535; the digits are read with the
+//     overflow checked, never wrapped. An index at or past a stated block_count is kept (a file may
+//     carry extra blocks, as nextn/MTP layers): nothing is sized from it then;
+//   - strings at most MaxString bytes and arrays at most what the size given can hold; integer
+//     arrays are kept only to MaxIntArray elements.
 
 // The reader's refusals. Each is wrapped with where it was met (a key or a tensor by its index);
 // errors.Is tells them apart.
@@ -473,6 +490,9 @@ func ReadHeader(r io.Reader, size int64, tensors bool) (*File, error) {
 		if rd.err != nil {
 			return nil, fmt.Errorf("gguf: tensor %d: %w", i, rd.err)
 		}
+		if err := checkTensor(t); err != nil {
+			return nil, fmt.Errorf("gguf: tensor %d: %w", i, err)
+		}
 		f.Tensors = append(f.Tensors, t)
 	}
 	f.sizeTensors()
@@ -507,6 +527,49 @@ func (f *File) ChatTemplates() map[string]string {
 	return out
 }
 
+// elements is the element count of dims, and false where it passes MaxInt64 or a dimension is 0 or
+// past MaxInt64.
+func elements(dims []uint64) (int64, bool) {
+	n := int64(1)
+	for _, d := range dims {
+		if d == 0 || d > math.MaxInt64 || n > math.MaxInt64/int64(d) {
+			return 0, false
+		}
+		n *= int64(d)
+	}
+	return n, true
+}
+
+// tensorBytes is the size of elems elements of a type in the size table ({block elements, bytes
+// per block}), rounded up to a whole block, and false where it passes MaxInt64.
+func tensorBytes(elems int64, ts [2]int64) (int64, bool) {
+	blocks := elems / ts[0]
+	if elems%ts[0] != 0 {
+		blocks++
+	}
+	if blocks > math.MaxInt64/ts[1] {
+		return 0, false
+	}
+	return blocks * ts[1], true
+}
+
+// checkTensor refuses a tensor whose dimensions or offset no size could hold (ErrMalformed).
+func checkTensor(t Tensor) error {
+	elems, ok := elements(t.Dims)
+	if !ok {
+		return fmt.Errorf("%w: tensor %q: dimensions %v hold no whole count of elements", ErrMalformed, t.Name, t.Dims)
+	}
+	if ts, known := typeSize[t.Type]; known {
+		if _, ok := tensorBytes(elems, ts); !ok {
+			return fmt.Errorf("%w: tensor %q: %d elements of type %d pass the int64 range", ErrMalformed, t.Name, elems, t.Type)
+		}
+	}
+	if t.Offset > math.MaxInt64 {
+		return fmt.Errorf("%w: tensor %q: offset %d", ErrMalformed, t.Name, t.Offset)
+	}
+	return nil
+}
+
 // sizeTensors fills Tensor.Bytes from the type table; unknown types take the gap to the next
 // tensor offset (the last one runs to the end of the file).
 func (f *File) sizeTensors() {
@@ -518,14 +581,8 @@ func (f *File) sizeTensors() {
 	for n, i := range idx {
 		t := &f.Tensors[i]
 		if ts, ok := typeSize[t.Type]; ok {
-			elems := int64(1)
-			for _, d := range t.Dims {
-				elems *= int64(d)
-			}
-			t.Bytes = elems / ts[0] * ts[1]
-			if elems%ts[0] != 0 {
-				t.Bytes += ts[1]
-			}
+			elems, _ := elements(t.Dims) // checked by checkTensor
+			t.Bytes, _ = tensorBytes(elems, ts)
 			continue
 		}
 		if n+1 < len(idx) {
@@ -569,8 +626,18 @@ func (f *File) Info() (Info, error) {
 	key := func(s string) string { return a + "." + s }
 	geti := func(s string) int { n, _ := f.num(key(s)); return int(n) }
 
-	in.NLayer = geti("block_count")
+	if bc, ok := f.num(key("block_count")); ok {
+		if bc < 0 || bc > maxLayers { // 0 is read as not said, as before: the names tell
+			return in, fmt.Errorf("%w: block_count %v, not in 0..%d", ErrMalformed, bc, maxLayers)
+		}
+		in.NLayer = int(bc)
+	}
 	var notes []string
+	for _, t := range f.Tensors {
+		if i, ok := blockIndex(t.Name); ok && i >= maxLayers {
+			return in, fmt.Errorf("%w: tensor %q: block index past %d", ErrMalformed, t.Name, maxLayers-1)
+		}
+	}
 	if in.NLayer <= 0 {
 		for _, t := range f.Tensors {
 			if i, ok := blockIndex(t.Name); ok && i+1 > in.NLayer {
@@ -794,6 +861,9 @@ func (f *File) Info() (Info, error) {
 
 	exLayers := map[int]bool{}
 	for _, t := range f.Tensors {
+		if t.Bytes < 0 || t.Bytes > math.MaxInt64-in.ExpertBytes-in.DenseBytes {
+			return in, fmt.Errorf("%w: the tensor sizes pass the int64 range at %q", ErrMalformed, t.Name)
+		}
 		if strings.Contains(t.Name, "_exps") {
 			in.ExpertBytes += t.Bytes
 			if i, ok := blockIndex(t.Name); ok {
@@ -827,9 +897,12 @@ func blockIndex(name string) (int, bool) {
 		if c < '0' || c > '9' {
 			break
 		}
-		n = n*10 + int(c-'0')
+		if n < maxLayers { // past the bound the index is only "too big": it saturates, never wraps
+			n = n*10 + int(c-'0')
+		}
 		digits++
 	}
+	n = min(n, maxLayers)
 	return n, digits > 0
 }
 
@@ -848,9 +921,9 @@ func (f *File) ParamCount() int64 {
 	}
 	var sum int64
 	for _, t := range f.Tensors {
-		n := int64(1)
-		for _, d := range t.Dims {
-			n *= int64(d)
+		n, ok := elements(t.Dims)
+		if !ok || n > math.MaxInt64-sum {
+			return 0 // past the int64 range: not known
 		}
 		sum += n
 	}

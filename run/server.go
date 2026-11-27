@@ -375,9 +375,8 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 		return
 	}
 	s.logf("calibrate: measured %d MiB, %s", m, c)
-	if c.Verdict != fit.CPUOnly { // the reading is kept for its shape whether or not it was taken
-		s.save()
-	}
+	s.save() // a reading of either kind (card or host) is kept for its shape, taken or not
+
 }
 
 // ---- watchdog -----------------------------------------------------------------------------

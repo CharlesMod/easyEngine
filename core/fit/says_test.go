@@ -299,6 +299,11 @@ func TestBookJSONBothWays(t *testing.T) {
 	nb.Calibrate("k", ref, Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}, 12500, stamp)
 	nb.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 65536, KVType: "q4_0"}, 150000, room(16303, 600, 24000), "b1", stamp)
 	nb.LowerCap("k", ref, Shape{Slots: 3, CtxPerSlot: 49152, KVType: "q4_0"}, 98304, room(16303, 2600, 24000), "b1", stamp)
+	// A card reading carrying host memory (core v0.1.4), off the gate so the fixed part stays.
+	hostShape := Shape{Slots: 1, CtxPerSlot: 8192, KVType: "q4_0"}
+	if c, err := nb.CalibrateCard("k", ref, hostShape, 100, 2600, stamp); err != nil || c.Taken() {
+		t.Fatalf("host reading: %v %v", c, err)
+	}
 	j, err := json.Marshal(nb)
 	if err != nil {
 		t.Fatal(err)
@@ -320,6 +325,9 @@ func TestBookJSONBothWays(t *testing.T) {
 	}
 	if r := rb.Entries["k"]; r.CapCtxTotal != 98304 || *r.Lift != *e.Lift || len(r.Under) != 1 || r.Under[0] != e.Under[0] || r.Under[0].CapCtxTotal != 150000 {
 		t.Errorf("the newer reader saw %+v of %+v", r, e)
+	}
+	if m := rb.Mark("k", hostShape); m.HostMiB != 2600 || m.HostBasis != Measured {
+		t.Errorf("the newer reader lost the host reading: %+v", m)
 	}
 }
 

@@ -94,6 +94,13 @@ var entries = map[string]entry{
 		}
 		return math.Round(c.OffMiB()), 0, err
 	}},
+	"Book.CalibrateCard": {shape: true, fp: true, call: func(f feed) (float64, float64, error) {
+		c, err := f.book.CalibrateCard("k", f.fp, f.s, f.s.VRAMMiB, 2000, stamp)
+		if err == nil && c.Verdict != Taken && !f.s.CPUOnly {
+			err = errors.New("not taken: " + c.String())
+		}
+		return math.Round(c.OffMiB()), 0, err
+	}},
 	"Book.LowerCap": {room: true, shape: true, fp: true, call: func(f feed) (float64, float64, error) {
 		ctx := f.s.CtxTotal() / 2
 		if err := f.book.LowerCap("k", f.fp, f.s, ctx, f.room, "b1", stamp); err != nil {
@@ -118,6 +125,14 @@ var entries = map[string]entry{
 		ft, _ := f.fp.atType(runs(f.s))
 		return v, ft.vram(f.s.Slots, f.s.CtxPerSlot, f.s.NCpuMoe), err
 	}},
+	"Footprint.HostNeed": {shape: true, fp: true, call: func(f feed) (float64, float64, error) {
+		v, err := f.fp.HostNeed(f.s)
+		ft, _ := f.fp.atType(runs(f.s))
+		if f.s.CPUOnly {
+			return v, ft.allHost(f.s.Slots, f.s.CtxPerSlot), err
+		}
+		return v, ft.cardHost(f.s.NCpuMoe), err
+	}},
 	"Footprint.Largest": {shape: true, fp: true, call: func(f feed) (float64, float64, error) {
 		v, err := f.fp.Largest(f.s)
 		ft, _ := f.fp.atType(runs(f.s))
@@ -141,23 +156,25 @@ var entries = map[string]entry{
 	}},
 	"KVBytes": {name: true, call: func(f feed) (float64, float64, error) { _, err := KVBytes(f.kv); return 0, 0, err }},
 
-	"Args":               {why: "renders a shape's flags; prices nothing"},
-	"BookKey":            {why: "joins three names"},
-	"DefaultMargin":      {why: "a share of a card total it is handed, not a room"},
-	"Wants.Norm":         {why: "fills defaults; every entry that prices resolves its wants in settle"},
-	"Shape.CtxTotal":     {why: "slots times ctx"},
-	"Shape.String":       {why: "prints a shape"},
-	"Book.Footprint":     {why: "overlays the book's fixed part and cap on a seed; prices nothing"},
-	"Book.Mark":          {why: "copies a reading taken of that very shape; prices nothing"},
-	"Calibration.Taken":  {why: "reads a verdict"},
-	"Calibration.OffMiB": {why: "subtracts two figures already worked out"},
-	"Calibration.String": {why: "prints a verdict"},
-	"TPSCurve.At":        {why: "a speed, not memory"},
-	"UnreadError.Error":  {why: "an error's text"},
-	"KVTypeError.Error":  {why: "an error's text"},
-	"ConstError.Error":   {why: "an error's text"},
-	"FigureError.Error":  {why: "an error's text"},
-	"DefaultConsts":      {why: "the set written into the core; prices nothing"},
+	"Args":                 {why: "renders a shape's flags; prices nothing"},
+	"BookKey":              {why: "joins three names"},
+	"DefaultMargin":        {why: "a share of a card total it is handed, not a room"},
+	"Wants.Norm":           {why: "fills defaults; every entry that prices resolves its wants in settle"},
+	"Shape.CtxTotal":       {why: "slots times ctx"},
+	"Shape.String":         {why: "prints a shape"},
+	"Book.Footprint":       {why: "overlays the book's fixed part and cap on a seed; prices nothing"},
+	"Book.Mark":            {why: "copies a reading taken of that very shape; prices nothing"},
+	"Calibration.Taken":    {why: "reads a verdict"},
+	"Calibration.OffMiB":   {why: "subtracts two figures already worked out"},
+	"Calibration.String":   {why: "prints a verdict"},
+	"TPSCurve.At":          {why: "a speed, not memory"},
+	"UnreadError.Error":    {why: "an error's text"},
+	"KVTypeError.Error":    {why: "an error's text"},
+	"ConstError.Error":     {why: "an error's text"},
+	"FigureError.Error":    {why: "an error's text"},
+	"HostShortError.Error": {why: "an error's text"},
+	"HostShortError.Is":    {why: "says the error is ErrTooBig"},
+	"DefaultConsts":        {why: "the set written into the core; prices nothing"},
 }
 
 // setOf is the set of constants a footprint carries, or the default where it carries none: what a
@@ -203,6 +220,7 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 		unknownType string    // the *KVTypeError expected
 		lackingSet  ConstName // the *ConstError expected
 		badFigure   string    // the *FigureError expected
+		sentinel    error     // the error expected to errors.Is
 		priced      bool      // got must equal want
 		keepsBook   bool
 	}
@@ -223,6 +241,9 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 		{name: "a per-token figure not a number", applies: func(e entry) bool { return e.fp && !e.name }, mod: func(f *feed) {
 			f.fp.PerTokenMiB = math.NaN()
 		}, badFigure: "PerTokenMiB", keepsBook: true},
+		{name: "a free host memory the footprint cannot be held to", applies: func(e entry) bool { return e.room && e.wants }, mod: func(f *feed) {
+			f.fp.HostBaseMiB, f.room.CardHostFree = 0, 64000
+		}, sentinel: ErrNoHostFigure, keepsBook: true},
 		{name: "unknown type name", applies: func(e entry) bool { return e.name }, mod: func(f *feed) { f.kv = "q3_k" }, unknownType: "q3_k"},
 		{name: "a shape at a type not the seed's", applies: func(e entry) bool { return e.shape || e.wants }, mod: func(f *feed) { f.s = f16; f.w.KVType = "f16" }, priced: true},
 		// A shape naming no type runs at the default (Args): every entry prices it there, with
@@ -250,6 +271,10 @@ func TestEveryEntryRefusesAlike(t *testing.T) {
 			var ce *ConstError
 			var fe *FigureError
 			switch {
+			case c.sentinel != nil:
+				if !errors.Is(err, c.sentinel) {
+					t.Errorf("%s: %s answered %v, want %v", n, c.name, err, c.sentinel)
+				}
 			case c.badFigure != "":
 				if !errors.As(err, &fe) || fe.Name != c.badFigure {
 					t.Errorf("%s: %s answered %v, want %s refused", n, c.name, err, c.badFigure)

@@ -347,6 +347,11 @@ func TestStatusReportsFallbackModel(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := ready(t, e)
+	// The room's reads (their own goroutine) look at the catalog: let the first held reading
+	// pass before the test changes it.
+	testkit.WaitFor(t, 10*time.Second, "the room's held reading", func() bool {
+		return len(testkit.Said(t, s, 0, 0, "room.held")) > 0
+	})
 	if st := s.Status(); st.ModelFallback || st.ModelNote != "" {
 		t.Fatalf("a normal model must not be flagged: %+v", st)
 	}

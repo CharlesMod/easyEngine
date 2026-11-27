@@ -137,29 +137,30 @@ type Config struct {
 	NoAutoStart bool     // do not start llama-server or the agent by itself (CLI install/import)
 	Parents     func() []int
 
-	// Timing. Tests shrink these.
-	WatchEvery        time.Duration // default 5s: watchdog tick
-	HealthMisses      int           // default 6
-	IdleChecks        int           // default 2
-	GrowIdle          time.Duration // default 60s
-	GrowBackoff       time.Duration // default 10 min after a failed grow
-	HealthPoll        time.Duration // default 250ms while loading
-	LoadTimeout       time.Duration // default 15 min
-	StopGrace         time.Duration // default 5s
-	AgentBackoffBase  time.Duration // default 1s
-	AgentBackoffMax   time.Duration // default 30s
-	AgentStable       time.Duration // default 60s of uptime resets the backoff
-	CmdTimeout        time.Duration // default 5 min for uv commands
-	UpgradeBackoff    time.Duration // default 30s: first wait before retrying the target download (doubles)
-	UpgradeBackoffMax time.Duration // default 15 min
-	SwapDrain         time.Duration // default 2 min: longest wait for requests in flight before a model swap
+	// Timing. Tests shrink these. Each is one of the three honest timers (docs/EVENTS.md section
+	// 1): a watchdog for silence, a network timeout or a named moment.
+	GrowIdle    time.Duration // default 60s: named moment, idle this long before a grow
+	GrowBackoff time.Duration // default 10 min: named moment, after a failed grow
+	LoadTimeout time.Duration // default 15 min: watchdog for silence, a load with no line from the server
+	// HangSilence is the watchdog for silence on requests in flight (default 2 min): a server
+	// heard from in none of its lines, request ends or response bytes for this long is asked
+	// /health once, and restarted when it does not answer.
+	HangSilence time.Duration
+	// RoomEvery is the period of the one watchdog on the room while a model is loaded (default
+	// 5s): another program's memory on the card gives no event (run/room.go, host.Level).
+	RoomEvery        time.Duration
+	StopGrace        time.Duration // default 5s
+	AgentBackoffBase time.Duration // default 1s
+	AgentBackoffMax  time.Duration // default 30s
+	AgentStable      time.Duration // default 60s of uptime resets the backoff
+	CmdTimeout       time.Duration // default 5 min for uv commands
+	SwapDrain        time.Duration // default 2 min: named moment, longest wait for requests in flight before a model swap
 	// Crash recovery (run/recover.go).
-	CrashBackoff []time.Duration // default 2s, 5s, 15s, 30s: wait before try n after failures in a row (the last repeats)
-	CrashQuick   time.Duration   // default 2 min: a run shorter than this that crashes is a quick crash; one longer clears the record
-	CrashSteps   int             // default 3: quick crashes in a row at one shape before one step down
-	DrainMax     time.Duration   // default 2 min: longest wait for replies before a shrink that cannot wait for idle
-	DrainMinMiB  int             // default 256: a held shortfall this large shrinks without waiting for idle
-	OOMHold      time.Duration   // default 60s: out-of-memory lines in two ticks this close are a shrink signal
+	CrashQuick  time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
+	CrashSteps  int           // default 2: quick crashes in a row at one shape before one step down
+	DrainMax    time.Duration // default 2 min: named moment, longest wait for replies before a shrink that cannot wait for idle
+	DrainMinMiB int           // default 256: a held shortfall this large shrinks without waiting for idle
+	OOMHold     time.Duration // default 60s: named moment; out-of-memory lines in two requests this close are a shrink signal
 
 	// Yield, when set, gives the card to other programs that want it (run/yield.go).
 	Yield *YieldConfig
@@ -200,22 +201,17 @@ func (c *Config) defaults() {
 			*p = d
 		}
 	}
-	dur(&c.WatchEvery, 5*time.Second)
 	dur(&c.GrowIdle, 60*time.Second)
 	dur(&c.GrowBackoff, 10*time.Minute)
-	dur(&c.HealthPoll, 250*time.Millisecond)
 	dur(&c.LoadTimeout, 15*time.Minute)
+	dur(&c.HangSilence, 2*time.Minute)
+	dur(&c.RoomEvery, 5*time.Second)
 	dur(&c.StopGrace, 5*time.Second)
 	dur(&c.AgentBackoffBase, time.Second)
 	dur(&c.AgentBackoffMax, 30*time.Second)
 	dur(&c.AgentStable, 60*time.Second)
 	dur(&c.CmdTimeout, 5*time.Minute)
-	dur(&c.UpgradeBackoff, 30*time.Second)
-	dur(&c.UpgradeBackoffMax, 15*time.Minute)
 	dur(&c.SwapDrain, 2*time.Minute)
-	if len(c.CrashBackoff) == 0 {
-		c.CrashBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second}
-	}
 	dur(&c.CrashQuick, 2*time.Minute)
 	dur(&c.DrainMax, 2*time.Minute)
 	dur(&c.OOMHold, 60*time.Second)
@@ -223,7 +219,7 @@ func (c *Config) defaults() {
 		c.Yield.defaults()
 	}
 	if c.CrashSteps <= 0 {
-		c.CrashSteps = 3
+		c.CrashSteps = 2
 	}
 	if c.DrainMinMiB <= 0 {
 		c.DrainMinMiB = 256
@@ -231,12 +227,7 @@ func (c *Config) defaults() {
 	if c.DiskFree == nil {
 		c.DiskFree = diskFree
 	}
-	if c.HealthMisses <= 0 {
-		c.HealthMisses = 6
-	}
-	if c.IdleChecks <= 0 {
-		c.IdleChecks = 2
-	}
+
 	c.Profile.defaults()
 }
 

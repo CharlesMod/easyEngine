@@ -1,33 +1,40 @@
 package run
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 // Recovery when llama-server crashes, runs out of memory, or another app takes the card's
-// memory while it runs (docs/ENGINE.md section 5, "At run time"):
-//   - failed starts and crashes retry after a growing wait (Config.CrashBackoff), never in a
-//     tight loop and never given up for good while the host app runs;
-//   - CrashSteps quick crashes in a row at one shape are read as a memory problem: one step down;
+// memory while it runs (docs/ENGINE.md section 5, "At run time"). There is no retry cadence
+// (docs/EVENTS.md section 3):
+//   - a crash restarts at once; the first failed start in a row is tried again at once;
+//   - CrashSteps quick crashes in a row at one shape are read as a memory problem: one step down,
+//     at once;
+//   - with nothing left to try, a retry waits for an event that could change the outcome: the
+//     room moved, a request at the door, a client's word (Nudge); the recovery fact says so;
 //   - a shape known to fail is a ceiling the engine does not return to until it expires;
-//   - an out-of-memory the server survives (failed requests) is watched in its log;
+//   - an out-of-memory the server survives (failed requests) is watched in its log, by request;
 //   - a held shortfall during a reply stops new requests and shrinks once the reply ends.
 
-// recovery is the crash and failure record. Guarded by s.mu, except ceil (opMu).
+// waitingWord is what a retry with nothing left to try waits for (RecoveryInfo.WaitingFor).
+const waitingWord = "the room on the card to change, a request, or a word from a client"
+
+// recovery is the crash and failure record. Guarded by s.mu.
 type recovery struct {
 	fails      int    // failed starts and crashes in a row since the last stable run
 	crashes    int    // quick crashes in a row at crashShape
 	crashShape string // shapeKey of the shape that crashed
 	lastErr    string
-	retryAt    time.Time
-	suspect    bool // the last step down came from crashes read as a memory problem
+	waitingFor string // what a retry waits for ("" while it tries at once or runs)
+	suspect    bool   // the last step down came from crashes read as a memory problem
 	ceil       map[string]ceiling
 }
 
@@ -45,22 +52,11 @@ type RecoveryInfo struct {
 	Failures      int    `json:"failures"`       // failed starts and crashes in a row
 	Crashes       int    `json:"crashes"`        // quick crashes in a row at one shape
 	LastError     string `json:"last_error"`     // what the last one said
-	RetryInS      int    `json:"retry_in_s"`     // seconds to the next try (0: trying now or running)
+	RetryInS      int    `json:"retry_in_s"`     // always 0: there is no retry cadence (kept for old clients)
+	WaitingFor    string `json:"waiting_for"`    // what the next try waits for ("": trying now or running)
 	SuspectMemory bool   `json:"suspect_memory"` // crashes were read as another app taking memory
 	CeilingCtx    int    `json:"ceiling_ctx"`    // total ctx of the shape it will not return to (0: none)
 }
-
-func (c *Config) backoff(n int) time.Duration {
-	if n < 1 {
-		n = 1
-	}
-	if n > len(c.CrashBackoff) {
-		n = len(c.CrashBackoff)
-	}
-	return c.CrashBackoff[n-1]
-}
-
-func (c *Config) slowest() time.Duration { return c.CrashBackoff[len(c.CrashBackoff)-1] }
 
 // recoveryLocked is the status block; caller holds s.mu.
 func (s *Supervisor) recoveryLocked() *RecoveryInfo {
@@ -70,9 +66,7 @@ func (s *Supervisor) recoveryLocked() *RecoveryInfo {
 	}
 	ri := &RecoveryInfo{Failures: r.fails, Crashes: r.crashes, LastError: r.lastErr, SuspectMemory: r.suspect}
 	if s.phase == "error" && s.retryable {
-		if d := r.retryAt.Sub(s.cfg.Now()); d > 0 {
-			ri.RetryInS = int(math.Ceil(d.Seconds()))
-		}
+		ri.WaitingFor = r.waitingFor
 	}
 	now := s.cfg.Now()
 	for _, c := range r.ceil {
@@ -83,19 +77,31 @@ func (s *Supervisor) recoveryLocked() *RecoveryInfo {
 	return ri
 }
 
-// noteFailure records a failed start or crash and returns the wait before the next try.
-// slow makes it the longest wait (a memory shortfall waiting for another app to let go).
-func (s *Supervisor) noteFailure(err error, slow bool) time.Duration {
+// noteFailure records a failed start and says whether to try again at once: the first failure in
+// a row is; a later one, or one with nothing left to try (wait), waits for an event.
+func (s *Supervisor) noteFailure(err error, wait bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rec.fails++
 	s.rec.lastErr = err.Error()
-	wait := s.cfg.backoff(s.rec.fails)
-	if slow {
-		wait = s.cfg.slowest()
+	now := !wait && s.rec.fails == 1
+	s.rec.waitingFor = waitingWord
+	if now {
+		s.rec.waitingFor = ""
 	}
-	s.rec.retryAt = s.cfg.Now().Add(wait)
-	return wait
+	s.refreshLocked()
+	return now
+}
+
+// noteRestart records a crash or failure that is restarted at once (a step down, a crash's one
+// restart).
+func (s *Supervisor) noteRestart(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rec.fails++
+	s.rec.lastErr = err.Error()
+	s.rec.waitingFor = ""
+	s.refreshLocked()
 }
 
 // noteCrash counts a crash at shape: quick ones in a row at the same shape add up, anything
@@ -111,6 +117,7 @@ func (s *Supervisor) noteCrash(shape fit.Shape, quick bool, why string) int {
 	}
 	s.rec.crashShape = k
 	s.rec.lastErr = why
+	s.refreshLocked()
 	return s.rec.crashes
 }
 
@@ -120,15 +127,18 @@ func shapeKey(s fit.Shape) string {
 	return fmt.Sprintf("%dx%d moe %d kv %s cpu %v", s.Slots, s.CtxPerSlot, s.NCpuMoe, s.KVType, s.CPUOnly)
 }
 
-// stable clears the record once a server has run CrashQuick without trouble.
+// stable clears the record once a server has run CrashQuick without trouble: called by the named
+// moment mindUp arms, for the server it was armed for.
 func (s *Supervisor) stable(srv *server) {
-	if s.cfg.Now().Sub(srv.startedAt) < s.cfg.CrashQuick {
-		return
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	cleared := false
 	if s.rec.fails != 0 || s.rec.crashes != 0 {
-		s.rec.fails, s.rec.crashes, s.rec.crashShape, s.rec.suspect = 0, 0, "", false
+		s.rec.fails, s.rec.crashes, s.rec.crashShape, s.rec.suspect, s.rec.waitingFor = 0, 0, "", false, ""
+		cleared = true
+		s.refreshLocked()
+	}
+	s.mu.Unlock()
+	if cleared {
 		s.logf("stable for %s: the crash record is cleared", s.cfg.CrashQuick)
 	}
 }
@@ -187,87 +197,79 @@ func (s *Supervisor) belowCeiling(lc loadCtx, shape fit.Shape, room fit.Room, w 
 
 // ---- out-of-memory the server survives ---------------------------------------------------
 
-// oomWatch counts out-of-memory lines in llama-server's output while it runs.
+// oomWatch counts out-of-memory lines in llama-server's output while it runs, by request: lines
+// said during two different requests (Begin's sequence) within the named moment OOMHold are a
+// held run, and wake the reactor to step down. One failed request is not a shrink signal; a
+// second one is. Lines during the load are let go when it is ready (take).
 type oomWatch struct {
-	n    atomic.Int32
-	last atomic.Value // string
+	s     *Supervisor
+	live  atomic.Bool // the load is over: lines count
+	mu    sync.Mutex
+	first uint64 // the request the first line of a run was said in (0: no run)
+	in    bool   // a run stands (OOMHold has not passed since its first line)
+	gen   uint64
 }
 
 func (w *oomWatch) line(l string) {
-	if strings.Contains(l, "pinned memory") || !reOOM.MatchString(l) {
+	if !w.live.Load() || strings.Contains(l, "pinned memory") || !reOOM.MatchString(l) {
 		return
 	}
-	w.n.Add(1)
-	w.last.Store(l)
+	s := w.s
+	seq := s.reqSeq()
+	w.mu.Lock()
+	held := false
+	switch {
+	case !w.in:
+		w.in, w.first = true, seq
+		w.gen++
+		gen := w.gen
+		// named moment: OOMHold, how close two requests' out-of-memory lines are a shrink signal
+		host.Moment(s.cfg.OOMHold, func() {
+			w.mu.Lock()
+			if w.gen == gen {
+				w.in = false
+			}
+			w.mu.Unlock()
+		})
+	case seq != w.first:
+		held = true
+		w.in = false
+		w.gen++
+	}
+	w.mu.Unlock()
+	s.say("mind.oom", "", map[string]any{"line": l, "held": held})
+	go s.logf("llama-server reported out of memory and kept running: %s", l)
+	s.card.event() // the room is read again on an out-of-memory line
+	if held {
+		s.wakeMind(func(c *causes) { c.oom, c.oomLine = true, l })
+	}
 }
 
-func (w *oomWatch) take() (int, string) {
-	n := int(w.n.Swap(0))
-	l, _ := w.last.Load().(string)
-	return n, l
-}
-
-// survivedOOM reads this tick's out-of-memory lines and reports a held run of them: lines in
-// two ticks within OOMHold. One failed request is not a shrink signal; a second one is.
-func (s *Supervisor) survivedOOM(srv *server) (bool, string) {
-	if srv.oom == nil {
-		return false, ""
-	}
-	n, last := srv.oom.take()
-	now := s.cfg.Now()
-	keep := srv.oomTicks[:0]
-	for _, t := range srv.oomTicks {
-		if now.Sub(t) < s.cfg.OOMHold {
-			keep = append(keep, t)
-		}
-	}
-	srv.oomTicks = keep
-	if n == 0 {
-		return false, ""
-	}
-	srv.oomTicks = append(srv.oomTicks, now)
-	s.logf("llama-server reported out of memory and kept running (%d lines): %s", n, last)
-	if len(srv.oomTicks) >= 2 {
-		srv.oomTicks = nil
-		return true, last
-	}
-	return false, ""
-}
+// take ends the load: lines from now on count.
+func (w *oomWatch) take() { w.live.Store(true) }
 
 // ---- making room during a reply ----------------------------------------------------------
 
 // drain is a shrink waiting for the replies in flight: new requests get "Loading model" (the
-// phase is resizing) and the resize runs once the slots are idle or DrainMax has passed.
+// phase is resizing) and the resize runs once the count of requests in flight reaches zero or
+// the named moment DrainMax comes (the reactor, run/mind.go).
 type drain struct {
-	to    fit.Shape
-	since time.Time
-	why   string
+	to     fit.Shape
+	why    string
+	late   atomic.Bool
+	cancel func() bool
 }
 
 func (s *Supervisor) startDrain(srv *server, to fit.Shape, why string) {
-	srv.drain = &drain{to: to, since: s.cfg.Now(), why: why}
+	d := &drain{to: to, why: why}
+	// named moment: DrainMax, the longest a shrink waits for the replies in flight
+	d.cancel = host.Moment(s.cfg.DrainMax, func() {
+		d.late.Store(true)
+		s.wakeMind(func(c *causes) { c.drain = true })
+	})
+	srv.drain = d
 	s.logf("%s: finishing the replies in flight, then %d x %d (moe %d); new requests wait", why, to.Slots, to.CtxPerSlot, to.NCpuMoe)
 	s.setPhase("resizing", fmt.Sprintf("Making room on the graphics card: finishing replies, then %d x %d", to.Slots, to.CtxPerSlot))
-}
-
-// tickDrain runs one watchdog tick of a drain.
-func (s *Supervisor) tickDrain(ctx context.Context, srv *server, base string) {
-	d := srv.drain
-	if srv.proc.Exited() {
-		srv.drain = nil
-		s.handleExit(ctx, srv)
-		return
-	}
-	idle := s.slotsIdle(base)
-	late := s.cfg.Now().Sub(d.since) >= s.cfg.DrainMax
-	if !idle && !late {
-		return
-	}
-	srv.drain = nil
-	if !idle {
-		s.addError("replies still running after %s: making room now (%s)", s.cfg.DrainMax, d.why)
-	}
-	s.shrink(ctx, srv, d.to)
 }
 
 // needShort is how far the running shape's need passes the room's budget (MiB, <= 0: fits).

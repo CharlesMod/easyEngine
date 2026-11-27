@@ -18,6 +18,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
@@ -144,17 +145,15 @@ type server struct {
 	fp        fit.Footprint
 	seed      fit.Footprint // the header's seed, which every reading is held to (never fp)
 	startedAt time.Time
-	misses    int
-	idleCount int
-	idleSince time.Time
 	nextGrow  time.Time
 	measured  int
-	// prevReserve is the last tick's reserve (others plus the host's share, MiB), -1 before one.
-	prevReserve int
-	reserve0    int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
-	oom         *oomWatch   // out-of-memory lines in its output since the last tick
-	oomTicks    []time.Time // ticks that saw them, within OOMHold
-	drain       *drain      // a shrink waiting for the replies in flight
+	reserve0  int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
+	oom       *oomWatch   // out-of-memory lines in its output, counted by request (run/recover.go)
+	drain     *drain      // a shrink waiting for the replies in flight
+	planned   atomic.Bool // stopped on purpose: its end is not a crash
+	// stableCancel cancels the named moment CrashQuick after the start that clears the crash
+	// record (run/recover.go).
+	stableCancel func() bool
 }
 
 // Supervisor owns the children and the state.
@@ -184,13 +183,18 @@ type Supervisor struct {
 	restarts    int
 	hw          *probe.Hardware
 	cat         *catalog.Catalog
-	retryAt     time.Time
 	retryable   bool
 	rec         recovery
 	reshape     bool
 	tokS        float64
 
-	inflight int32
+	// hub is what the supervisor says (run/book.go); poke wakes the mind's reactor and door is
+	// the count of requests in flight with what it arms (run/mind.go); room is the reserve as
+	// sensed when needed (run/room.go): the card.
+	hub  *event.Hub
+	poke chan struct{}
+	door door
+	card *roomWatch
 
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
@@ -225,8 +229,16 @@ func New(cfg Config) (*Supervisor, error) {
 	lg, _ := lifecycle.OpenLog(filepath.Join(cfg.DataDir, "logs", "engine.log"))
 	ctx, cancel := context.WithCancel(context.Background())
 	st, note := loadState(cfg.DataDir)
-	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st}
+	hub, err := event.New(book, cfg.Now)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1)}
 	s.agent.s = s
+	s.card = newRoomWatch(s)
+	s.say("engine", "", map[string]any{"version": cfg.Version, "port": 0})
+	s.sayModel()
 	if note != "" {
 		s.addError("%s", note)
 	}
@@ -239,6 +251,7 @@ func (s *Supervisor) SetPort(p int) {
 	s.mu.Lock()
 	s.port = p
 	s.mu.Unlock()
+	s.say("engine", "", map[string]any{"version": s.cfg.Version, "port": p})
 }
 
 func (s *Supervisor) logf(format string, a ...any) {
@@ -257,10 +270,54 @@ func (s *Supervisor) addError(format string, a ...any) {
 		s.errs = s.errs[len(s.errs)-10:]
 	}
 	s.mu.Unlock()
+	s.say("error", "", map[string]string{"message": msg})
 }
 
 func (s *Supervisor) setPhaseLocked(phase, msg string) {
 	s.phase, s.message = phase, msg
+	s.say("phase", "", map[string]string{"phase": phase, "message": msg})
+	s.refreshLocked()
+}
+
+// refreshLocked says the facts that status computes from several fields: the shape, the device,
+// the yield, the upgrade, the recovery record and the job. The hub says only what changed (an
+// identical body is said already). Caller holds s.mu.
+func (s *Supervisor) refreshLocked() {
+	if s.hub == nil {
+		return
+	}
+	sayPtr(s, "mind.shape", "", s.shape)
+	sayPtr(s, "mind.device", "", s.device)
+	sayPtr(s, "yield", "", s.yieldInfo)
+	var st Status
+	s.stagingLocked(&st)
+	sayPtr(s, "upgrade", "", st.Upgrade)
+	sayPtr(s, "recovery", "", s.recoveryLocked())
+	switch {
+	case s.removing:
+		s.say("job", "", map[string]any{"kind": "remove", "running": true})
+	case s.jobRunning:
+		s.say("job", "", map[string]any{"kind": "install", "running": true})
+	default:
+		s.sayGone("job", "")
+	}
+}
+
+// refresh is refreshLocked for a caller that does not hold s.mu.
+func (s *Supervisor) refresh() {
+	s.mu.Lock()
+	s.refreshLocked()
+	s.mu.Unlock()
+}
+
+// sayModel says the selected model and how it runs.
+func (s *Supervisor) sayModel() {
+	s.mu.Lock()
+	b := map[string]any{"mode": s.st.Mode, "model": s.st.Model, "backend": s.st.Backend, "kv_type": s.st.KVType,
+		"target": s.st.Target, "previous": s.st.Previous, "starter_owned": s.st.StarterOwned, "custom": s.st.Custom,
+		"sampler_policy": s.st.SamplerPolicy, "linger_s": s.st.LingerS}
+	s.mu.Unlock()
+	s.say("model", "", b)
 }
 
 func (s *Supervisor) setPhase(phase, msg string) {
@@ -357,6 +414,8 @@ func (s *Supervisor) save() {
 	st := s.st
 	st.Book.Entries = copyBook(s.st.Book.Entries)
 	s.mu.Unlock()
+	s.sayModel()
+	s.wakeMind(func(*causes) {}) // a settings change (the KV type) is looked at by the reactor
 	if err := writeState(s.dir, st); err != nil {
 		s.logf("write state: %v", err)
 	}
@@ -551,13 +610,6 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 
 // ---- proxy helpers ------------------------------------------------------------------------
 
-// Begin marks a proxied request in flight; call the result when it ends.
-func (s *Supervisor) Begin() func() {
-	atomic.AddInt32(&s.inflight, 1)
-	var once sync.Once
-	return func() { once.Do(func() { atomic.AddInt32(&s.inflight, -1) }) }
-}
-
 // Route says where the proxy should send a request.
 func (s *Supervisor) Route() Route {
 	s.mu.Lock()
@@ -567,6 +619,10 @@ func (s *Supervisor) Route() Route {
 	}
 	if y := s.yieldInfo; y != nil {
 		return Route{Kind: "unavailable", Code: "yielded", Message: "Paused while " + y.Reason + " runs"}
+	}
+	if s.phase == "error" {
+		// a request at the door is a word that could change the outcome (run/mind.go)
+		s.nudge("a request at the door")
 	}
 	switch s.phase {
 	case "ready":
@@ -595,6 +651,7 @@ func (s *Supervisor) setProgress(step string, p *Progress) {
 		p.Step = step
 	}
 	s.progress = p
+	sayPtr(s, "install.progress", "", p)
 	s.mu.Unlock()
 }
 
@@ -616,7 +673,8 @@ func (s *Supervisor) Run() {
 		}
 	}
 	s.wg.Add(1)
-	go func() { defer s.wg.Done(); s.watchdog() }()
+	go func() { defer s.wg.Done(); s.mind() }()
+	s.watchNetwork()
 	if s.cfg.Yield != nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.yieldLoop() }()
@@ -660,8 +718,10 @@ func (s *Supervisor) Shutdown() {
 	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.stop()
+	s.card.stop()
 	s.wg.Wait()
 	s.cfg.Group.KillAll()
+	s.hub.Close()
 	if s.log != nil {
 		s.log.Close()
 	}
@@ -702,6 +762,7 @@ func (s *Supervisor) Stop() error {
 	s.stopServerLocked()
 	s.mu.Lock()
 	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
+	s.refreshLocked()
 	s.mu.Unlock()
 	if s.Status().Mode == "local" {
 		if _, ok := s.resolveInstall(); ok {
@@ -748,10 +809,12 @@ func (s *Supervisor) stopServerLocked() {
 	if srv == nil {
 		return
 	}
+	s.mindDown(srv)
 	srv.proc.Stop(s.cfg.StopGrace)
 	s.mu.Lock()
 	s.shape = nil
 	s.llamaURL = ""
+	s.refreshLocked()
 	s.mu.Unlock()
 }
 

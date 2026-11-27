@@ -2,19 +2,19 @@ package run
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math"
-	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
@@ -110,7 +110,20 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 
 // startLocked chooses a shape and loads it. opMu must be held.
 func (s *Supervisor) startLocked() error {
-	if s.yielded() != nil { // the card is yielded: the yield loop loads again when it is free
+	// The cancel is visible before the yielded check: a yield that begins after this point finds
+	// it and cancels the load (yieldNow sets the yield, then reads loadCancel, both under s.mu), and
+	// one that began before is seen by the check. No yield waits on opMu for a whole load.
+	ctx, cancel := context.WithCancel(s.root)
+	s.mu.Lock()
+	s.loadCancel = cancel
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		s.loadCancel = nil
+		s.mu.Unlock()
+	}()
+	if s.yielded() != nil { // the card is yielded: the yield's end loads again
 		return nil
 	}
 	if _, ok := s.resolveInstall(); !ok {
@@ -126,16 +139,6 @@ func (s *Supervisor) startLocked() error {
 		}
 		return nil
 	}
-	ctx, cancel := context.WithCancel(s.root)
-	s.mu.Lock()
-	s.loadCancel = cancel
-	s.mu.Unlock()
-	defer func() {
-		cancel()
-		s.mu.Lock()
-		s.loadCancel = nil
-		s.mu.Unlock()
-	}()
 	s.setPhase("starting", "Choosing a shape")
 	lc, room, w, err := s.loadContext(ctx)
 	if err != nil {
@@ -151,30 +154,40 @@ func (s *Supervisor) startLocked() error {
 	return s.runShape(ctx, lc, shape)
 }
 
-// failStart puts the engine in the error phase. With retry the watchdog tries again after the
-// backoff for the failures in a row (Config.CrashBackoff); without, only a user action does.
+// failStart puts the engine in the error phase. With retry the first failure in a row is tried
+// again at once and a later one waits for an event that could change the outcome (run/recover.go);
+// without, only a user action does.
 func (s *Supervisor) failStart(err error, retry bool) error {
 	return s.fail(err, retry, false)
 }
 
-// failSlow is a retried failure that waits the longest backoff: a memory shortfall, which another
-// app letting go of the card ends, or nothing does.
+// failSlow is a retried failure with nothing left to try at once: a memory shortfall, which
+// another app letting go of the card ends, or nothing does. It waits for an event.
 func (s *Supervisor) failSlow(err error) error {
 	return s.fail(err, true, true)
 }
 
 func (s *Supervisor) fail(err error, retry, slow bool) error {
 	s.addError("%v", err)
-	wait := s.noteFailure(err, slow)
+	now := s.noteFailure(err, slow || !retry)
 	s.mu.Lock()
 	msg := err.Error()
 	if retry {
-		msg = fmt.Sprintf("%s (failure %d in a row; trying again in %s)", msg, s.rec.fails, wait.Round(100*time.Millisecond))
+		if now {
+			msg = fmt.Sprintf("%s (failure %d in a row; trying again now)", msg, s.rec.fails)
+		} else {
+			msg = fmt.Sprintf("%s (failure %d in a row; waiting for %s)", msg, s.rec.fails, waitingWord)
+		}
+	}
+	s.retryable = retry
+	if !retry {
+		s.rec.waitingFor = ""
 	}
 	s.setPhaseLocked("error", msg)
-	s.retryable = retry
-	s.retryAt = s.rec.retryAt
 	s.mu.Unlock()
+	if retry && now {
+		s.wakeMind(func(c *causes) { c.retry = true })
+	}
 	return err
 }
 
@@ -258,8 +271,28 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	if err != nil {
 		return launchResult{err: err}
 	}
-	oomw := &oomWatch{}
-	sink.OnLine(oomw.line)
+	// Ready is heard in the server's own lines (docs/EVENTS.md section 3): after the line that
+	// says it listens, /health is asked once per following line until it answers. A load that
+	// says nothing for LoadTimeout fails.
+	oomw := &oomWatch{s: s}
+	lines := make(chan struct{}, 1)
+	var listening atomic.Bool
+	silent := make(chan struct{})
+	// watchdog for silence: a load with no line from the server for LoadTimeout has hung
+	quiet := host.NewSilence(s.cfg.LoadTimeout, func() { close(silent) })
+	defer quiet.Stop()
+	sink.OnLine(func(l string) {
+		quiet.Heard()
+		s.Heard()
+		oomw.line(l)
+		if !listening.Load() && saysListening(l) {
+			listening.Store(true)
+		}
+		select {
+		case lines <- struct{}{}:
+		default:
+		}
+	})
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
 	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, env), Log: sink})
 	if err != nil {
@@ -268,54 +301,59 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	}
 	s.launching.set(proc.Pid)
 	go func() { // the log stays on disk while the server runs, and is closed once it exits
-		<-proc.Done()
-		time.Sleep(50 * time.Millisecond)
+		<-proc.Done() // Done is closed once every line has reached the sink (lifecycle.Proc)
 		sink.Close()
 	}()
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	s.setPhase("loading", fmt.Sprintf("Loading model (%d slots x %d ctx)", shape.Slots, shape.CtxPerSlot))
-	deadline := time.NewTimer(s.cfg.LoadTimeout)
-	defer deadline.Stop()
-	tick := time.NewTicker(s.cfg.HealthPoll)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			proc.Stop(s.cfg.StopGrace)
 			return launchResult{err: ctx.Err()}
-		case <-deadline.C:
+		case <-silent:
 			proc.Stop(s.cfg.StopGrace)
-			return launchResult{err: errors.New("model load timed out")}
+			return launchResult{err: fmt.Errorf("model load timed out: llama-server said nothing for %s", s.cfg.LoadTimeout)}
 		case <-proc.Done():
-			time.Sleep(20 * time.Millisecond) // let the output copy finish
 			tail := proc.Tail()
 			oom, mb := ParseOOM(tail)
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
-		case <-tick.C:
-			if s.healthy(url) {
-				oomw.take() // what loading printed is not a run-time signal
-				srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(), prevReserve: -1,
-					reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw}
-				srv.nextGrow = s.cfg.Now().Add(s.cfg.GrowIdle)
-				s.calibrate(ctx, srv)
-				s.srv = srv
-				s.ours.set(proc.Pid)
-				s.mu.Lock()
-				s.llamaURL = url
-				basis := shape.VRAMBasis
-				if srv.measured > 0 {
-					basis = fit.Measured
-				}
-				s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB), VRAMBasis: basis}
-				s.retryable = false
-				s.tokS = 0
-				s.mu.Unlock()
-				s.setPhase("ready", "Ready")
-				return launchResult{ok: true}
+		case <-lines:
+			if !listening.Load() || !s.healthy(url) {
+				continue
 			}
+			oomw.take() // what loading printed is not a run-time signal
+			srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(),
+				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw}
+			srv.nextGrow = s.cfg.Now()
+			s.calibrate(ctx, srv)
+			s.srv = srv
+			s.ours.set(proc.Pid)
+			s.mu.Lock()
+			s.llamaURL = url
+			basis := shape.VRAMBasis
+			if srv.measured > 0 {
+				basis = fit.Measured
+			}
+			s.shape = &ShapeInfo{Slots: shape.Slots, CtxPerSlot: shape.CtxPerSlot, NCpuMoe: shape.NCpuMoe, KVType: shape.KVType, VRAMMiB: firstPos(srv.measured, shape.VRAMMiB), VRAMBasis: basis}
+			s.retryable = false
+			s.rec.waitingFor = ""
+			s.tokS = 0
+			s.mu.Unlock()
+			s.mindUp(srv)
+			s.setPhase("ready", "Ready")
+			return launchResult{ok: true}
 		}
 	}
 }
+
+// listensRe matches the line llama-server says once it listens. Newer builds say it after the
+// model loaded ("llama_server: listening on http://127.0.0.1:41745"); older ones say "main: HTTP
+// server is listening, ..." before loading and "main: server is listening on http://... -
+// starting the main loop" after it. Fixtures: run/testdata/ready-*.txt.
+var listensRe = regexp.MustCompile(`(?i)\blistening on https?://|server is listening`)
+
+func saysListening(l string) bool { return listensRe.MatchString(l) }
 
 func firstPos(a, b int) int {
 	if a > 0 {
@@ -379,215 +417,6 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 
 }
 
-// ---- watchdog -----------------------------------------------------------------------------
-
-func (s *Supervisor) watchdog() {
-	t := time.NewTicker(s.cfg.WatchEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-s.root.Done():
-			return
-		case <-t.C:
-			s.tick()
-		}
-	}
-}
-
-// slotsIdle is true when /slots shows no slot processing and no proxied request runs.
-func (s *Supervisor) slotsIdle(base string) bool {
-	if s.inflightNow() != 0 {
-		return false
-	}
-	resp, err := s.cfg.HTTP.Get(base + "/slots")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return true // /slots not served: rely on the proxy's own count
-	}
-	var slots []struct {
-		Processing bool `json:"is_processing"`
-	}
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if json.Unmarshal(b, &slots) != nil {
-		return true
-	}
-	for _, sl := range slots {
-		if sl.Processing {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Supervisor) tick() {
-	if !s.opMu.TryLock() {
-		return
-	}
-	defer s.opMu.Unlock()
-	s.mu.Lock()
-	local := s.st.Mode == "local"
-	phase := s.phase
-	stopped := s.userStopped
-	retry := s.retryable && !s.cfg.Now().Before(s.retryAt)
-	reshape := s.reshape
-	s.mu.Unlock()
-	if !local {
-		return
-	}
-	srv := s.srv
-	if srv == nil {
-		if phase == "error" && retry && !stopped && !s.cfg.NoAutoStart {
-			s.startLocked()
-		}
-		return
-	}
-	ctx := s.root
-	base := fmt.Sprintf("http://127.0.0.1:%d", srv.port)
-	if srv.drain != nil && phase == "resizing" {
-		s.tickDrain(ctx, srv, base)
-		return
-	}
-	srv.drain = nil
-	if phase != "ready" {
-		return
-	}
-	// 1. the process died on its own
-	if srv.proc.Exited() {
-		s.handleExit(ctx, srv)
-		return
-	}
-	// 2. health
-	if s.healthy(base) {
-		srv.misses = 0
-	} else {
-		srv.misses++
-		if srv.misses >= s.cfg.HealthMisses {
-			s.addError("llama-server missed %d health checks: restarting", srv.misses)
-			s.restartSame(ctx, srv)
-			return
-		}
-		return
-	}
-	s.readTokS(base)
-	s.stable(srv)
-	oomHeld, oomLine := s.survivedOOM(srv)
-	// 3. idle tracking
-	if s.slotsIdle(base) {
-		srv.idleCount++
-		if srv.idleSince.IsZero() {
-			srv.idleSince = s.cfg.Now()
-		}
-	} else {
-		srv.idleCount = 0
-		srv.idleSince = time.Time{}
-	}
-	idle := srv.idleCount >= s.cfg.IdleChecks
-	if reshape && idle {
-		s.mu.Lock()
-		s.reshape = false
-		s.mu.Unlock()
-		s.reload(ctx, srv, "KV type changed")
-		return
-	}
-	// 4. make room for the game: read the adapters (the reserve is measured, never the card's
-	// used memory, which holds our own server too), and shrink when the model's memory no longer
-	// fits the budget the reserve leaves
-	hw, err := s.cfg.Probe(ctx)
-	if err != nil {
-		return
-	}
-	room, sn := s.roomSensed(ctx, hw, []int{srv.proc.Pid})
-	held := srv.heldReserve(sn.sum.Reserve.OthersMiB + sn.sum.Reserve.HostMiB)
-	if room.NoGPU || srv.shape.CPUOnly {
-		return
-	}
-	// 4a. the server keeps failing requests for want of memory: it is out of room whatever the
-	// reading says. One step down, recorded; at idle now, else once the replies in flight end
-	// (they are failing anyway, so the wait is short).
-	if oomHeld {
-		w := s.wantsFor(srv.key)
-		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
-		if err != nil {
-			s.addError("llama-server is out of memory at the smallest shape (%s)", oomLine)
-			return
-		}
-		s.addError("llama-server keeps running out of memory at %d x %d (%s): shrinking", srv.shape.Slots, srv.shape.CtxPerSlot, oomLine)
-		if lc, room2, _, err := s.loadContext(ctx); err == nil {
-			s.lowerCap(lc, srv.shape, next.Slots*next.CtxPerSlot, room2)
-		}
-		s.setCeiling(srv.key, srv.shape, "it kept running out of memory while serving")
-		if idle {
-			s.resize(ctx, srv, next, false)
-		} else {
-			s.startDrain(srv, next, "out of memory while serving")
-		}
-		return
-	}
-	if short, need, vram, ok := needShort(srv, room); ok && short > 0 {
-		if !held {
-			return // not on a reading that is still moving
-		}
-		if !idle && short < s.cfg.DrainMinMiB {
-			return // a small shortfall waits for a pause between lines
-		}
-		w := s.wantsFor(srv.key)
-		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
-		if err != nil {
-			return
-		}
-		// straight to the shape that fits the room when one step is not enough: one restart,
-		// not one per tick
-		if c, err := fit.Choose(srv.fp, room, w); err == nil {
-			if cn, _, err1 := srv.fp.Need(c); err1 == nil {
-				if nn, _, err2 := srv.fp.Need(next); err2 == nil && cn < nn {
-					next = c
-				}
-			}
-		} else {
-			// nothing fits the room: the smallest shape the steps reach, in one restart
-			for i := 0; i < 64; i++ {
-				if nn, _, err := srv.fp.Need(next); err != nil || int(math.Ceil(nn)) <= vram {
-					break
-				}
-				n2, err := fit.StepDown(srv.fp, next, room, w)
-				if err != nil {
-					break
-				}
-				next = n2
-			}
-		}
-		r := sn.sum.Reserve
-		s.logf("model needs %d MiB, the room leaves %d (others %d, host %d, margin %d): shrinking to %d x %d (moe %d)", need, vram, r.OthersMiB, r.HostMiB, r.MarginMiB, next.Slots, next.CtxPerSlot, next.NCpuMoe)
-		if idle {
-			s.resize(ctx, srv, next, false)
-		} else {
-			// mid-reply: llama-server holds its memory from load, so the reply in flight is
-			// safe to finish; new requests wait while it does, then the model shrinks
-			s.startDrain(srv, next, fmt.Sprintf("another app took memory (short %d MiB)", short))
-		}
-		return
-	}
-	// 5. grow back when idle for long enough, on a reserve that has held
-	if held && idle && !srv.idleSince.IsZero() && s.cfg.Now().Sub(srv.idleSince) >= s.cfg.GrowIdle && !s.cfg.Now().Before(srv.nextGrow) {
-		w := s.wantsFor(srv.key)
-		if next, ok, err := fit.Grow(srv.fp, srv.shape, room, w); err == nil && ok && !s.atCeiling(srv.key, srv.fp, next) {
-			s.logf("idle with room: growing to %d x %d (moe %d)", next.Slots, next.CtxPerSlot, next.NCpuMoe)
-			s.resize(ctx, srv, next, true)
-		}
-	}
-}
-
-// heldReserve records this tick's reserve (others plus the host's share, MiB) and reports
-// whether the last two reads agree: a change in the room reshapes the model only once held.
-func (srv *server) heldReserve(total int) bool {
-	held := srv.prevReserve >= 0 && total-srv.prevReserve <= heldTolMiB && srv.prevReserve-total <= heldTolMiB
-	srv.prevReserve = total
-	return held
-}
-
 func (s *Supervisor) countRestart() {
 	s.mu.Lock()
 	s.restarts++
@@ -606,9 +435,9 @@ func (s *Supervisor) restartSame(ctx context.Context, srv *server) {
 }
 
 // handleExit deals with a server that died on its own. An OOM in its last words lowers the
-// stored cap and restarts one step smaller at once. Anything else restarts after the backoff for
-// the failures in a row, through the normal choose path (which reads the room again); after
-// CrashSteps quick crashes at one shape it is read as a memory problem and steps down once.
+// stored cap and restarts one step smaller at once. Anything else restarts at once through the
+// normal choose path (which reads the room again); CrashSteps quick crashes at one shape are read
+// as a memory problem and step down once, at once; with nothing left to try it waits for an event.
 func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	s.countRestart()
 	tail := srv.proc.Tail()
@@ -618,8 +447,11 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 	if err := srv.proc.Err(); err != nil { // how it ended says more than its last line when it was killed
 		why = fmt.Sprintf("%v; last line: %s", err, why)
 	}
+	s.say("mind.exit", "", map[string]any{"pid": srv.proc.Pid, "why": why, "quick": quick, "oom": oom})
+	s.mindDown(srv)
 	s.srv = nil
 	s.ours.set(0)
+	s.launching.set(0)
 	s.mu.Lock()
 	s.shape = nil
 	s.llamaURL = ""
@@ -645,7 +477,7 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
 		s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
 		s.setCeiling(lc.key, shape, "it ran out of memory while serving")
-		s.noteFailure(fmt.Errorf("out of memory at %d x %d", shape.Slots, shape.CtxPerSlot), false)
+		s.noteRestart(fmt.Errorf("out of memory at %d x %d", shape.Slots, shape.CtxPerSlot))
 		if err := s.runShape(cctx, lc, next); err != nil {
 			s.logf("restart after the out-of-memory failed: %v", err)
 		}
@@ -671,25 +503,29 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 				s.addError("llama-server crashed %d times in a row at %d x %d (%s); no other app was seen taking memory, stepping down once anyway", n, shape.Slots, shape.CtxPerSlot, why)
 			}
 			s.setCeiling(lc.key, shape, fmt.Sprintf("it crashed %d times in a row", n))
-			s.noteFailure(fmt.Errorf("crashed %d times at %d x %d: %s", n, shape.Slots, shape.CtxPerSlot, why), false)
+			s.noteRestart(fmt.Errorf("crashed %d times at %d x %d: %s", n, shape.Slots, shape.CtxPerSlot, why))
 			if err := s.runShape(cctx, lc, next); err != nil {
 				s.logf("restart one step down failed: %v", err)
 			}
 			return
 		}
-		// the smallest shape crashes too: keep trying slowly
+		// the smallest shape crashes too: nothing left to try, wait for an event
 		s.failSlow(fmt.Errorf("llama-server keeps crashing at the smallest shape (%s), crash %d in a row", why, n))
 		return
 	}
-	s.failStart(fmt.Errorf("llama-server exited (%s), crash %d in a row at %d x %d", why, n, shape.Slots, shape.CtxPerSlot), true)
+	// one restart at once, through the choose path
+	err = fmt.Errorf("llama-server exited (%s), crash %d in a row at %d x %d", why, n, shape.Slots, shape.CtxPerSlot)
+	s.addError("%v: restarting", err)
+	s.noteRestart(err)
+	s.startLocked()
 }
 
 // resize restarts at a new shape, only if nothing is being served. A failed grow goes back to
 // the old shape; a failed shrink steps down from the shape it tried (shrink).
 func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow bool) {
 	s.setPhase("resizing", fmt.Sprintf("Resizing to %d x %d", to.Slots, to.CtxPerSlot))
-	// New requests now get 503; make sure nothing slipped in before the switch.
-	if !s.slotsIdle(fmt.Sprintf("http://127.0.0.1:%d", srv.port)) {
+	// New requests now wait; make sure nothing slipped in before the switch.
+	if s.inflightNow() != 0 {
 		s.setPhase("ready", "Ready")
 		return
 	}
@@ -768,21 +604,8 @@ func (s *Supervisor) shrink(ctx context.Context, srv *server, to fit.Shape) {
 	}
 }
 
-func (s *Supervisor) inflightNow() int32 {
-	return loadInt32(&s.inflight)
-}
-
-// httpGetOK is used by tests and the API for quick liveness checks.
-func httpGetOK(c *http.Client, url string) bool {
-	resp, err := c.Get(url)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode/100 == 2
-}
-
-// readTokS keeps the last decode rate from llama-server's /metrics.
+// readTokS keeps the last decode rate from llama-server's /metrics: read once when the count of
+// requests in flight returns to zero.
 func (s *Supervisor) readTokS(base string) {
 	resp, err := s.cfg.HTTP.Get(base + "/metrics")
 	if err != nil {
@@ -801,6 +624,7 @@ func (s *Supervisor) readTokS(base string) {
 					s.mu.Lock()
 					s.tokS = v
 					s.mu.Unlock()
+					s.say("request", "", map[string]any{"what": "idle", "tok_s": v})
 				}
 			}
 		}

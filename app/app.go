@@ -145,7 +145,10 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		if try > 4 {
 			return Result{}, errors.New("could not take engine.lock")
 		}
-		if d, err := lifecycle.ReadLock(lockPath); err == nil {
+		if d, err := lifecycle.ReadLock(lockPath); errors.Is(err, os.ErrNotExist) {
+			// No lock: go and take it. (Not the unreadable case below: a lock another serve
+			// creates after this read would be seen by the Stat there and removed as unreadable.)
+		} else if err == nil {
 			if alive(d) {
 				// A live engine holds the lock: attach to it.
 				tg := targetFor(dir, d)

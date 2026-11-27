@@ -27,6 +27,7 @@ var book = []event.Decl{
 	{Name: "recovery", Kind: event.Fact, What: "the crash and failed-start record (status recovery), with what a retry waits for; gone when none"},
 	{Name: "error", Kind: event.Happening, What: "something went wrong: {message}, as status errors lists it"},
 	{Name: "request", Kind: event.Happening, What: "a request at the door began or ended, or the door went idle: {what: begin|end|idle, inflight, id (X-Request-Id)}; a streamed reply's end adds what the streamer read: {end: done|upstream_error|ended_early|client_gone, events, finish_reason, prompt_tokens, cached_tokens, completion_tokens, tok_s, prompt_ms, predicted_ms, slot}; idle says tok_s read from /metrics"},
+	{Name: "context", Kind: event.Happening, Keyed: true, What: "the prompt cache across a reshape (key: the slot, or \"all\" for a save that did not happen for any slot, slot -1): {what: saved|laid_back|let_go|not_saved, slot, tokens, bytes, why}; status contexts lists what is kept"},
 	{Name: "nudge", Kind: event.Happening, What: "a word that could change an outcome: a request at the door, a client's start or install: {why}"},
 	{Name: "network", Kind: event.Happening, What: "the system said a network link or address changed"},
 	{Name: "mark", Kind: event.Happening, What: "a marker said from outside (a test, a client) to order what came before it: {what}"},

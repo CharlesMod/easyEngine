@@ -88,6 +88,9 @@ type Status struct {
 	ModelNote     string `json:"model_note,omitempty"`
 	// Sampler is the sampler policy mode and the profiles in force (docs/SAMPLERS.md).
 	Sampler SamplerInfo `json:"sampler"`
+	// Contexts is the prompt cache kept across a reshape (run/context.go): the slots saved while
+	// no model server holds them; nil when none.
+	Contexts *ContextsInfo `json:"contexts,omitempty"`
 	// ModelName is the human name of the selected model; Custom is the user's own GGUF file
 	// (nil when none is set). While it serves, Model is "custom:<name>".
 	ModelName string      `json:"model_name"`
@@ -163,6 +166,14 @@ type server struct {
 	oom       *oomWatch   // out-of-memory lines in its output, counted by request (run/recover.go)
 	drain     *drain      // a shrink waiting for the replies in flight
 	planned   atomic.Bool // stopped on purpose: its end is not a crash
+	// ctxKey is what a saved slot must have been saved under to be laid back into this server
+	// (run/context.go): model file, llama build, cache type.
+	ctxKey ctxKey
+	// laidBack is the tokens each slot was given back at the start (GET /slots says nothing of
+	// a restored slot until it serves). Guarded by opMu.
+	laidBack map[int]int
+	// oomShrink: the shrink ahead is for out-of-memory while serving; it saves nothing. Guarded by opMu.
+	oomShrink bool
 	// oomPend: out-of-memory lines in two requests were said of this server and not yet acted on
 	// (they came mid-drain or mid-swap); oomLine is the last. Guarded by opMu.
 	oomPend bool
@@ -217,6 +228,7 @@ type Supervisor struct {
 	// listeners counts the listeners for a word (listenWord): a request is said as a nudge only while one listens
 	listeners atomic.Int32
 	door      door
+	kept      keptContexts // the saved slots (run/context.go)
 	card      *roomWatch
 	sf        settingsFile // settings.json as the engine follows it (run/settings.go)
 	// deferred: started asleep (Config.StartSleeping); the agent and an unfinished upgrade wait
@@ -273,6 +285,7 @@ func New(cfg Config) (*Supervisor, error) {
 		s.addError("%s", note)
 	}
 	s.setPhaseLocked("not_installed", "No model installed")
+	s.contextsInit()
 	return s, nil
 }
 
@@ -423,6 +436,7 @@ func (s *Supervisor) Status() Status {
 	}
 	st.Recovery = s.recoveryLocked()
 	st.Held = int(s.door.held.Load())
+	st.Contexts = s.kept.info()
 	return st
 }
 
@@ -830,6 +844,7 @@ func (s *Supervisor) Shutdown() {
 	// server being stopped, and the held ones end (api answers "stopping" when the hub closes)
 	s.setPhase("stopping", "Stopping")
 	s.stopServerLocked()
+	s.letGoContexts("the engine ends")
 	s.opMu.Unlock()
 	s.stop()
 	s.card.stop()
@@ -884,6 +899,7 @@ func (s *Supervisor) Stop() error {
 	if local && installed { // said before the stop: no request is proxied to a server being stopped
 		s.setPhase("sleeping", "Stopped")
 	}
+	s.keepContexts("a stop", false)
 	s.stopServerLocked()
 	s.mu.Lock()
 	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
@@ -911,6 +927,7 @@ func (s *Supervisor) Sleep() error {
 	defer s.opMu.Unlock()
 	// said before the stop: a request that arrives during it is held, and wakes the model again
 	s.setPhase("sleeping", "Model unloaded")
+	s.keepContexts("a sleep", false)
 	s.stopServerLocked()
 	return nil
 }
@@ -1046,6 +1063,7 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	case in.Mode == "external":
 		s.restartAgentInstalled()
 	case kvChanged:
+		s.letGoContexts("the cache type changed")
 		s.mu.Lock()
 		s.reshape = true
 		s.mu.Unlock()

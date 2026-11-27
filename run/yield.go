@@ -695,6 +695,9 @@ func (s *Supervisor) yieldNow(d yield.Decision) {
 	if still { // said before the stop: a phase that says ready while the server is stopped is a lie
 		s.setPhase("yielded", "Paused while "+d.Reason+" runs")
 	}
+	if s.inflightNow() == 0 { // a reply cut by the drain's end leaves its slot half-written: nothing kept
+		s.keepContexts("a yield to "+d.Reason, true)
+	}
 	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.logf("yield: unloaded in %s", s.cfg.Now().Sub(start).Round(time.Millisecond))

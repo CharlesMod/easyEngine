@@ -245,6 +245,24 @@ type namer interface {
 	NameOf(id string) string
 }
 
+// ForgetRevoked says the client fact gone for every client seen in this life whose token no
+// longer stands (revoked, or the file replaced). The app calls it when tokens.json changes (the
+// kernel's word, host.Changes), so a revoke is shown at once, like the gate's refusal.
+func (a *API) ForgetRevoked() {
+	v, ok := a.Tokens.(interface{ Valid(id string) bool })
+	if !ok || a.S == nil || a.S.Hub() == nil {
+		return
+	}
+	a.seen.Range(func(k, _ any) bool {
+		id := k.(string)
+		if !v.Valid(id) {
+			a.seen.Delete(id)
+			_, _ = a.S.Hub().Say(event.Event{Name: "client", Key: id, Gone: true}, nil)
+		}
+		return true
+	})
+}
+
 // sawClient says a paired client as a client fact the first time the gate accepts its token in
 // this life: its id and name, never its token.
 func (a *API) sawClient(id string) {

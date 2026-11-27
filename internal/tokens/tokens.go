@@ -235,6 +235,25 @@ func (s *Store) Verify(bearer string) (clientID string, v Verdict) {
 	return clientID, v
 }
 
+// Valid reports whether id names a token that stands: the master, or an issued token not revoked.
+func (s *Store) Valid(id string) bool {
+	if id == MasterID {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, _, err := s.load()
+	if err != nil {
+		return false
+	}
+	for _, e := range d.Tokens {
+		if e.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // NameOf is the name an issued token was given ("" for the master or an unknown id).
 func (s *Store) NameOf(id string) string {
 	s.mu.Lock()

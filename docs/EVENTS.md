@@ -145,10 +145,12 @@ context is reused only by a request that continues it.
   with `POST pair {name}` -> `{id, code}` and a held `GET pair/{id}`; the person compares the
   six-digit code and answers on the setup page, in the tray or with `easy-engine pair`. Answering
   needs loopback or the master token, never a paired client's token. No expiry timer and no rate
-  clock: at most 4 requests wait, the oldest pushed out by a new one. The token is issued per
+  clock: one waiting request per source address (a new ask replaces it and is not notified again; a
+  denied address is listed, never notified), at most 4 across addresses, the oldest pushed out. The token is issued per
   client (hashed, named, listed, revocable) when the client collects an Allow, shown once, and
   is never logged, in a URL or on the stream. The facts `pairing` (keyed by a public key, never
-  the secret request id) and `client` (keyed by client id, `{name}`) say who waits and who
+  the secret request id) and `client` (keyed by client id, `{name}`), gone at once on a revoke (the app
+  follows `tokens.json`) say who waits and who
   connected.
 - `PUT settings` changes only the fields it names. The lock is created with its content in one
   step. `state.json` has one writer, a unique temp file and an fsync; a file that does not parse is

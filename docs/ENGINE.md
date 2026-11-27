@@ -1122,23 +1122,30 @@ side needs no token; non-GET calls carry `X-Easy-Engine: 1` like every other.
 
 | Method, path | Answers |
 |---|---|
-| `POST pair {name}` | 200 `{"id":"<32 hex, secret>","code":"493201"}`. `name` is the client's name for itself, shown to the person: control and format characters dropped, spaces folded, at most 40 characters (`unnamed client` when empty). 404 `{"error","code":"pairing_off"}` where pairing is not offered; 400 for bad JSON (body capped at 4 KiB) |
-| `GET pair/{id}` | held until the person answers. 200 `{"token","client_id","engine_id"}` on Allow: the token is issued now and shown this once; 403 `{"error","code":"pair_denied"}` on Deny; 410 `{"error","code":"pair_gone"}` when the request is gone: collected already, withdrawn, pushed out by the cap, never known, or the engine restarted or quit. A client that hangs up leaves its request waiting and may GET it again |
+| `POST pair {name}` | 200 `{"id":"<32 hex, secret>","code":"493201"}`. `name` is the client's name for itself, shown to the person: control and format characters dropped, spaces folded, at most 40 characters (`unnamed client` when empty). 404 `{"error","code":"pairing_off"}` where pairing is not offered; 400 `{"error","code":"bad_request"}` for a body that is not `{name}` JSON (capped at 4 KiB); 410 `pair_gone` while the engine ends; 500 `{"error","code":"pair_failed"}` if the engine could not open it. A new ask from an address that already has a request waiting replaces it: the old `id`'s GET gets 410 |
+| `GET pair/{id}` | held until the person answers. 200 `{"token","client_id","engine_id"}` on Allow: the token is issued now and shown this once; 403 `{"error","code":"pair_denied"}` on Deny; 410 `{"error","code":"pair_gone"}` when the request is gone: collected already, withdrawn, pushed out by the cap, never known, replaced by a newer ask from the same address, or the engine restarted or quit; 500 `{"error","code":"issue_failed"}` when the token could not be written (the Allow stands: GET again). A client that hangs up leaves its request waiting and may GET it again |
 | `DELETE pair/{id}` | the client withdraws for good: 204; 410 `pair_gone` if unknown |
-| `GET pairing` | the person's side (loopback listener or the master token only; else 403 `not_allowed`, and 401 with no token on the network): 200 `{"offered":bool,"requests":[{"key","name","code","from"}]}`, oldest first |
+| `GET pairing` | the person's side (loopback listener or the master token only; else 403 `not_allowed`, and 401 with no token on the network): 200 `{"offered":bool,"requests":[{"key","name","code","from","quiet"?}]}`, oldest first; `quiet: true` on a request from an address the person denied in this life |
 | `POST pairing/answer {key\|code, allow}` | the same rule: 200 `{"key","name","code","allowed"}`; 404 no waiting request with that key or code; 409 a code two requests show; 400 without exactly one of key and code, or without `allow` |
 
-A request waits until it is answered, withdrawn, or pushed out: at most 4 wait at once, and a new
-one over that pushes the oldest out (its held GET gets 410). Answered requests not yet collected
-are capped at 4 the same way. There is no expiry timer and no rate clock: counts bound it. The
-code is drawn so no two waiting requests show the same one. `key` is a public handle for the
-person's side (the fact is keyed by it); the secret `id` is never said on the hub.
+A request waits until it is answered, withdrawn, replaced or pushed out. One source address has
+at most one waiting request: a new ask from it replaces the old one (whose held GET gets 410)
+under the same public `key`, with a new code and id, so the person is not notified again. At most
+4 wait across sources, and a new one over that pushes the oldest out. Answered requests not yet
+collected are capped at 4 the same way. Once the person has denied a request from an address, that
+address's later requests in this life are still listed but marked `quiet` and raise no
+notification. There is no expiry timer and no rate clock: counts bound it. The code is drawn so
+no two waiting requests show the same one. `key` is a public handle for the person's side (the
+fact is keyed by it); the secret `id` is never said on the hub. A keyless path's error bodies are
+fixed text with a code; the detail of an internal error (which could name the data dir) goes only
+to the engine's log.
 
 Where the person answers:
 
 - the setup page: a Pairing card with the code, the name, the address it came from, and Allow /
   Deny, shown while a request waits (it reads `GET pairing` when a `pairing` event arrives);
-- the tray: one notification per request, `Allow <name> (493 201)?`, and while it waits two menu
+- the tray: one notification per request not yet answered (none for a `quiet` one, none for a
+  replacement by the same address), `Allow <name> (493 201)?`, and while it waits two menu
   items above the standing four, `Allow <name> (493 201)` and `Deny <name> (493 201)`;
 - headless: `easy-engine pair` lists them (`CODE  NAME  FROM`, or `No pairing request is
   waiting.`), `easy-engine pair --approve 493201` / `--deny 493201` answer one (spaces in the code
@@ -1146,10 +1153,12 @@ Where the person answers:
   show 493 201; answer on the setup page or in the tray`). They reach the running engine through
   the lock with the master token.
 
-The hub says a waiting request as the fact `pairing` (key: its `key`; body `{name, code, from}`;
-gone when answered, withdrawn or pushed out), and a paired client the first time the gate accepts
-its token in a life as the fact `client` (key: its client id; body `{name}`). Neither ever
-carries a token.
+The hub says a waiting request as the fact `pairing` (key: its `key`; body `{name, code, from,
+quiet}`; said again on a replacement; gone when answered, withdrawn or pushed out), and a paired
+client the first time the gate accepts its token in a life as the fact `client` (key: its client
+id; body `{name}`), gone as soon as its token no longer stands: the app follows `tokens.json`
+(`host.Changes`), so `easy-engine token --revoke` takes it down at once. Neither ever carries a
+token.
 
 **A client's recipe, from find to paired.**
 
@@ -1174,9 +1183,12 @@ carries a token.
 - `hello`: read the engine's name, id, version, phase, model name and card name. Nothing secret;
   no paths, user name, tokens or client list.
 - mDNS: see the same name, id and port; its queries are answered, each with one small packet.
-- `POST pair`: open a request, which shows a name it chose on the person's screen. At most 4
-  wait; a flood only pushes its own requests out, and costs one notification per request. The
-  name is cleaned and capped.
+- `POST pair`: open a request, which shows a name it chose on the person's screen. One address
+  has one waiting request (a flood from it only replaces its own, under the same key) and raises
+  one notification until the person answers; after a Deny, none at all. At most 4 wait across
+  addresses. The name is cleaned and capped. (A host that can take many addresses on the LAN can
+  still raise one notification per address; that is the bound.)
+- Error bodies on these paths are fixed text: no file system or OS error reaches the network.
 - It cannot answer a request: answering needs a loopback listener or the master token; a paired
   client's token is refused (403), and so is anything without a token from the network (401).
 - The six-digit code is a comparison code, not a secret: the client and the engine both show

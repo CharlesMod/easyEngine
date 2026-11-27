@@ -206,7 +206,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			// Unreadable for another reason (permission, a sharing violation while the live engine
 			// rewrites its lock): not proof of anything, so remove nothing; look again. The try
 			// budget bounds it.
-			time.Sleep(100 * time.Millisecond) // named moment: the pause before looking at the lock again
+			time.Sleep(100 * time.Millisecond) // not converted yet (laws/unconverted.txt): a pause before looking again, like the two around it
 			continue
 		}
 		l, p, err := api.Listen(host, base)

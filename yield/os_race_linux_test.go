@@ -73,7 +73,7 @@ func TestLinuxNodeSetMovesWhenNodesAppear(t *testing.T) {
 	if o.NodeSet() == w.Set {
 		t.Fatalf("the node set did not move: %q", w.Set)
 	}
-	if got := o.NodeSet(); got != "/dev/nvidia7" {
+	if got := o.NodeSet(); got != node {
 		t.Fatalf("node set %q", got)
 	}
 }

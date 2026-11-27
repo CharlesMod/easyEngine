@@ -123,7 +123,10 @@ type Config struct {
 	Others func(ctx context.Context, gpu probe.GPU, ourPIDs []int) (int, error)
 	// Sense reads the adapters and what each process holds on them; ours are the engine's own
 	// pids, host the host app's.
-	Sense    func(ctx context.Context, ours []int, host int) gpusense.Picture
+	Sense func(ctx context.Context, ours []int, host int) gpusense.Picture
+	// Holders, when set, replaces the scan of who holds the card's device nodes (pid -> name) that
+	// the room and yield watches compare at each open word (run/holders.go); a test sets it.
+	Holders  func() map[int]string
 	Measure  func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
 	Seed     func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
 	Group    *lifecycle.Group

@@ -21,6 +21,11 @@ import (
 // seq, 409 for another life, and the book.
 func TestTheWire(t *testing.T) {
 	_, s, srv := readyEnv(t)
+	// The room's first held reading comes a moment after ready (two reads agree): let it be
+	// history, so that the first event after the facts is the mark.
+	testkit.WaitFor(t, 10*time.Second, "the room's held reading", func() bool {
+		return len(testkit.Said(t, s, 0, 0, "room.held")) > 0
+	})
 	c, body, _ := do(t, "GET", srv.URL+"/engine/v1/facts", "", nil)
 	var f event.Standing
 	if c != 200 || json.Unmarshal([]byte(body), &f) != nil || f.Life == "" || f.Seq == 0 {

@@ -1,0 +1,73 @@
+
+==============NVSMI LOG==============
+
+Timestamp                                              : Day Mon 00 00:00:00 0000
+Driver Version                                         : 620.73.04 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]
+CUDA Version                                           : 13.5 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]
+KMD Version                                            : 620.73.04
+CUDA UMD Version                                       : 13.5
+
+Attached GPUs                                          : 1
+GPU 00000000:01:00.0
+    Processes
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2001
+            Type                          : C+G
+            Name                          : /usr/bin/app1
+            Used GPU Memory               : 74 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2002
+            Type                          : G
+            Name                          : /usr/bin/app2
+            Used GPU Memory               : 155 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2003
+            Type                          : G
+            Name                          : /usr/bin/app3
+            Used GPU Memory               : 6 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2004
+            Type                          : G
+            Name                          : /usr/bin/app4
+            Used GPU Memory               : 22 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2005
+            Type                          : G
+            Name                          : /usr/bin/app5
+            Used GPU Memory               : 8 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2006
+            Type                          : C
+            Name                          : /opt/engine/backends/llama-server
+            Used GPU Memory               : 10338 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2007
+            Type                          : C+G
+            Name                          : /usr/bin/app7
+            Used GPU Memory               : 268 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2008
+            Type                          : G
+            Name                          : /usr/bin/app8
+            Used GPU Memory               : 6 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2009
+            Type                          : G
+            Name                          : /usr/bin/app9
+            Used GPU Memory               : 30 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 2010
+            Type                          : G
+            Name                          : /usr/bin/app10
+            Used GPU Memory               : 36 MiB
+

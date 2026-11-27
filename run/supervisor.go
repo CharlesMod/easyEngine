@@ -230,6 +230,7 @@ type Supervisor struct {
 	door      door
 	kept      keptContexts // the saved slots (run/context.go)
 	card      *roomWatch
+	holders   *holderScan  // who holds the card's nodes, scanned once per word for the room and the yield
 	sf        settingsFile // settings.json as the engine follows it (run/settings.go)
 	// deferred: started asleep (Config.StartSleeping); the agent and an unfinished upgrade wait
 	// for the first Start.
@@ -277,6 +278,7 @@ func New(cfg Config) (*Supervisor, error) {
 	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1), loadAsk: make(chan struct{}, 1)}
 	s.sf.begin(file, serr)
 	s.agent.s = s
+	s.holders = &holderScan{s: s}
 	s.card = newRoomWatch(s)
 	s.say("engine", "", map[string]any{"version": cfg.Version, "api": APIVersion, "port": 0})
 	s.say("door", "", map[string]int{"held": 0})

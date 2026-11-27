@@ -35,6 +35,8 @@ var (
 )
 
 // Cleanup removes the temp dir that holds the fake llama-server (call from TestMain).
+var holderSeq atomic.Int64
+
 func Cleanup() {
 	if buildDir != "" {
 		os.RemoveAll(buildDir) // a dir this package created with MkdirTemp
@@ -188,6 +190,9 @@ func (e *Env) Config() run.Config {
 		// Nothing sensed: the room comes from the fake Probe and Others above, never from the
 		// machine the tests run on (an Apple silicon Mac's own adapter, a Linux box's AMD or
 		// Intel card in sysfs). A test that wants a picture sets its own Sense.
+		// every word of the card's nodes looks like a new holder, so a word makes a read as it did
+		// before the room compared holders; the tests of the room itself set their own
+		Holders: func() map[int]string { return map[int]string{int(holderSeq.Add(1)): "stranger"} },
 		Sense: func(ctx context.Context, ours []int, host int) gpusense.Picture {
 			return gpusense.Picture{Adapters: []gpusense.Adapter{}, Processes: []gpusense.Process{}, Sources: map[string]string{"testkit": "nothing sensed"}}
 		},

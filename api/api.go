@@ -37,6 +37,9 @@ type API struct {
 	stopping atomic.Bool
 	// settingsMu serialises the read-merge-write of a partial settings update.
 	settingsMu sync.Mutex
+	// OpenURL opens a web address in the user's default browser (POST chat/open); default
+	// openfile.OpenURL. A test replaces it.
+	OpenURL func(url string) error
 	// Client is used by POST test (default: a plain client with no overall timeout).
 	Client *http.Client
 }
@@ -64,6 +67,8 @@ func (a *API) Handler() http.Handler {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/engine/"):
 			a.engine(w, r)
+		case r.URL.Path == "/chat" || strings.HasPrefix(r.URL.Path, "/chat/"):
+			a.chat(w, r)
 		case r.URL.Path == "/" || r.URL.Path == "/index.html":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
@@ -123,6 +128,10 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch name {
+	case "chat/open":
+		if need("POST") {
+			a.chatOpen(w, r)
+		}
 	case "status":
 		if need("GET") {
 			st := a.S.Status()

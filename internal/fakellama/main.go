@@ -284,6 +284,15 @@ func main() {
 		json.NewEncoder(w).Encode(v)
 	}
 	mux := http.NewServeMux()
+	// A stand-in for llama-server's web UI: one page and one asset, both naming the path they
+	// were asked for, so a test can see what the engine's /chat/ proxy forwarded.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/_app/x.js" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintf(w, "fake llama web ui path=%s", r.URL.Path)
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !loading(w) {
 			js(w, map[string]string{"status": "ok"})

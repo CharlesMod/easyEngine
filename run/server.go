@@ -263,6 +263,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	}
 	known := knownFlags(lc.in.bin, s.cfg.ExtraEnv)
 	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, known, official)
+	args = withBefore(args, "--host", s.slotSaveArgs(known))
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
 	}
@@ -389,7 +390,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		{
 			oomw.take() // what loading printed is not a run-time signal
 			srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(),
-				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw}
+				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw, ctxKey: ctxKeyOf(lc, shape)}
 			srv.nextGrow = s.cfg.Now()
 			s.calibrate(ctx, srv)
 			s.srv = srv
@@ -405,6 +406,8 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			s.rec.waitingFor = ""
 			s.tokS = 0
 			s.mu.Unlock()
+			// the saved slots go back before the phase says ready: the door holds requests till then
+			s.layBack(srv, url)
 			s.mindUp(srv)
 			s.setPhase("ready", "Ready")
 			return launchResult{ok: true}
@@ -489,6 +492,7 @@ func (s *Supervisor) countRestart() {
 }
 
 func (s *Supervisor) reload(ctx context.Context, srv *server, why string) {
+	s.letGoContexts(why) // a cache type change: no saved slot fits the new server
 	s.restartSame(ctx, srv)
 }
 
@@ -604,6 +608,7 @@ func (s *Supervisor) resize(ctx context.Context, srv *server, to fit.Shape, grow
 func (s *Supervisor) growTo(ctx context.Context, srv *server, to fit.Shape) {
 	old := srv.shape
 	s.countRestart()
+	s.keepContexts("a grow", false)
 	s.stopServerLocked()
 	cctx, cancel := context.WithCancel(s.root)
 	s.mu.Lock()
@@ -637,6 +642,7 @@ func (s *Supervisor) growTo(ctx context.Context, srv *server, to fit.Shape) {
 func (s *Supervisor) shrink(ctx context.Context, srv *server, to fit.Shape) {
 	s.setPhase("resizing", fmt.Sprintf("Resizing to %d x %d", to.Slots, to.CtxPerSlot))
 	s.countRestart()
+	s.keepContexts("a shrink", false)
 	s.stopServerLocked()
 	cctx, cancel := context.WithCancel(s.root)
 	s.mu.Lock()

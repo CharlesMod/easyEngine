@@ -574,6 +574,7 @@ func (s *Supervisor) react() {
 			s.lowerCap(lc, srv.shape, next.Slots*next.CtxPerSlot, room2)
 		}
 		s.setCeiling(srv.key, srv.shape, "it kept running out of memory while serving")
+		srv.oomShrink = true // an out-of-memory restart keeps nothing (run/context.go)
 		if idle {
 			s.resize(ctx, srv, next, false)
 		} else {

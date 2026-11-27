@@ -63,8 +63,11 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad external URL")
 			return
 		}
-		a.applySampler(w, r)
+		if !a.applySampler(w, r) {
+			return
+		}
 		rest := strings.TrimPrefix(r.URL.Path, "/v1")
+		consumed := bearerConsumed(r.Context())
 		rp := &httputil.ReverseProxy{
 			Transport:     transport,
 			FlushInterval: -1,
@@ -75,9 +78,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 				pr.Out.Host = base.Host
 				if rt.Key != "" {
 					pr.Out.Header.Set("Authorization", "Bearer "+rt.Key)
+				} else if consumed {
+					pr.Out.Header.Del("Authorization") // the engine's own token is not for the upstream
 				}
 			},
-			ErrorHandler: badGateway,
+			ModifyResponse: dropCORS,
+			ErrorHandler:   badGateway,
 		}
 		rp.ServeHTTP(w, r)
 	default:
@@ -86,18 +92,33 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad server URL")
 			return
 		}
-		a.applySampler(w, r)
+		if !a.applySampler(w, r) {
+			return
+		}
 		rp := &httputil.ReverseProxy{
 			Transport:     transport,
 			FlushInterval: -1, // flush every write: SSE tokens must not sit in a buffer
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
 				pr.Out.Host = target.Host
+				pr.Out.Header.Del("Authorization") // a client's credentials never go to the local model server
 			},
-			ErrorHandler: badGateway,
+			ModifyResponse: dropCORS,
+			ErrorHandler:   badGateway,
 		}
 		rp.ServeHTTP(w, r)
 	}
+}
+
+// dropCORS removes every Access-Control-* header the upstream sent: the model server reflects
+// Origin, and the engine allows no cross-site use at all (the gate refuses it).
+func dropCORS(resp *http.Response) error {
+	for k := range resp.Header {
+		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+			delete(resp.Header, k)
+		}
+	}
+	return nil
 }
 
 func badGateway(w http.ResponseWriter, r *http.Request, err error) {

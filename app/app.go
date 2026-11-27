@@ -16,8 +16,9 @@ import (
 	"time"
 
 	"github.com/CharlesMod/easyEngine/api"
+	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/dirs"
-	"github.com/CharlesMod/easyEngine/internal/legacy"
+	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/run"
 )
@@ -32,7 +33,10 @@ type Options struct {
 	Profile     *run.Profile // overrides ProfilePath (tests)
 	ParentPIDs  []int
 	Host        string // default 127.0.0.1
-	Port        int    // default 47480
+	// Open is serve --open: a non-loopback Host with no token. Without it a non-loopback
+	// listener requires the bearer token in <data dir>/tokens.json.
+	Open        bool
+	Port        int // default 47480
 	Linger      time.Duration
 	LingerSet   bool // Linger given on the command line; else the saved setting applies
 	Version     string
@@ -49,6 +53,7 @@ type Options struct {
 type Result struct {
 	Attached bool
 	Port     int
+	Host     string // the listen host: of this engine, or of the one attached to (from its lock)
 }
 
 func dataDir(o Options) string {
@@ -60,8 +65,12 @@ func dataDir(o Options) string {
 
 var statusClient = &http.Client{Timeout: 2 * time.Second}
 
-func statusOK(port int) bool {
-	resp, err := statusClient.Get(fmt.Sprintf("http://127.0.0.1:%d/engine/v1/status", port))
+func statusOK(t Target) bool {
+	req, err := t.NewRequest("GET", "/engine/v1/status", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := statusClient.Do(req)
 	if err != nil {
 		return false
 	}
@@ -70,11 +79,14 @@ func statusOK(port int) bool {
 	return resp.StatusCode == 200 && json.NewDecoder(resp.Body).Decode(&st) == nil && st.Version != ""
 }
 
-// PostAttach asks a running engine to watch another parent.
-func PostAttach(port, pid int) error {
+// PostAttach asks a running engine to watch another parent. It returns ErrStopping (wrapped)
+// when the engine has begun shutting down and refuses.
+func PostAttach(t Target, pid int) error {
 	b, _ := json.Marshal(map[string]int{"pid": pid})
-	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/attach", port), bytes.NewReader(b))
-	legacy.MarkRequest(req.Header, "X-Easy-Engine")
+	req, err := t.NewRequest("POST", "/engine/v1/attach", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := statusClient.Do(req)
 	if err != nil {
@@ -82,8 +94,7 @@ func PostAttach(port, pid int) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		m, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("attach: %s %s", resp.Status, m)
+		return statusErr(resp)
 	}
 	return nil
 }
@@ -94,11 +105,8 @@ func alive(d lifecycle.LockData) bool {
 
 // Running reports the port of a healthy engine in dir, if any.
 func Running(dir string) (int, bool) {
-	d, err := lifecycle.ReadLock(filepath.Join(dir, "engine.lock"))
-	if err != nil || !alive(d) || !statusOK(d.Port) {
-		return 0, false
-	}
-	return d.Port, true
+	t, ok := Find(dir)
+	return t.Port, ok
 }
 
 // Serve runs the engine until the parents are gone, the context ends or shutdown
@@ -128,33 +136,61 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		if d, err := lifecycle.ReadLock(lockPath); err == nil {
 			if alive(d) {
 				// A live engine holds the lock: attach to it.
-				ok := false
-				for i := 0; i < 15 && !ok; i++ {
-					if ok = statusOK(d.Port); !ok {
+				tg := targetFor(dir, d)
+				// wait polls cond, one sleep line for every wait in this loop.
+				wait := func(tries int, cond func() bool) bool {
+					for i := 0; i < tries; i++ {
+						if cond() {
+							return true
+						}
 						time.Sleep(200 * time.Millisecond)
 					}
+					return false
 				}
-				if !ok {
+				// released: the lock is gone or now names another engine (it is released last).
+				released := func() bool {
+					cur, err := lifecycle.ReadLock(lockPath)
+					return err != nil || cur.Pid != d.Pid || cur.Started != d.Started
+				}
+				if !wait(15, func() bool { return statusOK(tg) || released() }) {
 					return Result{}, fmt.Errorf("engine pid %d holds engine.lock but does not answer on port %d", d.Pid, d.Port)
 				}
+				if released() {
+					continue
+				}
+				stopping := false
 				for _, p := range o.ParentPIDs {
-					if err := PostAttach(d.Port, p); err != nil {
+					if err := PostAttach(tg, p); errors.Is(err, ErrStopping) {
+						stopping = true
+						break
+					} else if err != nil {
 						return Result{}, err
 					}
 				}
-				return Result{Attached: true, Port: d.Port}, nil
+				if stopping {
+					// A dying engine: wait for it to end (the lock is released last), then go
+					// round again and take the lock ourselves.
+					if !wait(50, func() bool { return !alive(d) || released() }) {
+						return Result{}, fmt.Errorf("engine pid %d is stopping and has not ended", d.Pid)
+					}
+					continue
+				}
+				return Result{Attached: true, Port: d.Port, Host: d.Host}, nil
 			}
 			lifecycle.KillStale(d) // the engine crashed: its children may still run
+			lifecycle.RemoveStale(lockPath, d)
+		} else if _, serr := os.Stat(lockPath); serr == nil && !lifecycle.LockInWrite(lockPath) {
+			// An unreadable lock is stale, unless it is empty and brand new: then its creator is
+			// between create and write (the O_EXCL fallback), so it is held. CreateLock then
+			// reports ErrLockHeld and the retry below goes round again.
 			os.Remove(lockPath)
-		} else if _, serr := os.Stat(lockPath); serr == nil {
-			os.Remove(lockPath) // unreadable lock
 		}
 		l, p, err := api.Listen(host, base)
 		if err != nil {
 			return Result{}, err
 		}
 		start, _ := lifecycle.PidStart(os.Getpid())
-		lk, err := lifecycle.CreateLock(lockPath, lifecycle.LockData{Pid: os.Getpid(), Start: start, Port: p, Started: time.Now().UTC().Format(time.RFC3339)})
+		lk, err := lifecycle.CreateLock(lockPath, lifecycle.LockData{Pid: os.Getpid(), Start: start, Port: p, Host: host, Started: time.Now().UTC().Format(time.RFC3339)})
 		if err == lifecycle.ErrLockHeld {
 			l.Close()
 			time.Sleep(100 * time.Millisecond)
@@ -167,6 +203,19 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		lock, ln, port = lk, l, p
 	}
 	defer lock.Remove()
+	loopback := IsLoopbackHost(host)
+	var tk *tokens.Store
+	switch {
+	case loopback:
+	case o.Open:
+		log.Printf("easy-engine: WARNING: listening on %s:%d with no token (--open); anyone who can reach this port can use the engine", host, port)
+	default:
+		tk = tokens.Open(dir)
+		if _, err := tk.Master(); err != nil {
+			ln.Close()
+			return Result{}, fmt.Errorf("token file: %w", err)
+		}
+	}
 
 	if o.DetachStdio {
 		// The game reads our stdio through pipes and closes them when it exits;
@@ -216,14 +265,22 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	}
 	sup.SetPort(port)
 	shutdown := make(chan struct{}, 1)
-	a := &api.API{S: sup, Attach: w.Add, AnyHost: host != "127.0.0.1" && host != "localhost",
+	if cfg.Catalog == nil {
+		if _, note, _ := catalog.LoadNote(dir); note != "" {
+			sup.Note(note)
+		}
+	}
+	a := &api.API{S: sup, Attach: w.Add, AnyHost: !loopback, Open: o.Open,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:
 			default:
 			}
 		}}
-	srv := &http.Server{Handler: a.Handler()}
+	if tk != nil {
+		a.Tokens = tk
+	}
+	srv := &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second} // network timeout
 	go srv.Serve(ln)
 	sup.Run()
 	if o.Started != nil {
@@ -261,6 +318,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	case <-gone:
 	case <-shutdown:
 	}
+	a.SetStopping() // status says so and attach is refused from here; the lock is released last
 	wcancel()
 	sup.Shutdown()
 	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -268,5 +326,5 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		srv.Close()
 	}
 	scancel()
-	return Result{Port: port}, nil
+	return Result{Port: port, Host: host}, nil
 }

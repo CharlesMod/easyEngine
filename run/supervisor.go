@@ -58,7 +58,9 @@ type ExternalInfo struct {
 
 // Status is GET /engine/v1/status.
 type Status struct {
-	Version   string       `json:"version"`
+	Version string `json:"version"`
+	// API is the version of the control API (APIVersion).
+	API       int          `json:"api"`
 	Port      int          `json:"port"`
 	Mode      string       `json:"mode"`
 	Phase     string       `json:"phase"`
@@ -108,6 +110,8 @@ type Status struct {
 	// Yield is set while the card is yielded to another program (phase "yielded"), or while
 	// replies drain before that: run/yield.go, docs/ENGINE.md section 6b.
 	Yield *YieldInfo `json:"yield"`
+	// Held is the count of requests the door holds until the model is up (Supervisor.Hold).
+	Held int `json:"held"`
 }
 
 // Parent is a watched parent process.
@@ -126,6 +130,8 @@ type Settings struct {
 	KVType      string `json:"kv_type"`
 	// SamplerPolicy is enforce | fill | off; empty keeps the stored value.
 	SamplerPolicy string `json:"sampler_policy,omitempty"`
+	// Streamer is the token streamer, on | off (docs/STREAMING.md); empty keeps the stored value.
+	Streamer string `json:"streamer,omitempty"`
 }
 
 // Route tells the proxy where a request goes.
@@ -135,6 +141,10 @@ type Route struct {
 	URL     string // base URL (no trailing slash); for external it includes any /v1
 	Key     string
 	Message string
+	// Hold is set on an unavailable route while the model is on its way up (starting, loading,
+	// resizing, the swap to the full model, a sleep a request wakes): the door holds the request
+	// (Supervisor.Hold) and enters again when the phase changes, instead of answering 503.
+	Hold bool
 }
 
 type server struct {
@@ -199,6 +209,9 @@ type Supervisor struct {
 	// reserve as sensed when needed (run/room.go).
 	hub  *event.Hub
 	poke chan struct{}
+	// loadAsk is a request held while the model loads: the load asks /health once on it (Hold).
+	loadAsk chan struct{}
+	heldMu  sync.Mutex // the held count and its door fact (run/hold.go)
 	// listeners counts the listeners for a word (listenWord): a request is said as a nudge only while one listens
 	listeners atomic.Int32
 	door      door
@@ -247,11 +260,12 @@ func New(cfg Config) (*Supervisor, error) {
 		cancel()
 		return nil, err
 	}
-	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1)}
+	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1), loadAsk: make(chan struct{}, 1)}
 	s.sf.begin(file, serr)
 	s.agent.s = s
 	s.card = newRoomWatch(s)
-	s.say("engine", "", map[string]any{"version": cfg.Version, "port": 0})
+	s.say("engine", "", map[string]any{"version": cfg.Version, "api": APIVersion, "port": 0})
+	s.say("door", "", map[string]int{"held": 0})
 	s.sayModel()
 	if note != "" {
 		s.addError("%s", note)
@@ -265,7 +279,7 @@ func (s *Supervisor) SetPort(p int) {
 	s.mu.Lock()
 	s.port = p
 	s.mu.Unlock()
-	s.say("engine", "", map[string]any{"version": s.cfg.Version, "port": p})
+	s.say("engine", "", map[string]any{"version": s.cfg.Version, "api": APIVersion, "port": p})
 }
 
 func (s *Supervisor) logf(format string, a ...any) {
@@ -359,7 +373,7 @@ func (s *Supervisor) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := Status{
-		Version: s.cfg.Version, Port: s.port, Mode: s.st.Mode, Phase: s.phase, Message: s.message,
+		Version: s.cfg.Version, API: APIVersion, Port: s.port, Mode: s.st.Mode, Phase: s.phase, Message: s.message,
 		Model: s.st.Model, Backend: s.st.Backend, Errors: append(append([]string{}, s.errs...), s.sf.notes()...),
 		LingerS: s.st.LingerS, KVType: s.st.KVType, Restarts: s.restarts,
 		External: ExternalInfo{BaseURL: s.st.External.BaseURL, Model: s.st.External.Model, APIKeySet: s.st.External.APIKey != ""},
@@ -406,6 +420,7 @@ func (s *Supervisor) Status() Status {
 		st.Device = &d
 	}
 	st.Recovery = s.recoveryLocked()
+	st.Held = int(s.door.held.Load())
 	return st
 }
 
@@ -634,6 +649,12 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 func (s *Supervisor) Route() Route {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.routeLocked()
+}
+
+// routeLocked is Route; the caller holds s.mu. A route with Hold set is one the door holds the
+// request for (docs/ENGINE.md, "The door holds"): the model is on its way up.
+func (s *Supervisor) routeLocked() Route {
 	if s.st.Mode == "external" {
 		return Route{Kind: "external", URL: strings.TrimRight(s.st.External.BaseURL, "/"), Key: s.st.External.APIKey}
 	}
@@ -647,21 +668,29 @@ func (s *Supervisor) Route() Route {
 	switch s.phase {
 	case "ready":
 		if s.swapping { // a swap has begun and its phase is still to be said
-			return Route{Kind: "unavailable", Message: "Switching to the full model"}
+			return Route{Kind: "unavailable", Hold: true, Message: "Switching to the full model"}
 		}
 		return Route{Kind: "local", URL: s.llamaURL}
 	case "sleeping":
-		if !s.userStopped && !s.waking {
+		if s.userStopped { // a person's Stop: a request does not wake it
+			return Route{Kind: "unavailable", Message: "Loading model"}
+		}
+		if !s.waking {
 			s.waking = true
 			go s.wake()
 		}
-		return Route{Kind: "unavailable", Message: "Loading model"}
+		return Route{Kind: "unavailable", Hold: true, Message: "Loading model"}
 	case "not_installed":
 		return Route{Kind: "unavailable", Message: "No model installed"}
 	case "resizing":
 		if s.swapping {
-			return Route{Kind: "unavailable", Message: "Switching to the full model"}
+			return Route{Kind: "unavailable", Hold: true, Message: "Switching to the full model"}
 		}
+		return Route{Kind: "unavailable", Hold: true, Message: "Loading model"}
+	case "starting", "loading":
+		return Route{Kind: "unavailable", Hold: true, Message: "Loading model"}
+	case "stopping":
+		return Route{Kind: "unavailable", Message: "The engine is stopping"}
 	case "error":
 		return Route{Kind: "unavailable", Message: "Model server error: " + s.message}
 	}
@@ -795,6 +824,9 @@ func (s *Supervisor) Shutdown() {
 	}
 	s.stopAgent()
 	s.opMu.Lock()
+	// said before the stop: a request that arrives now is answered at once, never proxied to a
+	// server being stopped, and the held ones end (api answers "stopping" when the hub closes)
+	s.setPhase("stopping", "Stopping")
 	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.stop()
@@ -845,17 +877,18 @@ func (s *Supervisor) Stop() error {
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	local := s.Status().Mode == "local"
+	_, installed := s.resolveInstall()
+	if local && installed { // said before the stop: no request is proxied to a server being stopped
+		s.setPhase("sleeping", "Stopped")
+	}
 	s.stopServerLocked()
 	s.mu.Lock()
 	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
 	s.refreshLocked()
 	s.mu.Unlock()
-	if s.Status().Mode == "local" {
-		if _, ok := s.resolveInstall(); ok {
-			s.setPhase("sleeping", "Stopped")
-		} else if !s.customMissingPhase() {
-			s.setPhase("not_installed", "No model installed")
-		}
+	if local && !installed && !s.customMissingPhase() {
+		s.setPhase("not_installed", "No model installed")
 	}
 	return nil
 }
@@ -874,8 +907,9 @@ func (s *Supervisor) Sleep() error {
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
-	s.stopServerLocked()
+	// said before the stop: a request that arrives during it is held, and wakes the model again
 	s.setPhase("sleeping", "Model unloaded")
+	s.stopServerLocked()
 	return nil
 }
 
@@ -911,7 +945,11 @@ func (s *Supervisor) Settings() Settings {
 	defer s.mu.Unlock()
 	e := s.st.External
 	e.APIKey = ""
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy}
+	streamer := s.sf.streamer
+	if streamer == "" {
+		streamer = "on"
+	}
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer}
 }
 
 // LingerS is the stored linger setting.
@@ -946,7 +984,13 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	if in.LingerS < 0 {
 		return fmt.Errorf("linger_s must not be negative")
 	}
+	if in.Streamer != "" && in.Streamer != "on" && in.Streamer != "off" {
+		return fmt.Errorf("streamer must be on or off")
+	}
 	s.mu.Lock()
+	if in.Streamer != "" { // read by the proxy per request: applies to the next one
+		s.sf.streamer = in.Streamer
+	}
 	old := s.st.Mode
 	oldKV := s.st.KVType
 	s.st.Mode = in.Mode

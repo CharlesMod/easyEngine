@@ -120,8 +120,16 @@ func TestCustomUseRestartMissingClear(t *testing.T) {
 	if st.Phase != "error" || st.Message != "Model file not found: "+p || st.Custom == nil || !st.Custom.Missing {
 		t.Fatalf("missing: %s %q %+v", st.Phase, st.Message, st.Custom)
 	}
+	// no retry storm: a failed start waits for a word (no cadence exists). A mark said now comes
+	// after anything the error made the engine say; no start may lie between them.
 	n := len(e.Starts())
-	time.Sleep(400 * time.Millisecond)
+	from := testkit.Mark(t, s, "error said")
+	to := testkit.Mark(t, s, "looked")
+	for _, p := range testkit.Phases(t, s, from, to) {
+		if p == "starting" {
+			t.Fatalf("retry storm: a start with no word")
+		}
+	}
 	if st := s.Status(); st.Phase != "error" || len(e.Starts()) != n {
 		t.Fatalf("retry storm: %s %d->%d", st.Phase, n, len(e.Starts()))
 	}

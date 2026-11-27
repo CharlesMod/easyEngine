@@ -8,7 +8,8 @@ import (
 // names"). GET /engine/v1/book serves it. A fact stands until replaced or said gone, a reading is
 // a level said when it changes, a happening is history no choice may depend on.
 var book = []event.Decl{
-	{Name: "engine", Kind: event.Fact, What: "this engine: {version, port}"},
+	{Name: "engine", Kind: event.Fact, What: "this engine: {version, api, port}; api is the control API's version (run.APIVersion)"},
+	{Name: "door", Kind: event.Fact, What: "the door: {held}, the requests held until the model is up (not in flight; request counts those)"},
 	{Name: "phase", Kind: event.Fact, What: "where the engine stands: {phase, message}, as status says them"},
 	{Name: "model", Kind: event.Fact, What: "the selected model and the settings it runs with, as state.json holds them (no keys): {mode, model, backend, kv_type, target, previous, starter_owned, custom, sampler_policy, linger_s}"},
 	{Name: "mind.shape", Kind: event.Fact, What: "the running shape (status shape); gone when no model server is up"},
@@ -25,7 +26,7 @@ var book = []event.Decl{
 	{Name: "yield", Kind: event.Fact, What: "the card is yielded to another program, or replies drain before that (status yield); gone when not"},
 	{Name: "recovery", Kind: event.Fact, What: "the crash and failed-start record (status recovery), with what a retry waits for; gone when none"},
 	{Name: "error", Kind: event.Happening, What: "something went wrong: {message}, as status errors lists it"},
-	{Name: "request", Kind: event.Happening, What: "a request at the door began or ended: {what: begin|end, inflight, tok_s}"},
+	{Name: "request", Kind: event.Happening, What: "a request at the door began or ended, or the door went idle: {what: begin|end|idle, inflight, id (X-Request-Id)}; a streamed reply's end adds what the streamer read: {end: done|upstream_error|ended_early|client_gone, events, finish_reason, prompt_tokens, cached_tokens, completion_tokens, tok_s, prompt_ms, predicted_ms, slot}; idle says tok_s read from /metrics"},
 	{Name: "nudge", Kind: event.Happening, What: "a word that could change an outcome: a request at the door, a client's start or install: {why}"},
 	{Name: "network", Kind: event.Happening, What: "the system said a network link or address changed"},
 	{Name: "mark", Kind: event.Happening, What: "a marker said from outside (a test, a client) to order what came before it: {what}"},

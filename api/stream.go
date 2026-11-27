@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/stream"
 )
 
@@ -51,6 +52,9 @@ const (
 	codeModelServerGone = "model_server_gone"
 	codeUpstreamEnded   = "upstream_ended"
 	codeUpstreamError   = "upstream_error"
+	// unavailable: a held request's hold ended in a phase answered at once (no model installed,
+	// the model server's error, a person's stop, the engine stopping) after its stream was opened.
+	codeUnavailable = "unavailable"
 )
 
 // maxErrBody is how much of an upstream's error body is kept to find its message.
@@ -110,6 +114,31 @@ type fwd struct {
 	hear func(http.ResponseWriter) http.ResponseWriter
 	// open and quiet replace openAfter and quietEvery when set (tests shorten them).
 	open, quiet time.Duration
+	// sw is the stream a held request opened before its hold (proxy); forward goes on in it.
+	sw *streamWriter
+	// onEnd takes the streamer's summary of a streamed reply (stream.Options.OnEnd).
+	onEnd func(stream.Summary)
+}
+
+// ending is f with the streamer's summary kept in *to (said in the request's end).
+func (f fwd) ending(to **run.RequestEnd) fwd {
+	f.onEnd = func(s stream.Summary) {
+		re := &run.RequestEnd{End: string(s.End), Events: s.Events, FinishReason: s.FinishReason,
+			PromptTokens: s.PromptTokens, CachedTokens: s.CachedTokens, CompletionTokens: s.CompletionTokens,
+			TokS: s.TokPerSec, PromptMs: s.PromptMs, PredictedMs: s.PredictedMs}
+		if s.Slot >= 0 {
+			slot := s.Slot
+			re.Slot = &slot
+		}
+		*to = re
+	}
+	return f
+}
+
+// with is f going on in the stream a held request opened (nil: none).
+func (f fwd) with(sw *streamWriter) fwd {
+	f.sw = sw
+	return f
 }
 
 // fwd is what the streamer needs of the supervisor for one request.
@@ -210,6 +239,13 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 		return nil
 	}
 	rp.ModifyResponse = modify
+	if f.sw != nil { // a held streamed request: its stream is open (or ready to be) already
+		f.sw.mu.Lock()
+		f.sw.cutErr = f.cut // the route is known now (local or external)
+		f.sw.mu.Unlock()
+		streamThrough(w, r, rp, f, f.sw, modify)
+		return
+	}
 	if !f.on || r.Method != http.MethodPost || !completionPath(r.URL.Path) {
 		rp.ServeHTTP(f.wrap(w), r)
 		return
@@ -222,14 +258,20 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 		rp.ServeHTTP(f.wrap(w), r)
 		return
 	}
-	d := dialect(r.URL.Path)
-	ctx := r.Context()
 	// The streamWriter sits nearest the client, inside the hearing wrapper: the upstream's bytes
 	// pass the hearing wrapper and are heard; the engine's own comments and terminal events go
 	// straight to the client and are not (were they heard, a hung model server would look alive
 	// for as long as a client waits).
 	sw := newStreamWriter(w, f)
-	defer sw.finish(ctx.Err)
+	defer sw.finish(r.Context().Err)
+	streamThrough(w, r, rp, f, sw, modify)
+}
+
+// streamThrough serves a streamed completion through sw: the upstream's event stream is read
+// event by event (package stream) and every write goes to the client through sw.
+func streamThrough(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, f fwd, sw *streamWriter, modify func(*http.Response) error) {
+	d := dialect(r.URL.Path)
+	ctx := r.Context()
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if err := modify(resp); err != nil {
 			return err
@@ -243,6 +285,7 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 		resp.Body = stream.New(resp.Body, stream.Options{
 			Dialect:   d,
 			OnEvent:   f.onEvent,
+			OnEnd:     f.onEnd,
 			Cut:       sw.cut,
 			Gone:      func() bool { return ctx.Err() != nil },
 			RequestID: f.id,
@@ -448,6 +491,33 @@ func (sw *streamWriter) cut() []byte {
 	sw.term = []byte("data: {\"error\":" + string(e) + "}\n\n")
 	sw.mu.Unlock()
 	return nil
+}
+
+// refuse answers a held streamed request whose hold ended in a phase answered at once (yielded,
+// no model installed, the model server's error, a person's stop, the engine stopping). If the
+// stream is not open yet the client gets the same JSON 503 as an unstreamed request; if it is
+// (the waiting word went out), the stream ends with the terminal event: code "yielded" or
+// "unavailable", status 503, the route's message. finish writes it.
+func (sw *streamWriter) refuse(rt run.Route) {
+	e := termError{Code: codeUnavailable, Type: "unavailable_error", Message: rt.Message, Status: http.StatusServiceUnavailable, RequestID: sw.id}
+	retry := "2"
+	if rt.Code == codeYielded {
+		e.Code, retry = codeYielded, "10"
+	}
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.opened {
+		sw.term = termEvent(e)
+		return
+	}
+	sw.h.Set("Content-Type", "application/json")
+	sw.h.Set("Retry-After", retry)
+	sw.writeHeaderLocked(http.StatusServiceUnavailable)
+	var code any = http.StatusServiceUnavailable
+	if rt.Code == codeYielded {
+		code = codeYielded
+	}
+	json.NewEncoder(sw.w).Encode(map[string]any{"error": map[string]any{"code": code, "type": "unavailable_error", "message": rt.Message}})
 }
 
 // finish runs as the handler returns: it stops the watchdog and waits until its callback can

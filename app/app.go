@@ -75,6 +75,14 @@ func dataDir(o Options) string {
 	return dirs.Data()
 }
 
+// statusPatience is how long a lock whose holder lives, or that cannot be read, may stay silent
+// (no change of the file, no end of the holder) before Serve gives up on it: a watchdog for silence.
+const statusPatience = 10 * time.Second
+
+// lockWritePatience is how long a lock that is held but not yet written may stay silent: a
+// watchdog for silence (its creator is between create and write, which takes microseconds).
+const lockWritePatience = 2 * time.Second
+
 var statusClient = &http.Client{Timeout: 2 * time.Second}
 
 func statusOK(t Target) bool {
@@ -141,36 +149,75 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	var lock *lifecycle.Lock
 	var ln net.Listener
 	var port int
-	for try := 0; lock == nil; try++ {
-		if try > 4 {
-			return Result{}, errors.New("could not take engine.lock")
+	// The lock's changes are watched from before the first look until Serve has the lock, so a
+	// change made after any look is signalled (one coalesced signal waits in the channel): arm
+	// first, then look, then wait.
+	changed, stopChanged, err := osevents.Changes(lockPath)
+	if err != nil {
+		// No watch here (a system that gives none, or one that failed): Serve still starts. A lock
+		// nobody contends for needs no wait at all; a contended one is then ended by the holder's
+		// exit or by the watchdogs for silence below.
+		log.Printf("easy-engine: engine.lock is not watched (%v)", err)
+		changed, stopChanged = nil, func() {}
+	}
+	defer stopChanged()
+	// await returns when the lock file changes, ended closes (nil: it never does), or ctx ends. If
+	// patience is not zero and nothing has come by then, quiet is true: a watchdog for silence.
+	await := func(ended <-chan struct{}, patience time.Duration) (quiet bool, err error) {
+		var fired chan struct{}
+		if patience == 0 && changed == nil && ended == nil {
+			patience = statusPatience // nothing can say a word: the wait must not be endless
 		}
+		if patience > 0 {
+			fired = make(chan struct{})
+			sil := osevents.NewSilence(patience, func() { close(fired) })
+			defer sil.Stop()
+		}
+		select {
+		case <-changed:
+		case <-ended:
+		case <-fired:
+			return true, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	for held := 0; lock == nil; {
 		if d, raw, err := readLockRaw(lockPath); errors.Is(err, os.ErrNotExist) {
 			// No lock: go and take it. (Not the corrupt case below: a lock another serve
 			// creates after this read must never be taken for a corrupt one.)
 		} else if err == nil {
+			// The holder's end is watched before it is asked whether it lives, so an end after the
+			// question is not missed. (host.Exits, not ExitsOf: the lock's start token is the one
+			// lifecycle.PidStart gives, and on darwin that is not host.StartOf's; alive(d) checks it.)
+			ended, stopEnded, err := osevents.Exits(d.Pid)
+			if err != nil {
+				// The pid cannot be watched (a stale lock whose pid now belongs to a process this
+				// user may not open, say): that is not a reason to refuse to start. alive(d) below
+				// still says whether it is the engine, and a wait has the lock's change to end it.
+				ended, stopEnded = nil, func() {}
+			}
 			if alive(d) {
 				// A live engine holds the lock: attach to it.
 				tg := targetFor(dir, d)
-				// wait polls cond, one sleep line for every wait in this loop.
-				wait := func(tries int, cond func() bool) bool {
-					for i := 0; i < tries; i++ {
-						if cond() {
-							return true
-						}
-						time.Sleep(200 * time.Millisecond)
+				// The lock is written after the holder's listener is bound, so one status call (it has
+				// its own network timeout) is an answer. If the holder lives and does not answer, the
+				// word to wait for is the lock's change or the holder's end.
+				if !statusOK(tg) {
+					quiet, err := await(ended, statusPatience)
+					stopEnded()
+					if err != nil {
+						return Result{}, err
 					}
-					return false
+					if quiet {
+						return Result{}, fmt.Errorf("engine pid %d holds engine.lock but does not answer on port %d", d.Pid, d.Port)
+					}
+					continue
 				}
 				// released: the lock is gone or now names another engine (it is released last).
-				released := func() bool {
-					cur, err := lifecycle.ReadLock(lockPath)
-					return err != nil || cur.Pid != d.Pid || cur.Started != d.Started
-				}
-				if !wait(15, func() bool { return statusOK(tg) || released() }) {
-					return Result{}, fmt.Errorf("engine pid %d holds engine.lock but does not answer on port %d", d.Pid, d.Port)
-				}
-				if released() {
+				if cur, err := lifecycle.ReadLock(lockPath); err != nil || cur.Pid != d.Pid || cur.Started != d.Started {
+					stopEnded()
 					continue
 				}
 				stopping := false
@@ -179,19 +226,24 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 						stopping = true
 						break
 					} else if err != nil {
+						stopEnded()
 						return Result{}, err
 					}
 				}
 				if stopping {
 					// A dying engine: wait for it to end (the lock is released last), then go
 					// round again and take the lock ourselves.
-					if !wait(50, func() bool { return !alive(d) || released() }) {
-						return Result{}, fmt.Errorf("engine pid %d is stopping and has not ended", d.Pid)
+					_, err := await(ended, 0)
+					stopEnded()
+					if err != nil {
+						return Result{}, err
 					}
 					continue
 				}
+				stopEnded()
 				return Result{Attached: true, Port: d.Port, Host: d.Host}, nil
 			}
+			stopEnded()
 			lifecycle.KillStale(d) // the engine crashed: its children may still run
 			lifecycle.RemoveStale(lockPath, d)
 		} else if isParseErr(err) {
@@ -204,9 +256,15 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			}
 		} else {
 			// Unreadable for another reason (permission, a sharing violation while the live engine
-			// rewrites its lock): not proof of anything, so remove nothing; look again. The try
-			// budget bounds it.
-			time.Sleep(100 * time.Millisecond) // not converted yet (laws/unconverted.txt): a pause before looking again, like the two around it
+			// rewrites its lock): not proof of anything, so remove nothing; wait for the lock to
+			// change and look again. A lock that stays unreadable and silent is an error.
+			quiet, aerr := await(nil, statusPatience)
+			if aerr != nil {
+				return Result{}, aerr
+			}
+			if quiet {
+				return Result{}, fmt.Errorf("engine.lock stays unreadable: %w", err)
+			}
 			continue
 		}
 		l, p, err := api.Listen(host, base)
@@ -217,7 +275,19 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		lk, err := lifecycle.CreateLock(lockPath, lifecycle.LockData{Pid: os.Getpid(), Start: start, Port: p, Host: host, Started: time.Now().UTC().Format(time.RFC3339)})
 		if err == lifecycle.ErrLockHeld {
 			l.Close()
-			time.Sleep(100 * time.Millisecond)
+			// Another serve took the lock between the look and the create (or its creator is
+			// between create and write): wait for the lock's change. A creator that says nothing
+			// (a watchdog for silence) is not robbed of its lock: Serve gives up.
+			if held++; held > 8 {
+				return Result{}, errors.New("could not take engine.lock")
+			}
+			quiet, err := await(nil, lockWritePatience)
+			if err != nil {
+				return Result{}, err
+			}
+			if quiet {
+				return Result{}, errors.New("could not take engine.lock: its holder is writing it and says nothing")
+			}
 			continue
 		}
 		if err != nil {
@@ -370,9 +440,13 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 					linger = time.Duration(sup.LingerS()) * time.Second
 				}
 				if linger > 0 {
+					lingered := make(chan struct{})
+					// named moment: the keeper's linger, the time the engine stays after its model's end
+					cancel := osevents.Moment(linger, func() { close(lingered) })
 					select {
-					case <-time.After(linger):
+					case <-lingered:
 					case <-wctx.Done():
+						cancel()
 						return
 					}
 				}

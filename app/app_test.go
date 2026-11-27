@@ -52,7 +52,7 @@ func startServe(t *testing.T, dir string, parents []int) *served {
 	}()
 	select {
 	case <-s.port:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second): // watchdog for silence: the engine never says it started
 		t.Fatal("engine did not start")
 	}
 	return s
@@ -70,7 +70,7 @@ func TestParentDeathEndsEngine(t *testing.T) {
 	t0 := time.Now()
 	select {
 	case <-s.res:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): // watchdog for silence: the parent's end never ended the engine
 		t.Fatal("engine still running 5 s after its parent died")
 	}
 	t.Logf("engine ended %v after the parent died", time.Since(t0))
@@ -90,16 +90,28 @@ func TestSecondServeAttaches(t *testing.T) {
 	// still one engine: it lives until BOTH parents are gone
 	p1.Process.Kill()
 	p1.Wait()
+	// The engine still answers, and takes a third parent, after the first parent's end: the
+	// reply is the event that tells it is serving at this point (no wait on a clock).
+	p3 := sleeper(t)
+	tg, ok := app.Find(dir)
+	if !ok {
+		t.Fatal("the engine does not answer after the first parent died")
+	}
+	if err := app.PostAttach(tg, p3.Process.Pid); err != nil {
+		t.Fatal("attach after the first parent died:", err)
+	}
 	select {
 	case <-s.res:
-		t.Fatal("engine ended while the attached parent still lives")
-	case <-time.After(2500 * time.Millisecond):
+		t.Fatal("engine ended while the attached parents still live")
+	default:
 	}
 	p2.Process.Kill()
 	p2.Wait()
+	p3.Process.Kill()
+	p3.Wait()
 	select {
 	case <-s.res:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): // watchdog for silence: the last parent's end never ended the engine
 		t.Fatal("engine did not end after the last parent died")
 	}
 }
@@ -125,7 +137,7 @@ func TestStaleLockCleanup(t *testing.T) {
 	go func() { orphan.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): // watchdog for silence: the orphan never ended
 		t.Fatal("the orphaned child of the crashed engine was not killed")
 	}
 	if !lifecycle.PidAlive(bystander.Process.Pid) {

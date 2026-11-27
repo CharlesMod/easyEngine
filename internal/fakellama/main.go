@@ -17,6 +17,8 @@
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
+//	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
+//	                           id_slot 0, timings with predicted_per_second 50) before [DONE]
 //	(every completion request body is saved to <ctl>/lastbody.json)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
@@ -31,6 +33,7 @@
 //	             print the CUDA out-of-memory lines (the server survives)
 //	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
 //	  loadfail   while present, every start fails while loading with a non-memory error
+//	  healthy    written (with the pid) when /health turns 200
 //
 // It says the lines a real llama-server says, in the same order (run/testdata/ready-*.txt): once
 // the model is loaded and it listens, "llama_server: model loaded", "llama_server: listening on
@@ -457,6 +460,10 @@ func main() {
 				}
 				time.Sleep(gap) // named moment: FAKELLAMA_STREAM_DELAY, the fake's pace between tokens
 			}
+			if os.Getenv("FAKELLAMA_TIMINGS") != "" { // the last chunk llama-server sends: finish, slot, timings
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"id_slot\":0,\"timings\":{\"cache_n\":3,\"prompt_n\":7,\"prompt_ms\":12.5,\"predicted_n\":5,\"predicted_ms\":100,\"predicted_per_second\":50}}\n\n")
+				fl.Flush()
+			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			fl.Flush()
 			return
@@ -501,6 +508,9 @@ func main() {
 	}
 	becomeReady := func() {
 		isReady.Store(true)
+		if ctl != "" { // a test hears that /health answers 200 now (a word, not a poll)
+			os.WriteFile(filepath.Join(ctl, "healthy"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
 		switch readyLines {
 		case "none":
 			say("srv  llama_server: model loaded", "srv  update_slots: all slots are idle")

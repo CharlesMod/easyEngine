@@ -154,7 +154,7 @@ func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir, chat string,
 	return c
 }
 
-// serve handles clicks until the tray closes or ctx ends.
+// serve handles clicks until the tray closes or ctx ends (watch follows the hub).
 func (c *controller) serve(ctx context.Context) {
 	for {
 		select {
@@ -233,11 +233,12 @@ func listenAddr(host string, port int) string {
 	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 }
 
-// watch redraws the menu and tooltip when the supervisor's "phase" fact changes (Chat turns on
-// when a model is ready), until ctx ends. It is driven by the engine's own event hub (Wake, then
-// read the state), not a clock.
+// watch redraws the menu and tooltip when the supervisor's "phase", "model" or "door" fact
+// changes (Chat turns on when a model is ready; the tooltip says the model and the requests the
+// door holds), until ctx ends. It is driven by the engine's own event hub (Wake, then read the
+// state), not a clock.
 func (c *controller) watch(ctx context.Context) {
-	w, err := c.sup.Hub().Wake("phase") // made before the first read, so no change slips between
+	w, err := c.sup.Hub().Wake("phase", "model", "door") // made before the first read, so no change slips between
 	if err != nil {
 		log.Printf("easy-engine: tray cannot follow the phase: %v", err)
 		return
@@ -280,9 +281,18 @@ func (c *controller) refresh() {
 	}
 }
 
-// tooltip is one line: the phase and the model.
+// tooltip is one line: the phase and the model, and the requests the door holds while the model
+// comes up.
 func (c *controller) tooltip() string {
 	st := c.sup.Status()
+	tip := c.phaseTip(st)
+	if st.Held > 0 {
+		tip += fmt.Sprintf(" (%d waiting)", st.Held)
+	}
+	return tip
+}
+
+func (c *controller) phaseTip(st run.Status) string {
 	name := st.Model
 	if n := c.names[st.Model]; n != "" {
 		name = n

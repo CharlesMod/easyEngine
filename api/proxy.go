@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 var transport = &http.Transport{
@@ -38,13 +40,40 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 // proxy forwards every non-/engine path to llama-server (local) or, in external
 // mode, /v1/* to the player's endpoint with its key.
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
-	done := a.S.Begin() // count first, so a resize cannot slip in between Route and the forward
-	defer done()
 	id := requestID(r)
 	w.Header().Set(RequestIDHeader, id)
-	rt := a.S.Route()
+	rt, done := a.S.Enter(id)
+	var sw *streamWriter // a streamed request's stream, opened before its hold
+	if rt.Hold {
+		if a.S.Streamer() && r.Method == http.MethodPost && completionPath(r.URL.Path) {
+			want, ok := wantsStream(w, r)
+			if !ok {
+				return
+			}
+			if want {
+				// The stream is opened as for a slot the upstream has not answered (docs/STREAMING.md
+				// section 4): after 2 s of hold the client gets 200 and the waiting word, and the
+				// reply follows in the same stream when the model is up.
+				sw = newStreamWriter(w, a.fwd(false, id))
+				defer sw.finish(r.Context().Err)
+			}
+		}
+		var ok bool
+		if rt, done, ok = a.hold(r, id); !ok {
+			return // the client went away while held
+		}
+	}
+	var sum *run.RequestEnd // what the streamer read of the reply, said in the request's end
+	defer func() { done(sum) }()
+	if sw != nil {
+		w = sw // from here every answer goes through the stream opened for the hold
+	}
 	switch rt.Kind {
 	case "unavailable":
+		if sw != nil {
+			sw.refuse(rt) // a JSON 503 as below, or the terminal event if the stream is open
+			return
+		}
 		if rt.Code == "yielded" {
 			yieldedReply(w, rt.Message)
 			return
@@ -87,7 +116,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		forward(w, r, rp, a.fwd(true, id))
+		forward(w, r, rp, a.fwd(true, id).with(sw).ending(&sum))
 	default:
 		target, err := url.Parse(rt.URL)
 		if err != nil {
@@ -108,7 +137,40 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		forward(w, r, rp, a.fwd(false, id))
+		forward(w, r, rp, a.fwd(false, id).with(sw).ending(&sum))
+	}
+}
+
+// holdOn are the names whose change can end a hold: the phase, the model and mode (a switch to
+// external), the yield, and the upgrade (the swap to the full model).
+var holdOn = []string{"phase", "model", "yield", "upgrade"}
+
+// hold is a request the door holds (docs/ENGINE.md, "The door holds"): Enter said Hold (the
+// model is on its way up). The request waits on the hub, never on a clock: listen first, then
+// look at what stands (Enter again), then wait for a word on holdOn, the client's going (its
+// context) or the engine's end. The held request is counted (Supervisor.Hold: the door fact, the
+// resident app's linger), never in flight. It answers the route to forward by and the end of its
+// count in flight; ok is false when the client went away while held.
+func (a *API) hold(r *http.Request, id string) (rt run.Route, end func(*run.RequestEnd), ok bool) {
+	hub := a.S.Hub()
+	wk, err := hub.Wake(holdOn...)
+	if err != nil { // a book without the names: answer as before the hold
+		return run.Route{Kind: "unavailable", Message: "Loading model"}, func(*run.RequestEnd) {}, true
+	}
+	defer wk.Close()
+	release := a.S.Hold()
+	defer release()
+	for {
+		if rt, end = a.S.Enter(id); !rt.Hold {
+			return rt, end, true
+		}
+		select {
+		case <-wk.C():
+		case <-r.Context().Done():
+			return rt, nil, false
+		case <-hub.Done():
+			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, func(*run.RequestEnd) {}, true
+		}
 	}
 }
 

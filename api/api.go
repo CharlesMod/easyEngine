@@ -332,6 +332,18 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 			a.S.Nudge("attach")
 			writeJSON(w, 200, map[string]any{"status": "attached", "pid": in.Pid})
 		}
+	case "facts":
+		if need("GET") {
+			a.S.Hub().ServeFacts(w, r)
+		}
+	case "events":
+		if need("GET") {
+			a.S.Hub().ServeEvents(w, r)
+		}
+	case "book":
+		if need("GET") {
+			a.S.Hub().ServeBook(w, r)
+		}
 	case "logs":
 		if need("GET") {
 			n, _ := strconv.Atoi(r.URL.Query().Get("tail"))
@@ -401,6 +413,7 @@ type settingsPatch struct {
 	LingerS       *int    `json:"linger_s"`
 	KVType        *string `json:"kv_type"`
 	SamplerPolicy *string `json:"sampler_policy"`
+	Streamer      *string `json:"streamer"`
 }
 
 // apply lays the named fields over the current settings (whose api key is blank: SetSettings
@@ -429,6 +442,12 @@ func (p settingsPatch) apply(cur run.Settings) run.Settings {
 	}
 	if p.SamplerPolicy != nil {
 		cur.SamplerPolicy = *p.SamplerPolicy
+	}
+	if p.Streamer != nil {
+		cur.Streamer = *p.Streamer
+		if cur.Streamer == "" {
+			cur.Streamer = "-" // an explicit empty value is refused, not taken as "keep"
+		}
 	}
 	return cur
 }

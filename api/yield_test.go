@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"sync/atomic"
 	"testing"
@@ -23,16 +22,9 @@ func (g *gameOS) Launches() []yield.Launch {
 }
 func (g *gameOS) Openers(func(int) bool) map[int]string { return nil }
 func (g *gameOS) Under(int, int) bool                   { return false }
-func (g *gameOS) Wait(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
-	}
-	return false
-}
-func (g *gameOS) Drain()         {}
-func (g *gameOS) Adapter(string) {}
-func (g *gameOS) Close()         {}
+func (g *gameOS) Drain()                                {}
+func (g *gameOS) Adapter(string)                        {}
+func (g *gameOS) Close()                                {}
 
 func TestYieldedReply(t *testing.T) {
 	testkit.SkipWindows(t)

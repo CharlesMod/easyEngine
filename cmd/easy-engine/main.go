@@ -62,9 +62,13 @@ func usage() {
 `)
 }
 
-// main hands the program to tray.Main: macOS runs its UI loop on the main thread and the rest
-// of the program in a goroutine; Linux and Windows just call it.
+// main hands the app to tray.Main: macOS runs its UI loop on the main thread and the rest of
+// the program in a goroutine; Linux and Windows just call it. Every other command (serve, the
+// CLI) runs plainly: it shows no icon, so it starts no UI loop (a shell over ssh has none).
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] != "app" {
+		os.Exit(realMain())
+	}
 	var code int
 	tray.Main(func() { code = realMain() })
 	os.Exit(code)

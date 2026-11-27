@@ -65,6 +65,13 @@ func runEngine(args []string, kind launch, implicit bool) int {
 		if note := dirs.Migrate(); note != "" { // once, before anything reads the data dir
 			fmt.Fprintln(os.Stderr, "easy-engine:", note)
 		}
+		// An engine already runs: say so and end (a second icon would be a second app). Asked
+		// before the settings are loaded, because a load may rewrite state.json and that file
+		// is the running engine's.
+		if p, ok := app.Running(dirs.Data()); ok {
+			fmt.Printf("easy-engine is already running (port %d)\n", p)
+			return 0
+		}
 		conf, _ = settings.Load(dirs.Data()) // a file that cannot be read: the engine says so in its status
 	}
 	fs := newFlags(name)
@@ -106,11 +113,6 @@ func runEngine(args []string, kind launch, implicit bool) int {
 	defer stop()
 	var tr app.Tray
 	if appMode {
-		// An engine already runs: say so and end (a second icon would be a second app).
-		if p, ok := app.Running(dirs.Data()); ok {
-			fmt.Printf("easy-engine is already running (port %d)\n", p)
-			return 0
-		}
 		t, err := app.StartTray(ctx, app.MenuOptions{})
 		switch {
 		case err == nil:

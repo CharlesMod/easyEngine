@@ -3,6 +3,7 @@ package laws
 import (
 	"flag"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,7 +21,9 @@ const header = `# The ratchet for the clock law ("Events, not clocks").
 # new file never goes on it. When it is empty, the redesign is done and this
 # file is deleted along with the ratchet in laws_test.go.
 #
-# One repo-relative path per line; # comments and blank lines are allowed.
+# One repo-relative path per line, or a path.Match pattern (cmd/*/main.go)
+# for a file whose directory is being renamed; # comments and blank lines are
+# allowed.
 # Regenerate with:
 #   go test ./laws -run TestTheTreeKeepsItsLaws -args -write-unconverted
 `
@@ -74,24 +77,37 @@ func TestTheTreeKeepsItsLaws(t *testing.T) {
 		return
 	}
 
-	listed := map[string]bool{}
-	for _, p := range readList(t) {
-		listed[p] = true
+	list := readList(t)
+	listed := func(file string) bool {
+		for _, p := range list {
+			if ok, _ := path.Match(p, file); ok {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range list {
 		for _, born := range []string{"event/", "host/", "laws/"} {
 			if strings.HasPrefix(p, born) {
 				t.Errorf("%s is on the list, but %s is born under the law", p, born)
 			}
 		}
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err != nil {
+		if m, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(p))); err != nil || len(m) == 0 {
 			t.Errorf("%s is on the list but does not exist: remove it from the list", p)
 			continue
 		}
-		if len(have[p]) == 0 {
+		n := 0
+		for f, fs := range have {
+			if ok, _ := path.Match(p, f); ok {
+				n += len(fs)
+			}
+		}
+		if n == 0 {
 			t.Errorf("%s: converted: remove it from the list", p)
 		}
 	}
 	for _, f := range found {
-		if !listed[f.File] {
+		if !listed(f.File) {
 			t.Errorf("%s", f)
 		}
 	}

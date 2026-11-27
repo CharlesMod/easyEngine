@@ -6,7 +6,9 @@
 # new file never goes on it. When it is empty, the redesign is done and this
 # file is deleted along with the ratchet in laws_test.go.
 #
-# One repo-relative path per line; # comments and blank lines are allowed.
+# One repo-relative path per line, or a path.Match pattern (cmd/*/main.go)
+# for a file whose directory is being renamed; # comments and blank lines are
+# allowed.
 # Regenerate with:
 #   go test ./laws -run TestTheTreeKeepsItsLaws -args -write-unconverted
 
@@ -15,8 +17,8 @@ api/custom_test.go
 api/yield_test.go
 app/app.go
 app/app_test.go
-cmd/hermes-engine/main.go
-cmd/hermes-engine/main_test.go
+cmd/*/main.go
+cmd/*/main_test.go
 fetch/download.go
 fetch/fetch_test.go
 internal/fakellama/main.go

@@ -19,12 +19,8 @@ app/app.go
 app/app_test.go
 cmd/easy-engine/main.go
 cmd/easy-engine/main_test.go
-fetch/download.go
-fetch/fetch_test.go
 internal/fakellama/main.go
 internal/testkit/testkit.go
-lifecycle/proc.go
-lifecycle/watch.go
 run/agent.go
 run/cardpin_test.go
 run/crash_test.go

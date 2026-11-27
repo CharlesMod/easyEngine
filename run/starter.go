@@ -283,7 +283,7 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 				s.setUpgrade(func(u *upgrade) {
 					u.progress = &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds()), Step: stepLabel("model "+target.ID, p)}
 				})
-			})
+			}, nil)
 			if err == nil {
 				break
 			}

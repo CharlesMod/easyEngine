@@ -162,7 +162,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			defer s.dropQueued()
 			if !s.modelInstalled(serve) {
 				s.setPhase("downloading", "Downloading "+serve.Name+" first")
-				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID)); err != nil {
+				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID), nil); err != nil {
 					return err
 				}
 				s.mu.Lock()
@@ -174,7 +174,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 				return err
 			}
 			s.setPhase("downloading", "Downloading "+m.Name)
-			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID)); err != nil {
+			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID), nil); err != nil {
 				return err
 			}
 		}
@@ -239,7 +239,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 	if _, err := os.Stat(marker); err != nil || findServer(dir) == "" {
 		os.RemoveAll(dir) // only a path we build under our own data dir
 		arch := filepath.Join(s.dir, "downloads", a.ID+archiveExt(a.URL))
-		if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID)); err != nil {
+		if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID), nil); err != nil {
 			return err
 		}
 		s.setPhase("installing", "Unpacking "+a.ID)
@@ -253,7 +253,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 				return fmt.Errorf("catalog has no asset %q", x)
 			}
 			earch := filepath.Join(s.dir, "downloads", ea.ID+archiveExt(ea.URL))
-			if err := fetch.Download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID)); err != nil {
+			if err := fetch.Download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID), nil); err != nil {
 				return err
 			}
 			tmp := filepath.Join(s.dir, "downloads", ea.ID+"-unpacked")
@@ -405,7 +405,7 @@ func (s *Supervisor) ensureUV(ctx context.Context, cat *catalog.Catalog) (string
 		return "", errors.New("no uv build in the catalog for this machine")
 	}
 	arch := filepath.Join(s.dir, "downloads", "uv"+archiveExt(a.URL))
-	if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv")); err != nil {
+	if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv"), nil); err != nil {
 		return "", err
 	}
 	s.setPhase("installing", "Installing uv")

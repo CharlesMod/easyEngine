@@ -43,12 +43,10 @@ var ErrHashMismatch = errors.New("sha256 mismatch")
 
 // Tunables (variables so tests can shrink them).
 var (
-	maxAttempts   = 6
-	backoffBase   = time.Second
-	backoffMax    = 30 * time.Second
-	stallTimeout  = 60 * time.Second
-	progressEvery = 250 * time.Millisecond
-	httpClient    = &http.Client{Transport: &http.Transport{
+	stallTimeout = 60 * time.Second
+	// unknownStep is the progress step, in bytes, when the total is not known.
+	unknownStep int64 = 4 << 20
+	httpClient        = &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   20 * time.Second,
@@ -60,11 +58,26 @@ type permanentError struct{ error }
 
 func (p permanentError) Unwrap() error { return p.error }
 
+// Again is asked after an attempt that failed having moved no bytes. It answers nil once something has happened that could change the outcome (the network came back, a client's word), and the download tries again at once; an error ends the download with it. A nil Again ends the download with the attempt's error.
+type Again func(ctx context.Context, err error) error
+
+// stepOf is how many bytes make one progress step: 1% of total, or 4 MiB when the total is unknown.
+func stepOf(total int64) int64 {
+	if total <= 0 {
+		return unknownStep
+	}
+	return max(total/100, 1)
+}
+
 // Download fetches url into dest through dest+".part", resuming with an HTTP Range request.
 // sha256 (hex) and size (bytes) are checked when non-empty / positive. Cancelling ctx returns
 // ctx.Err() and keeps the .part file so a later call resumes. A finished file already at dest
 // with the right hash is left alone.
-func Download(ctx context.Context, url, dest, sha256hex string, size int64, onProgress func(Progress)) error {
+//
+// An attempt that wrote bytes and then failed resumes at once (progress bounds it). An attempt
+// that wrote none asks again; see Again. Progress is reported per step (1% of the total, or every
+// 4 MiB when the total is unknown), never on a clock.
+func Download(ctx context.Context, url, dest, sha256hex string, size int64, onProgress func(Progress), again Again) error {
 	if onProgress == nil {
 		onProgress = func(Progress) {}
 	}
@@ -83,20 +96,8 @@ func Download(ctx context.Context, url, dest, sha256hex string, size int64, onPr
 		}
 	}
 	part := dest + ".part"
-	var last error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			d := backoffBase << (attempt - 1)
-			if d > backoffMax || d <= 0 {
-				d = backoffMax
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(d):
-			}
-		}
-		err := attemptDownload(ctx, url, part, size, onProgress)
+	for {
+		progressed, err := attemptDownload(ctx, url, part, size, onProgress)
 		if err == nil {
 			return finish(ctx, part, dest, sha256hex, size, onProgress)
 		}
@@ -107,9 +108,17 @@ func Download(ctx context.Context, url, dest, sha256hex string, size int64, onPr
 		if errors.As(err, &pe) {
 			return pe.error
 		}
-		last = err
+		err = fmt.Errorf("download %s: %w", url, err)
+		if progressed {
+			continue // the .part grew: resume at once
+		}
+		if again == nil {
+			return err
+		}
+		if aerr := again(ctx, err); aerr != nil {
+			return aerr
+		}
 	}
-	return fmt.Errorf("download %s: giving up after %d attempts: %w", url, maxAttempts, last)
 }
 
 func finish(ctx context.Context, part, dest, sha256hex string, size int64, onProgress func(Progress)) error {
@@ -150,7 +159,12 @@ func hashFile(ctx context.Context, path string, progress func(int64)) (string, e
 	h := sha256.New()
 	buf := make([]byte, 1<<20)
 	var done int64
-	lastReport := time.Now()
+	var total int64
+	if st, err := f.Stat(); err == nil {
+		total = st.Size()
+	}
+	step := stepOf(total)
+	var reported int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -159,9 +173,9 @@ func hashFile(ctx context.Context, path string, progress func(int64)) (string, e
 		if n > 0 {
 			h.Write(buf[:n])
 			done += int64(n)
-			if progress != nil && time.Since(lastReport) >= progressEvery {
+			if progress != nil && done-reported >= step {
 				progress(done)
-				lastReport = time.Now()
+				reported = done
 			}
 		}
 		if err == io.EOF {
@@ -179,23 +193,24 @@ func hashFile(ctx context.Context, path string, progress func(int64)) (string, e
 
 // attemptDownload makes one request, appending to part. It returns nil when part holds the
 // whole file (all bytes of the response were written and, if size is known, it is complete).
-func attemptDownload(ctx context.Context, url, part string, size int64, onProgress func(Progress)) error {
+func attemptDownload(ctx context.Context, url, part string, size int64, onProgress func(Progress)) (progressed bool, err error) {
 	var have int64
 	if st, err := os.Stat(part); err == nil {
 		have = st.Size()
 	}
 	if size > 0 && have == size {
-		return nil // a previous run finished the bytes; go straight to verification
+		return false, nil // a previous run finished the bytes; go straight to verification
 	}
 	if size > 0 && have > size {
 		os.Remove(part)
 		have = 0
 	}
+	have0 := have // the .part's length before this attempt: progress is growth beyond it
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 	if err != nil {
-		return permanentError{err}
+		return false, permanentError{err}
 	}
 	req.Header.Set("User-Agent", "easy-engine")
 	if have > 0 {
@@ -203,7 +218,7 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 
@@ -212,7 +227,7 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 	case http.StatusPartialContent:
 		start, ok := contentRangeStart(resp.Header.Get("Content-Range"))
 		if !ok || start != have {
-			return fmt.Errorf("server answered a different range (%q) than asked (%d-)", resp.Header.Get("Content-Range"), have)
+			return false, fmt.Errorf("server answered a different range (%q) than asked (%d-)", resp.Header.Get("Content-Range"), have)
 		}
 		flags |= os.O_APPEND
 	case http.StatusOK:
@@ -221,16 +236,17 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 		have = 0
 	case http.StatusRequestedRangeNotSatisfiable:
 		if size > 0 && have == size {
-			return nil
+			return false, nil
 		}
-		// our .part is longer than the file or the file changed: drop it and retry from zero
+		// our .part is longer than the file or the file changed: drop it and retry from zero.
+		// That changes the outcome, so it counts as progress: the caller starts again at once.
 		os.Remove(part)
-		return errors.New("416 range not satisfiable; restarting from zero")
+		return true, errors.New("416 range not satisfiable; restarting from zero")
 	default:
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
-			return permanentError{fmt.Errorf("download %s: %s", url, resp.Status)}
+			return false, permanentError{fmt.Errorf("download %s: %s", url, resp.Status)}
 		}
-		return fmt.Errorf("download %s: %s", url, resp.Status)
+		return false, fmt.Errorf("download %s: %s", url, resp.Status)
 	}
 
 	total := size
@@ -243,21 +259,25 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 	}
 	f, err := os.OpenFile(part, flags, 0o644)
 	if err != nil {
-		return permanentError{err}
+		return false, permanentError{err}
 	}
 	defer f.Close()
 
+	// watchdog for silence: a stream that sends no byte for stallTimeout is cut and the attempt fails.
 	stall := time.AfterFunc(stallTimeout, cancel)
 	defer stall.Stop()
 	start := time.Now()
 	startBytes := have
 	done := have
-	lastReport := time.Time{}
+	step := stepOf(total)
+	var reported int64
+	first := true
 	report := func(final bool) {
-		if !final && time.Since(lastReport) < progressEvery {
+		if !final && !first && done-reported < step {
 			return
 		}
-		lastReport = time.Now()
+		first = false
+		reported = done
 		rate := float64(done-startBytes) / (time.Since(start).Seconds() + 1e-9)
 		var eta time.Duration
 		if total > done && rate > 0 {
@@ -272,7 +292,7 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 		if n > 0 {
 			stall.Reset(stallTimeout)
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				return permanentError{werr}
+				return false, permanentError{werr}
 			}
 			done += int64(n)
 			report(false)
@@ -282,14 +302,14 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 		}
 		if rerr != nil {
 			f.Sync()
-			return rerr
+			return done > have0, rerr
 		}
 	}
 	report(true)
 	if total > 0 && done < total {
-		return fmt.Errorf("connection ended at %d of %d bytes", done, total)
+		return done > have0, fmt.Errorf("connection ended at %d of %d bytes", done, total)
 	}
-	return nil
+	return true, nil
 }
 
 func contentRangeStart(h string) (int64, bool) {

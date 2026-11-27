@@ -1130,27 +1130,33 @@ llama-server's web UI ("Llama Chat") is on (`--no-webui` is not passed). Its con
 browser storage keyed by origin and llama-server's port changes on every launch, so the engine
 serves it at a fixed address, on the control port:
 
-- `GET /chat/` is a small embedded page (`web/chat.html`): a same-origin frame holding the UI and
-  a slim bar. With `?mini=1` (the popup) the bar has one button, *Open in browser*. The page
-  remembers the frame's address hash (`#/chat/<id>`, how the UI names a conversation) in
-  `localStorage` and restores it when it opens, so the popup returns to the same conversation.
-  While no local model is ready it is a short plain page saying so (no timer: the tray's Chat item is off then, and the page says to reload).
+- `GET /chat/` is a small embedded page (`web/chat.html`): a same-origin frame holding the UI. The
+  page remembers the frame's address hash (`#/chat/<id>`, how the UI names a conversation) in
+  `localStorage` and restores it when it opens (an address given to the page wins), so Chat
+  reopens to the same conversation (the UI's own sidebar, with its conversation list, search,
+  delete and export, works inside the frame; deleting the open conversation leaves the UI on a new
+  chat, and the page remembers that). The page is the top document, so the browser tab says
+  *easyEngine* and shows the engine's icon (`GET /chat/icon.png`, the tray's picture); the
+  frame's own title and icon do not reach the tab. While no local model is ready it is a short plain page saying
+  so (no timer: the tray's Chat item is off then, and the page says to reload).
 - `/chat/ui/*` is llama-server, reverse-proxied through the engine's proxy with the `/chat/ui`
   prefix stripped (streaming is flushed at once). The UI builds every asset and API address
   relative to where it was loaded, and routes by the address hash, so nothing else is needed;
   llama-server's own routes (health, metrics, slots) are not moved, which is why `--api-prefix`
   is not used.
-- `POST /engine/v1/chat/open {"hash": "#/chat/<id>"}` (loopback listener only) opens
-  `http://<host>:<port>/chat/<hash>` in the default browser. The popup's button calls it and then
-  closes the popup window.
-- The tray's *Chat* item starts the user's default browser in app mode
-  (`--app=<url> --window-size=420,640`, normal profile, so it shares storage with the full
-  browser window) when that browser is Chromium family: Linux resolves it from
-  `xdg-settings get default-web-browser` and the `.desktop` Exec line (Flatpaks included);
-  Windows from the `https` UserChoice ProgId; macOS from the LaunchServices handler (`open -na`).
-  Any other default browser (Firefox has no app mode), or one that cannot be resolved, gets the
-  full chat page in an ordinary tab. A listener beyond loopback needs a bearer token a page cannot
-  send, so chat is not offered there.
+- The tray's *Chat* item opens `http://<host>:<port>/chat/` in a new window of the user's default
+  browser: no app mode, no small window, no second browser. Where the browser's launch line is
+  known and the browser takes `--new-window <url>`, it is started that way: Linux resolves the
+  line from `xdg-settings get default-web-browser` and the `.desktop` Exec line (Flatpaks
+  included), Windows from the `https` UserChoice ProgId and its `shell\open\command` (the
+  `-osint -url`, `--single-argument` and `--` words that hand a link over are dropped), macOS from
+  the LaunchServices handler (`open -na "<app>" --args --new-window <url>`, for the apps in the
+  `macBrowsers` table). The names that take it are the Chromium family (Chrome, Chromium, Brave,
+  Edge, Vivaldi, Opera, Thorium) and the Firefox family (Firefox, LibreWolf, Waterfox, Floorp,
+  Zen). Any other browser (Safari, Epiphany), an unresolved default, or a launch that fails, gets
+  the page from the system's ordinary opener (`xdg-open`, `open`, `ShellExecute`), which may be a
+  tab. A listener beyond loopback needs a bearer token a page cannot send, so chat is not offered
+  there.
 
 ### 7c. Disk need
 

@@ -6,23 +6,19 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 )
 
-// Size of the chat popup, in CSS pixels.
-const (
-	PopupWidth  = 420
-	PopupHeight = 640
-)
-
-// Popup shows addr in a small window with no browser chrome: the user's default browser, when it
-// is Chromium family, started in app mode (--app=<addr> --window-size=...) with its normal
-// profile, so the page sees the same browser storage a full browser window sees. When the
-// default browser cannot be found or is not Chromium family (Firefox has no app mode), it opens
-// addr in the default browser the ordinary way. It returns once the browser has started.
-func Popup(addr string) error {
-	if argv, ok := defaultPopupCommand(addr); ok {
+// Window shows addr in a NEW window of the user's default browser: where the browser's launch
+// line is known and it takes --new-window (the Chromium and Firefox families do), it starts that
+// browser with --new-window <addr>; in every other case (an unknown browser, Safari, a failed
+// lookup, a failed launch) it opens addr the ordinary way, which may be a tab. It returns once
+// the browser has started.
+func Window(addr string) error {
+	if err := checkAddr(addr); err != nil {
+		return err
+	}
+	if argv, ok := defaultWindowCommand(addr); ok {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		if err := cmd.Start(); err == nil {
 			go cmd.Wait() // reap it; the window outlives this call
@@ -32,18 +28,22 @@ func Popup(addr string) error {
 	return OpenURL(addr)
 }
 
-// defaultPopupCommand is the popup command for this system's default browser.
-func defaultPopupCommand(addr string) ([]string, bool) {
+// DefaultWindowCommand is the command Window would run for addr on this system, for display
+// (ok is false when Window would use the ordinary opener).
+func DefaultWindowCommand(addr string) ([]string, bool) { return defaultWindowCommand(addr) }
+
+// defaultWindowCommand is the new-window command for this system's default browser.
+func defaultWindowCommand(addr string) ([]string, bool) {
 	switch runtime.GOOS {
 	case "linux", "freebsd", "openbsd", "netbsd":
 		if line := linuxDefaultBrowserExec(); line != "" {
-			return PopupCommand(line, addr, PopupWidth, PopupHeight)
+			return WindowCommand(line, addr)
 		}
 	case "darwin":
-		return MacPopupCommand(macDefaultBrowserID(), addr, PopupWidth, PopupHeight)
+		return MacWindowCommand(macDefaultBrowserID(), addr)
 	case "windows":
 		if line := windowsDefaultBrowserCommand(); line != "" {
-			return PopupCommand(line, addr, PopupWidth, PopupHeight)
+			return WindowCommand(line, addr)
 		}
 	}
 	return nil, false
@@ -51,16 +51,18 @@ func defaultPopupCommand(addr string) ([]string, bool) {
 
 // ---- pure parts ----------------------------------------------------------------------------
 
-// chromiumName matches the executable names, flatpak app ids and snap names of the Chromium
-// family: Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Thorium. Firefox, Safari and the rest
-// have no app mode and do not match.
-var chromiumName = regexp.MustCompile(`(?i)(chrome|chromium|brave|msedge|microsoft-edge|com\.microsoft\.edge|vivaldi|opera|thorium)`)
+// newWindowName matches the executable names, flatpak app ids and snap names of the browsers
+// known to take --new-window <url>: the Chromium family (Chrome, Chromium, Brave, Edge, Vivaldi,
+// Opera, Thorium) and the Firefox family (Firefox, LibreWolf, Waterfox, Floorp, Zen). Safari and
+// the rest are not in it and get the ordinary opener. "zen" must stand as a word of its own
+// (zen, zen-browser, app.zen_browser.zen), so zenity and the like do not match.
+var newWindowName = regexp.MustCompile(`(?i)(chrome|chromium|brave|msedge|microsoft-edge|com\.microsoft\.edge|vivaldi|opera|thorium|firefox|librewolf|waterfox|floorp|(^|[^a-z])zen([^a-z]|$))`)
 
-// PopupCommand turns a browser's launch line (a .desktop Exec value, or a Windows shell\open\command)
-// into the command that opens addr as a popup: the line with its file and URL placeholders
-// removed, then --app=<addr> --window-size=<w>,<h>. ok is false when the line is empty or the
-// browser is not Chromium family.
-func PopupCommand(line, addr string, w, h int) (argv []string, ok bool) {
+// WindowCommand turns a browser's launch line (a .desktop Exec value, or a Windows
+// shell\open\command) into the command that opens addr in a new window: the line with its file
+// and URL placeholders removed, then --new-window <addr>. ok is false when the line is empty or
+// the browser is not one that takes --new-window.
+func WindowCommand(line, addr string) (argv []string, ok bool) {
 	toks := splitLine(line)
 	var out []string
 	skipping := false // inside a flatpak "@@u ... @@" file-forwarding span
@@ -71,23 +73,25 @@ func PopupCommand(line, addr string, w, h int) (argv []string, ok bool) {
 			continue
 		case skipping:
 			continue
-		case isFieldCode(t), t == "--single-argument":
+		// Windows registry lines end in the way a link is handed over: Edge --single-argument "%1",
+		// Chrome -- "%1", Firefox -osint -url "%1". Those words must go with the placeholder.
+		case isFieldCode(t), t == "--single-argument", t == "--", t == "-osint", t == "-url":
 			continue
 		}
 		if t = stripFieldCodes(t); t != "" {
 			out = append(out, t)
 		}
 	}
-	if len(out) == 0 || !isChromium(out) {
+	if len(out) == 0 || !takesNewWindow(out) {
 		return nil, false
 	}
-	return append(out, "--app="+addr, "--window-size="+strconv.Itoa(w)+","+strconv.Itoa(h)), true
+	return append(out, "--new-window", addr), true
 }
 
-// isChromium: the launcher itself (first word), or, for "flatpak run <app-id>" and
-// "snap run <name>", the app it runs, is a Chromium-family name. Options after that, such as
+// takesNewWindow: the launcher itself (first word), or, for "flatpak run <app-id>" and
+// "snap run <name>", the app it runs, is a name in newWindowName. Options after that, such as
 // flatpak's --command=/app/bin/chrome, are not looked at: they name no other browser.
-func isChromium(argv []string) bool {
+func takesNewWindow(argv []string) bool {
 	base := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(argv[0], `\`, "/"))), ".exe")
 	switch base {
 	case "flatpak", "snap", "env":
@@ -95,11 +99,11 @@ func isChromium(argv []string) bool {
 			if a == "run" || strings.HasPrefix(a, "-") || strings.Contains(a, "=") {
 				continue
 			}
-			return chromiumName.MatchString(a) // the first word that names the app
+			return newWindowName.MatchString(a) // the first word that names the app
 		}
 		return false
 	}
-	return chromiumName.MatchString(base)
+	return newWindowName.MatchString(base)
 }
 
 func isFieldCode(t string) bool {
@@ -173,25 +177,32 @@ func DesktopExec(desktop string) string {
 	return ""
 }
 
-// macBrowsers maps a macOS bundle id (lower case) to the app name `open -a` takes.
+// macBrowsers maps a macOS bundle id (lower case) to the app name `open -a` takes: the browsers
+// above that can be named. Safari is not here, and so is opened the ordinary way.
 var macBrowsers = map[string]string{
-	"com.google.chrome":       "Google Chrome",
-	"com.google.chrome.beta":  "Google Chrome Beta",
-	"org.chromium.chromium":   "Chromium",
-	"com.microsoft.edgemac":   "Microsoft Edge",
-	"com.brave.browser":       "Brave Browser",
-	"com.vivaldi.vivaldi":     "Vivaldi",
-	"com.operasoftware.opera": "Opera",
+	"com.google.chrome":                   "Google Chrome",
+	"com.google.chrome.beta":              "Google Chrome Beta",
+	"org.chromium.chromium":               "Chromium",
+	"com.microsoft.edgemac":               "Microsoft Edge",
+	"com.brave.browser":                   "Brave Browser",
+	"com.vivaldi.vivaldi":                 "Vivaldi",
+	"com.operasoftware.opera":             "Opera",
+	"org.mozilla.firefox":                 "Firefox",
+	"org.mozilla.firefoxdeveloperedition": "Firefox Developer Edition",
+	"io.gitlab.librewolf-community":       "LibreWolf",
+	"net.waterfox.waterfox":               "Waterfox",
+	"one.ablaze.floorp":                   "Floorp",
+	"app.zen-browser.zen":                 "Zen",
 }
 
-// MacPopupCommand is the popup command for a default browser given by its bundle id: open -na
-// "<app>" --args --app=... ; ok is false for any browser that is not a known Chromium one.
-func MacPopupCommand(bundleID, addr string, w, h int) ([]string, bool) {
+// MacWindowCommand is the new-window command for a default browser given by its bundle id: open
+// -na "<app>" --args --new-window <addr> ; ok is false for any browser not in macBrowsers.
+func MacWindowCommand(bundleID, addr string) ([]string, bool) {
 	app, ok := macBrowsers[strings.ToLower(strings.TrimSpace(bundleID))]
 	if !ok {
 		return nil, false
 	}
-	return []string{"open", "-na", app, "--args", "--app=" + addr, "--window-size=" + strconv.Itoa(w) + "," + strconv.Itoa(h)}, true
+	return []string{"open", "-na", app, "--args", "--new-window", addr}, true
 }
 
 // macHandlerID reads the https handler's bundle id out of `defaults read ... LSHandlers` text.

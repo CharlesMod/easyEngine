@@ -37,12 +37,6 @@ type API struct {
 	stopping atomic.Bool
 	// settingsMu serialises the read-merge-write of a partial settings update.
 	settingsMu sync.Mutex
-	// OpenURL opens a web address in the user's default browser (POST chat/open); default
-	// openfile.OpenURL. A test replaces it.
-	OpenURL func(url string) error
-	// ChatAddr is the engine's own listen address, host:port, which POST chat/open opens. It is
-	// never taken from the request, whose Host header the caller controls. Empty: chat/open answers 503.
-	ChatAddr string
 	// heard, when set, stands in for S.Heard (a test counts the calls).
 	heard func()
 	// Client is used by POST test (default: a plain client with no overall timeout).
@@ -133,10 +127,6 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch name {
-	case "chat/open":
-		if need("POST") {
-			a.chatOpen(w, r)
-		}
 	case "status":
 		if need("GET") {
 			st := a.S.Status()

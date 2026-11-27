@@ -135,7 +135,10 @@ type Config struct {
 	AgentEnv    []string // appended to the agent's environment (tests)
 	LlamaPort   int      // 0: pick a free port
 	NoAutoStart bool     // do not start llama-server or the agent by itself (CLI install/import)
-	Parents     func() []int
+	// StartSleeping: the app waits for a connection; Run loads no model (phase "sleeping",
+	// "Model not loaded") and the first Wake, Start or request at the door loads it.
+	StartSleeping bool
+	Parents       func() []int
 
 	// Timing. Tests shrink these. Each is one of the three honest timers (docs/EVENTS.md section
 	// 1): a watchdog for silence, a network timeout or a named moment.

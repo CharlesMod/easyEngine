@@ -251,7 +251,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		prof = p
 	}
 	w := lifecycle.NewWatcher()
-	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs}
+	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident} // the app waits for a connection
 	if o.Yield != nil {
 		y := *o.Yield
 		y.Except = append(append([]string{}, y.Except...), prof.YieldExcept...)
@@ -338,6 +338,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	if o.Resident {
 		if len(o.ParentPIDs) > 0 { // parents given on the command line count as the first connection
 			attached <- struct{}{}
+			wakeForClient(sup) // and load the model for them, as an attach does
 		}
 		go residentLoop(wctx, w, sup, attached, func() time.Duration {
 			if o.LingerSet {

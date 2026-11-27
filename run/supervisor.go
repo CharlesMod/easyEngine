@@ -196,6 +196,9 @@ type Supervisor struct {
 	door door
 	card *roomWatch
 	sf   settingsFile // settings.json as the engine follows it (run/settings.go)
+	// deferred: started asleep (Config.StartSleeping); the agent and an unfinished upgrade wait
+	// for the first Start.
+	deferred atomic.Bool
 
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
@@ -663,7 +666,19 @@ func (s *Supervisor) setProgress(step string, p *Progress) {
 // It returns at once; Shutdown ends everything.
 func (s *Supervisor) Run() {
 	s.settle()
-	if !s.cfg.NoAutoStart {
+	switch {
+	case s.cfg.NoAutoStart:
+	case s.cfg.StartSleeping:
+		// the app waits for a connection: no model is loaded, and the agent and an unfinished
+		// upgrade wait for the first start too (Start runs them once)
+		s.deferred.Store(true)
+		s.mu.Lock()
+		asleep := s.phase == "starting" // installed, local, not stopped (settle)
+		s.mu.Unlock()
+		if asleep {
+			s.setPhase("sleeping", "Model not loaded")
+		}
+	default:
 		s.startAgent()
 		s.mu.Lock()
 		local := s.st.Mode == "local"
@@ -738,6 +753,10 @@ func (s *Supervisor) Start() error {
 	s.mu.Unlock()
 	if !local {
 		return nil
+	}
+	if s.deferred.Swap(false) { // the first start of an app that started asleep
+		s.startAgent()
+		s.resumeUpgrade()
 	}
 	if s.yielded() != nil {
 		return ErrYielded

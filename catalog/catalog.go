@@ -6,10 +6,13 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
@@ -151,7 +154,10 @@ func (c *Catalog) RuntimeFor(goos, goarch string) (RuntimeSize, bool) {
 	return RuntimeSize{}, false
 }
 
-// Parse decodes and sanity-checks a catalog document.
+// Parse decodes and validates a catalog document. Ids and file names become paths that are
+// created and deleted under the data dir, and urls are fetched, so a catalog is refused unless
+// every asset id, model id and model file is a plain name, every url is https (http only for a
+// loopback host) and every download has a sha256 and a size.
 func Parse(b []byte) (*Catalog, error) {
 	var c Catalog
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -160,24 +166,110 @@ func Parse(b []byte) (*Catalog, error) {
 	if c.Version <= 0 {
 		return nil, fmt.Errorf("catalog: missing version")
 	}
+	if err := c.validate(); err != nil {
+		return nil, fmt.Errorf("catalog: %w", err)
+	}
 	return &c, nil
 }
 
-// Load returns the embedded catalog, or <dataDir>/catalog.json when that file parses and its
-// version is higher. A broken override file is ignored.
+var (
+	plainName = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+	shaRE     = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
+
+func checkName(kind, v string) error {
+	if !plainName.MatchString(v) {
+		return fmt.Errorf("%s %q is not a plain name (letters, digits, . _ - only; no leading dot, no path separator)", kind, v)
+	}
+	return nil
+}
+
+func checkDownload(kind, id, url, sha string, size int64) error {
+	if url == "" {
+		return nil
+	}
+	u, err := neturl.Parse(url)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%s %q: bad url", kind, id)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		switch u.Hostname() {
+		case "127.0.0.1", "localhost", "::1":
+		default:
+			return fmt.Errorf("%s %q: url must be https", kind, id)
+		}
+	default:
+		return fmt.Errorf("%s %q: url must be https", kind, id)
+	}
+	if !shaRE.MatchString(sha) {
+		return fmt.Errorf("%s %q has a url but no valid sha256", kind, id)
+	}
+	if size <= 0 {
+		return fmt.Errorf("%s %q has a url but no positive size", kind, id)
+	}
+	return nil
+}
+
+func (c *Catalog) validate() error {
+	assets := append(append([]Asset{}, c.LlamaCpp.Assets...), c.UV...)
+	for _, a := range assets {
+		if err := checkName("asset id", a.ID); err != nil {
+			return err
+		}
+		if err := checkDownload("asset", a.ID, a.URL, a.SHA256, a.Size); err != nil {
+			return err
+		}
+	}
+	for _, m := range c.Models {
+		if err := checkName("model id", m.ID); err != nil {
+			return err
+		}
+		if err := checkName("model file", m.File); err != nil {
+			return err
+		}
+		if err := checkDownload("model", m.ID, m.URL, m.SHA256, m.Size); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var reported sync.Map // override-problem notes already logged
+
+// Load returns the embedded catalog, or <dataDir>/catalog.json when that file is valid and its
+// version is higher. An override that fails validation is ignored and logged once; LoadNote
+// returns the reason so a caller can show it.
 func Load(dataDir string) (*Catalog, error) {
+	c, note, err := LoadNote(dataDir)
+	if note != "" {
+		if _, seen := reported.LoadOrStore(note, true); !seen {
+			log.Printf("catalog: %s", note)
+		}
+	}
+	return c, err
+}
+
+// LoadNote is Load that also returns a note when an override file was ignored because it did not parse or validate.
+func LoadNote(dataDir string) (*Catalog, string, error) {
 	c, err := Parse(embedded)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if dataDir != "" {
-		if b, err := os.ReadFile(filepath.Join(dataDir, "catalog.json")); err == nil {
-			if o, err := Parse(b); err == nil && o.Version > c.Version {
-				return o, nil
+		path := filepath.Join(dataDir, "catalog.json")
+		if b, err := os.ReadFile(path); err == nil {
+			o, err := Parse(b)
+			if err != nil {
+				return c, fmt.Sprintf("%s was ignored: %v", path, err), nil
+			}
+			if o.Version > c.Version {
+				return o, "", nil
 			}
 		}
 	}
-	return c, nil
+	return c, "", nil
 }
 
 func (c *Catalog) Model(id string) (Model, bool) {

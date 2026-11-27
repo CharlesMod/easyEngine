@@ -68,9 +68,11 @@ func RewriteSampler(body []byte, mode string, prof catalog.SamplerProfile) ([]by
 	return out, true
 }
 
-// applySampler runs the policy over r (a completion request) and sets the Applied header on w.
-// It must run before the request is forwarded.
-func (a *API) applySampler(w http.ResponseWriter, r *http.Request) {
+// applySampler runs the policy over r (a completion request) and sets the Applied header on w
+// to what really happened: a profile and mode when the body was rewritten, else none;<reason>.
+// It must run before the request is forwarded. It returns false after answering 400 itself,
+// when the request body could not be read; the caller must not forward then.
+func (a *API) applySampler(w http.ResponseWriter, r *http.Request) bool {
 	asked := strings.TrimSpace(legacy.HeaderOr(r.Header, SamplerHeader, legacy.SamplerHeader))
 	name := strings.ToLower(asked)
 	r.Header.Del(SamplerHeader)
@@ -79,15 +81,15 @@ func (a *API) applySampler(w http.ResponseWriter, r *http.Request) {
 	set := func(v string) { legacy.SetApplied(w.Header(), AppliedHeader, v) }
 	if r.Method != http.MethodPost || !completionPath(r.URL.Path) {
 		set("none;not-a-completion")
-		return
+		return true
 	}
 	if info.Policy == run.PolicyOff {
 		set("none;off")
-		return
+		return true
 	}
 	if !info.Active {
 		set("none;" + info.Policy + ";unknown-model")
-		return
+		return true
 	}
 	prof, ok := info.Profiles[name]
 	if name == "" {
@@ -104,23 +106,27 @@ func (a *API) applySampler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		set("none;" + info.Policy + ";no-profile")
-		return
+		return true
 	}
-	set(name + ";" + info.Policy)
 	if r.Body == nil {
-		return
+		set("none;" + info.Policy + ";no-body")
+		return true
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSamplerBody))
 	r.Body.Close()
 	if err != nil {
-		r.Body = io.NopCloser(bytes.NewReader(nil))
-		return // the upstream will report the broken request
+		fail(w, http.StatusBadRequest, "could not read the request body: "+err.Error())
+		return false
 	}
 	if out, changed := RewriteSampler(body, info.Policy, prof); changed {
 		body = out
+		set(name + ";" + info.Policy)
+	} else {
+		set("none;" + info.Policy + ";body-not-json")
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	r.TransferEncoding = nil
+	return true
 }

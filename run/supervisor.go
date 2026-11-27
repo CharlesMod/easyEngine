@@ -224,8 +224,12 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	lg, _ := lifecycle.OpenLog(filepath.Join(cfg.DataDir, "logs", "engine.log"))
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: loadState(cfg.DataDir)}
+	st, note := loadState(cfg.DataDir)
+	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st}
 	s.agent.s = s
+	if note != "" {
+		s.addError("%s", note)
+	}
 	s.setPhaseLocked("not_installed", "No model installed")
 	return s, nil
 }

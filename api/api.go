@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/run"
@@ -24,8 +25,18 @@ type API struct {
 	Attach func(pid int) error
 	// Shutdown asks the process to exit (POST shutdown).
 	Shutdown func()
-	// AnyHost disables the Host-header check (set with --host for LAN use).
+	// AnyHost marks a non-loopback listener (--host): the Host header is not restricted, and a
+	// bearer token is required (Tokens) unless Open is set. A loopback listener checks the Host
+	// name and never asks for a token. See gate.go.
 	AnyHost bool
+	// Tokens decides which bearer tokens a non-loopback listener accepts.
+	Tokens Checker
+	// Open is the keeper's explicit choice (serve --open) to run a non-loopback listener with no token.
+	Open bool
+	// stopping is set once shutdown has begun: status says so and attach is refused.
+	stopping atomic.Bool
+	// settingsMu serialises the read-merge-write of a partial settings update.
+	settingsMu sync.Mutex
 	// Client is used by POST test (default: a plain client with no overall timeout).
 	Client *http.Client
 }
@@ -43,36 +54,24 @@ func Listen(host string, base int) (net.Listener, int, error) {
 	return nil, 0, last
 }
 
-// Handler is the whole HTTP surface.
+// SetStopping marks the engine as shutting down: GET status then says phase "stopping" and
+// POST attach answers 409, so a new serve waits for this engine to end instead of attaching to it.
+func (a *API) SetStopping() { a.stopping.Store(true) }
+
+// Handler is the whole HTTP surface; every path goes through the gate (gate.go).
 func (a *API) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/engine/"):
 			a.engine(w, r)
 		case r.URL.Path == "/" || r.URL.Path == "/index.html":
-			if !a.hostOK(r) {
-				http.Error(w, "bad host", http.StatusForbidden)
-				return
-			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.Write(web.Index)
 		default:
 			a.proxy(w, r)
 		}
-	})
-}
-
-func (a *API) hostOK(r *http.Request) bool {
-	if a.AnyHost {
-		return true
-	}
-	h := r.Host
-	if hh, _, err := net.SplitHostPort(h); err == nil {
-		h = hh
-	}
-	h = strings.Trim(h, "[]")
-	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+	}))
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -85,22 +84,12 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// csrfOK: every non-GET request needs X-Easy-Engine: 1, and an Origin, if
-// there is one, must be the engine's own.
+// csrfOK: every non-GET request needs X-Easy-Engine: 1 (a cross-site Origin is refused by the gate).
 func (a *API) csrfOK(r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return true
 	}
-	if !legacy.CSRFOK(r.Header, "X-Easy-Engine") {
-		return false
-	}
-	if o := r.Header.Get("Origin"); o != "" {
-		u, err := url.Parse(o)
-		if err != nil || u.Host != r.Host {
-			return false
-		}
-	}
-	return true
+	return legacy.CSRFOK(r.Header, "X-Easy-Engine")
 }
 
 func decode(r *http.Request, v any) error {
@@ -112,12 +101,8 @@ func decode(r *http.Request, v any) error {
 }
 
 func (a *API) engine(w http.ResponseWriter, r *http.Request) {
-	if !a.hostOK(r) {
-		fail(w, http.StatusForbidden, "bad host")
-		return
-	}
 	if !a.csrfOK(r) {
-		fail(w, http.StatusForbidden, "missing X-Easy-Engine header or foreign origin")
+		fail(w, http.StatusForbidden, "missing X-Easy-Engine header")
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/engine/v1/")
@@ -140,7 +125,11 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 	switch name {
 	case "status":
 		if need("GET") {
-			writeJSON(w, 200, a.S.Status())
+			st := a.S.Status()
+			if a.stopping.Load() {
+				st.Phase = "stopping"
+			}
+			writeJSON(w, 200, st)
 		}
 	case "hardware":
 		if need("GET") {
@@ -283,12 +272,15 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		case "GET":
 			writeJSON(w, 200, a.S.Settings())
 		case "PUT", "POST":
-			var in run.Settings
-			if err := decode(r, &in); err != nil {
+			var patch settingsPatch
+			if err := decode(r, &patch); err != nil {
 				fail(w, 400, err.Error())
 				return
 			}
-			if err := a.S.SetSettings(in); err != nil {
+			a.settingsMu.Lock()
+			err := a.S.SetSettings(patch.apply(a.S.Settings()))
+			a.settingsMu.Unlock()
+			if err != nil {
 				fail(w, 400, err.Error())
 				return
 			}
@@ -302,6 +294,10 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "attach":
 		if need("POST") {
+			if a.stopping.Load() {
+				fail(w, 409, "engine is stopping")
+				return
+			}
 			var in struct{ Pid int }
 			if err := decode(r, &in); err != nil || in.Pid <= 0 {
 				fail(w, 400, "body must be {\"pid\": n}")
@@ -330,6 +326,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shutdown":
 		if need("POST") {
+			a.SetStopping()
 			writeJSON(w, 200, map[string]string{"status": "shutting down"})
 			if a.Shutdown != nil {
 				go a.Shutdown()
@@ -370,4 +367,49 @@ func (a *API) test() TestResult {
 	done := a.S.Begin()
 	defer done()
 	return RunTest(rt.URL+"/v1", st.Model, "", send)
+}
+
+// settingsPatch is a PUT settings body: only the fields it names change. An explicit empty
+// external.base_url clears it; clear_api_key: true clears the key; external.api_key "" leaves it.
+type settingsPatch struct {
+	Mode     *string `json:"mode"`
+	External *struct {
+		BaseURL *string `json:"base_url"`
+		Model   *string `json:"model"`
+		APIKey  *string `json:"api_key"`
+	} `json:"external"`
+	ClearAPIKey   *bool   `json:"clear_api_key"`
+	LingerS       *int    `json:"linger_s"`
+	KVType        *string `json:"kv_type"`
+	SamplerPolicy *string `json:"sampler_policy"`
+}
+
+// apply lays the named fields over the current settings (whose api key is blank: SetSettings
+// keeps the stored key unless it is given a new one or told to clear it).
+func (p settingsPatch) apply(cur run.Settings) run.Settings {
+	if p.Mode != nil {
+		cur.Mode = *p.Mode
+	}
+	if e := p.External; e != nil {
+		if e.BaseURL != nil {
+			cur.External.BaseURL = *e.BaseURL
+		}
+		if e.Model != nil {
+			cur.External.Model = *e.Model
+		}
+		if e.APIKey != nil {
+			cur.External.APIKey = *e.APIKey
+		}
+	}
+	cur.ClearAPIKey = p.ClearAPIKey != nil && *p.ClearAPIKey
+	if p.LingerS != nil {
+		cur.LingerS = *p.LingerS
+	}
+	if p.KVType != nil {
+		cur.KVType = *p.KVType
+	}
+	if p.SamplerPolicy != nil {
+		cur.SamplerPolicy = *p.SamplerPolicy
+	}
+	return cur
 }

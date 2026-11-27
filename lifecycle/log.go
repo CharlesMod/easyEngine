@@ -21,6 +21,7 @@ type LogSink struct {
 	mu   sync.Mutex
 	path string
 	f    *os.File
+	lost bool // a reopen failed; Write tries again
 	size int64
 	ring []byte
 	hook func(line string) // called with each complete line, under mu (keep it short)
@@ -80,13 +81,18 @@ func (s *LogSink) Write(p []byte) (int, error) {
 	if len(s.ring) > 2*ringSize {
 		s.ring = append([]byte(nil), s.ring[len(s.ring)-ringSize:]...)
 	}
-	if s.f != nil {
-		if s.size >= MaxLogSize {
-			s.f.Close()
-			if err := s.open(); err != nil {
-				return len(p), nil
-			}
+	if s.f != nil && s.size >= MaxLogSize {
+		s.f.Close()
+		s.f = nil
+		s.lost = true
+	}
+	if s.f == nil && s.lost {
+		// The last reopen failed: try again on this write rather than dropping the file for good.
+		if err := s.open(); err == nil {
+			s.lost = false
 		}
+	}
+	if s.f != nil {
 		n, _ := s.f.Write(p)
 		s.size += int64(n)
 	}
@@ -128,6 +134,7 @@ func (s *LogSink) Close() error {
 		s.f = nil
 		return err
 	}
+	s.lost = false
 	return nil
 }
 

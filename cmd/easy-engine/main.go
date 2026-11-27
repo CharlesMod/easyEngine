@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -20,7 +21,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/dirs"
-	"github.com/CharlesMod/easyEngine/internal/legacy"
+	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
@@ -48,6 +49,7 @@ func usage() {
                         [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                          [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
   easy-engine setup   [--profile F]
+  easy-engine token   [--new]
   easy-engine probe
   easy-engine plan    [--profile F]
   easy-engine gpu     [--profile F] [--host-pid N] [--json]
@@ -64,6 +66,14 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	switch cmd {
+	case "serve", "setup", "install", "import", "token":
+		// The engine deletes inside its data dir, so a dir it does not own is refused up front.
+		if err := dirs.Check(); err != nil {
+			fmt.Fprintln(os.Stderr, "easy-engine:", err)
+			os.Exit(2)
+		}
+	}
 	var code int
 	switch cmd {
 	case "serve":
@@ -80,6 +90,8 @@ func main() {
 		code = cmdInstall(args)
 	case "import":
 		code = cmdImport(args)
+	case "token":
+		code = cmdToken(args)
 	case "status":
 		code = cmdStatus()
 	case "stop":
@@ -103,7 +115,8 @@ func cmdServe(args []string, setup bool) int {
 	fs := newFlags("serve")
 	profile := fs.String("profile", "", "game profile file")
 	port := fs.Int("port", 0, "control API port (default 47480)")
-	host := fs.String("host", "127.0.0.1", "listen address")
+	host := fs.String("host", "127.0.0.1", "listen address (beyond loopback every request needs the bearer token: easy-engine token)")
+	open := fs.Bool("open", false, "with a non-loopback --host: no token at all (anyone who can reach the port can use the engine)")
 	linger := fs.Duration("linger", 0, "keep running this long after the last parent exits")
 	var parents pidList
 	fs.Var(&parents, "parent-pid", "game pid to watch (repeatable)")
@@ -141,12 +154,14 @@ func cmdServe(args []string, setup bool) int {
 	o := app.Options{
 		Yield:       yc,
 		ProfilePath: *profile, ParentPIDs: parents, Host: *host, Port: *port,
-		Linger: *linger, LingerSet: lingerSet, Version: version,
+		Linger: *linger, LingerSet: lingerSet, Version: version, Open: *open,
 		DetachStdio: !setup,
 		Started: func(p int) {
 			if setup {
-				fmt.Printf("Setup page: http://127.0.0.1:%d/\n", p)
-				openBrowser(fmt.Sprintf("http://127.0.0.1:%d/", p))
+				// The token (if the engine needs one) rides in the opened URL's fragment only; it is not printed.
+				tg := app.EngineTarget(dirs.Data(), *host, p)
+				fmt.Printf("Setup page: %s/\n", tg.Base())
+				openBrowser(app.SetupURL(dirs.Data(), tg))
 			}
 		},
 	}
@@ -157,9 +172,9 @@ func cmdServe(args []string, setup bool) int {
 	}
 	if res.Attached {
 		if setup {
-			u := fmt.Sprintf("http://127.0.0.1:%d/", res.Port)
-			fmt.Println("Engine already running:", u)
-			openBrowser(u)
+			tg := app.EngineTarget(dirs.Data(), res.Host, res.Port)
+			fmt.Println("Engine already running:", tg.Base()+"/")
+			openBrowser(app.SetupURL(dirs.Data(), tg))
 		}
 		return 0
 	}
@@ -251,8 +266,8 @@ func cmdInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "install needs --model ID")
 		return 2
 	}
-	if port, ok := app.Running(dirs.Data()); ok {
-		return installVia(port, *model, *backend)
+	if tg, ok := app.Find(dirs.Data()); ok {
+		return installVia(tg, *model, *backend)
 	}
 	s, err := supervisor(*profile, true)
 	if err != nil {
@@ -275,12 +290,14 @@ func cmdInstall(args []string) int {
 	return waitBar(done, func() run.Status { return s.Status() })
 }
 
-func installVia(port int, model, backend string) int {
+func installVia(tg app.Target, model, backend string) int {
 	c := &http.Client{Timeout: 10 * time.Second}
-	base := fmt.Sprintf("http://127.0.0.1:%d/engine/v1/", port)
 	body, _ := json.Marshal(map[string]string{"model": model, "backend": backend})
-	req, _ := http.NewRequest("POST", base+"install", bytes.NewReader(body))
-	legacy.MarkRequest(req.Header, "X-Easy-Engine")
+	req, err := tg.NewRequest("POST", "/engine/v1/install", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
@@ -293,23 +310,43 @@ func installVia(port int, model, backend string) int {
 		fmt.Fprintf(os.Stderr, "install: %s %s\n", resp.Status, b)
 		return 1
 	}
-	get := func() run.Status {
+	// get reads the engine's status; a transport error, a non-200 answer or an unreadable body
+	// is an error (a dead engine must not look like a finished install).
+	get := func() (run.Status, error) {
 		var st run.Status
-		if r, err := c.Get(base + "status"); err == nil {
-			json.NewDecoder(r.Body).Decode(&st)
-			r.Body.Close()
+		req, err := tg.NewRequest("GET", "/engine/v1/status", nil)
+		if err != nil {
+			return st, err
 		}
-		return st
+		r, err := c.Do(req)
+		if err != nil {
+			return st, err
+		}
+		defer r.Body.Close()
+		if r.StatusCode != 200 {
+			return st, fmt.Errorf("status: %s", r.Status)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			return st, fmt.Errorf("status: %v", err)
+		}
+		return st, nil
 	}
 	done := make(chan error, 1)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		for {
-			st := get()
+			st, err := get()
+			if err != nil {
+				done <- fmt.Errorf("lost the engine: %v", err)
+				return
+			}
 			if st.Phase != "downloading" && st.Phase != "installing" {
-				if st.Phase == "error" {
+				switch st.Phase {
+				case "error":
 					done <- fmt.Errorf("%s", st.Message)
-				} else {
+				case "stopping":
+					done <- fmt.Errorf("the engine is stopping")
+				default:
 					done <- nil
 				}
 				return
@@ -317,7 +354,7 @@ func installVia(port int, model, backend string) int {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}()
-	return waitBar(done, get)
+	return waitBar(done, func() run.Status { st, _ := get(); return st })
 }
 
 func waitBar(done chan error, status func() run.Status) int {
@@ -392,15 +429,39 @@ func cmdImport(args []string) int {
 	return 0
 }
 
-func enginePort() (int, bool) { return app.Running(dirs.Data()) }
+func engineTarget() (app.Target, bool) { return app.Find(dirs.Data()) }
+
+// cmdToken prints the engine's bearer token (made if absent); --new replaces it.
+func cmdToken(args []string) int {
+	fs := newFlags("token")
+	fresh := fs.Bool("new", false, "replace the token with a new one (clients must be given the new one)")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	st := tokens.Open(dirs.Data())
+	var tok string
+	var err error
+	if *fresh {
+		tok, err = st.NewMaster()
+	} else {
+		tok, err = st.Master()
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "token:", err)
+		return 1
+	}
+	fmt.Println(tok)
+	return 0
+}
 
 func cmdStatus() int {
-	port, ok := enginePort()
+	tg, ok := engineTarget()
 	if !ok {
 		fmt.Println(`{"running": false}`)
 		return 1
 	}
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/engine/v1/status", port))
+	req, _ := tg.NewRequest("GET", "/engine/v1/status", nil)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -411,14 +472,13 @@ func cmdStatus() int {
 }
 
 func cmdStop() int {
-	d, err := lifecycle.ReadLock(dirs.Data() + string(os.PathSeparator) + "engine.lock")
-	port, ok := enginePort()
+	d, err := lifecycle.ReadLock(filepath.Join(dirs.Data(), "engine.lock"))
+	tg, ok := engineTarget()
 	if err != nil || !ok {
 		fmt.Println("No engine is running.")
 		return 0
 	}
-	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/shutdown", port), nil)
-	legacy.MarkRequest(req.Header, "X-Easy-Engine")
+	req, _ := tg.NewRequest("POST", "/engine/v1/shutdown", nil)
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -447,12 +507,10 @@ func cmdGPU(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var rep gpusense.GPUReport
-	if port, ok := enginePort(); ok {
-		base := fmt.Sprintf("http://127.0.0.1:%d/engine/v1/", port)
+	if tg, ok := engineTarget(); ok {
 		if *hostPID > 0 {
 			body := strings.NewReader(fmt.Sprintf(`{"pid": %d}`, *hostPID))
-			req, _ := http.NewRequest("POST", base+"host", body)
-			legacy.MarkRequest(req.Header, "X-Easy-Engine")
+			req, _ := tg.NewRequest("POST", "/engine/v1/host", body)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -464,7 +522,8 @@ func cmdGPU(args []string) int {
 				return 1
 			}
 		}
-		resp, err := http.Get(base + "gpu?refresh=1")
+		req, _ := tg.NewRequest("GET", "/engine/v1/gpu?refresh=1", nil)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1

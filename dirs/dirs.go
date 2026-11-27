@@ -2,6 +2,7 @@
 package dirs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,30 @@ func Migrate() string {
 	od := legacy.OldDefaultDir(runtime.GOOS, getenv, home)
 	_, note := legacy.Migrate(runtime.GOOS, getenv, HomeEnv, nd, od, legacy.OSFS{})
 	return note
+}
+
+// Check refuses a data dir override the engine must not own: the engine deletes inside its data
+// dir, so EASY_ENGINE_HOME (or the old variable) must be an absolute path that is neither a
+// filesystem root nor the user's home dir itself. Commands call it at start; Data stays free of
+// side effects. A default dir is always acceptable.
+func Check() error { return checkFor(os.Getenv, homeDir()) }
+
+func checkFor(getenv func(string) string, home string) error {
+	v := legacy.HomeOverride(getenv, HomeEnv)
+	if v == "" {
+		return nil
+	}
+	if !filepath.IsAbs(v) {
+		return fmt.Errorf("%s=%q is a relative path; use an absolute path to a directory the engine can own", HomeEnv, v)
+	}
+	c := filepath.Clean(v)
+	if c == filepath.VolumeName(c)+string(filepath.Separator) || filepath.Dir(c) == c {
+		return fmt.Errorf("%s=%q is a filesystem root; the engine deletes inside its data dir, so use a directory made for it", HomeEnv, v)
+	}
+	if h := filepath.Clean(home); home != "" && home != "." && c == h {
+		return fmt.Errorf("%s=%q is your home directory; the engine deletes inside its data dir, so use a directory made for it", HomeEnv, v)
+	}
+	return nil
 }
 
 func homeDir() string {

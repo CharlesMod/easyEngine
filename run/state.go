@@ -2,10 +2,14 @@ package run
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/lifecycle"
 )
 
 // External is the player's own OpenAI-compatible endpoint.
@@ -55,27 +59,51 @@ func (s *State) defaults() {
 	}
 }
 
-func loadState(dir string) State {
+// loadState reads state.json. A missing file is silently the defaults. A file that exists but
+// does not parse is renamed aside to state.json.corrupt-<unix seconds> (never deleted, never
+// overwritten) and note says so; the caller reports it.
+func loadState(dir string) (State, string) {
 	var st State
-	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil {
-		json.Unmarshal(b, &st)
+	var note string
+	path := filepath.Join(dir, "state.json")
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &st); err != nil {
+			st = State{}
+			aside := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+			// A second corrupt file in the same second must not replace the first.
+			for n := 1; ; n++ {
+				if _, err := os.Lstat(aside); err != nil {
+					break
+				}
+				aside = fmt.Sprintf("%s.corrupt-%d-%d", path, time.Now().Unix(), n)
+			}
+			if rerr := os.Rename(path, aside); rerr != nil {
+				note = fmt.Sprintf("settings file was unreadable (%v) and could not be set aside (%v)", err, rerr)
+			} else {
+				note = fmt.Sprintf("settings file was unreadable and was set aside as %s", aside)
+			}
+		}
 	}
 	st.defaults()
-	return st
+	return st, note
 }
+
+// stateMu serialises every write of state.json in the process.
+var stateMu sync.Mutex
 
 func writeState(dir string, st State) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	os.MkdirAll(dir, 0o755)
-	tmp := filepath.Join(dir, "state.json.tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(dir, "state.json"))
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return lifecycle.WriteFileAtomic(filepath.Join(dir, "state.json"), b, 0o600)
 }
 
+// Note puts a line in the status errors (something the player should read, for example a catalog
+// override that was ignored).
+func (s *Supervisor) Note(msg string) { s.addError("%s", msg) }
+
 // LoadState reads state.json from a data dir (tests and tools).
-func LoadState(dir string) State { return loadState(dir) }
+func LoadState(dir string) State { st, _ := loadState(dir); return st }

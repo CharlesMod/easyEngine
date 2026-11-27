@@ -368,7 +368,17 @@ func main() {
 	})
 	addr := vals["--host"] + ":" + vals["--port"]
 	fmt.Println("fakellama: listening on", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,
+	// so the engine's proxy tests can check it neither leaks nor lets CORS through.
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" {
+			w.Header().Set("Access-Control-Allow-Origin", o)
+		}
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("X-Fake-Saw-Authorization", r.Header.Get("Authorization"))
+		mux.ServeHTTP(w, r)
+	})
+	if err := http.ListenAndServe(addr, wrapped); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

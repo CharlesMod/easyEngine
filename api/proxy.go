@@ -40,6 +40,8 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	done := a.S.Begin() // count first, so a resize cannot slip in between Route and the forward
 	defer done()
+	id := requestID(r)
+	w.Header().Set(RequestIDHeader, id)
 	rt := a.S.Route()
 	switch rt.Kind {
 	case "unavailable":
@@ -85,7 +87,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(w, r)
+		forward(w, r, rp, a.fwd(true, id))
 	default:
 		target, err := url.Parse(rt.URL)
 		if err != nil {
@@ -106,7 +108,24 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		rp.ServeHTTP(w, r)
+		forward(w, r, rp, a.fwd(false, id))
+	}
+}
+
+// fwd is what the streamer needs of the supervisor for one request.
+func (a *API) fwd(external bool, id string) fwd {
+	return fwd{
+		on: true, external: external, id: id,
+		yielded: func() (bool, string) {
+			if a.S.Phase() != "yielded" {
+				return false, ""
+			}
+			// Route is asked only while yielded: then it answers from the yield and wakes nothing.
+			if rt := a.S.Route(); rt.Code == "yielded" {
+				return true, rt.Message
+			}
+			return false, ""
+		},
 	}
 }
 

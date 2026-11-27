@@ -82,6 +82,8 @@ fsync and rename:
   "sampler_policy": "enforce",
   "streamer": "on",
   "keep_context": "on",
+  "name": "",
+  "discovery": "on",
   "listen": {
     "host": "127.0.0.1",
     "port": 47480,
@@ -103,6 +105,10 @@ fsync and rename:
 - `mode` local or external; `external` the own endpoint (§7); `linger_s` how long the model
   stays loaded after the last client (§6); `kv_type` one of `q4_0 q8_0 f16 q4_1 q5_0 q5_1 iq4_nl
   bf16 f32`; `sampler_policy` `enforce`, `fill` or `off`.
+- `name` is this engine's human name for clients on the network (hello, the mDNS name; at most
+  63 bytes); empty means the host name. `discovery` `on` (default) or `off`: the mDNS announce of
+  a non-loopback listener (§7f). Both take effect when the file is saved (the responder is
+  started, renamed or stopped on the reload).
 - `listen` is the control API's address (`host`, first `port`, `open` = no token on a
   non-loopback host, like `--open`, §7); `yield` mirrors the `--yield-*` flags and their
   defaults (§6b). `except` and `ignore` are lists of strings. Missing keys keep their default,
@@ -807,8 +813,13 @@ order:
    else **403**. This stops DNS rebinding.
 2. An `Origin` that is not the engine's own, or a `Sec-Fetch-Site` other than `same-origin` or
    `none`, is refused with **403**, GET included. Every `OPTIONS` request is refused with 403.
-3. A non-loopback listener needs the bearer token (below); else **401** with
-   `WWW-Authenticate: Bearer`.
+3. A non-loopback listener needs a bearer token (below); else **401** with
+   `WWW-Authenticate: Bearer` and the body
+   `{"error":"bearer token required (easy-engine token prints it)","code":"<code>"}`, where code is
+   `token_required` (no bearer sent), `token_revoked` (a token this engine issued and then revoked:
+   pair again) or `token_invalid` (a token it does not know). The status and the message are as
+   before; `code` is a new field. The keyless paths of §7f (hello, and the client's side of
+   pairing) are the exception: they need no token and never answer 401.
 
 A loopback listener never asks for a token. The proxy drops every `Access-Control-*` header the
 upstream sent, so a model server cannot grant a web page access, and it never passes the
@@ -817,9 +828,14 @@ client's `Authorization` header to the local llama-server.
 **Token.** When the listener is not loopback (`--host` names another address), the engine makes
 a token on first use: 32 random bytes, base64url (43 characters), stored in the data dir as
 `tokens.json` at mode 0600. The file holds `master` (the token in clear) and `tokens`, a list of
-`{id, name, created, sha256}` entries for tokens issued later (nothing issues them yet). Every
-request must send `Authorization: Bearer <token>`; the check is constant-time. `easy-engine token`
-prints the master token (making it if needed); `easy-engine token --new` replaces it. The engine's
+`{id, name, created, sha256}` entries for the tokens pairing issued (§7f; the token itself is
+never kept, only its hash), and `revoked`, the same entries with a `revoked` time, so a revoked
+token is told apart from an unknown one. Every request must send `Authorization: Bearer <token>`;
+every comparison is constant-time. `easy-engine token` prints the master token (making it if
+needed); `easy-engine token --new` replaces it (paired clients keep their own tokens);
+`easy-engine token --list` lists the paired clients (id, name, created; never a token or a hash;
+last use is not recorded, it would mean a file write per request); `easy-engine token --revoke
+<id>` revokes one, at once (the file is read on every check). The engine's
 own clients (`status`, `stop`, `gpu`, `install`, a second `serve`) read the token from the file and
 find the listen host in the lock. In external mode the engine's token is never sent on to the
 external endpoint.
@@ -845,6 +861,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `GET facts` | everything that stands on the engine's hub: `{life, seq, facts: [Event], readings: [Event]}` (§7e) |
 | `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
 | `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
+| `GET hello`, `POST pair`, `GET`/`DELETE pair/{id}`, `GET pairing`, `POST pairing/answer` | who this engine is, and pairing a client on the network (§7f); the first four need no token |
 | `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
@@ -1060,7 +1077,7 @@ The engine says what happens on its hub (docs/EVENTS.md §2): facts that stand u
 said gone, readings (levels said when they change) and happenings (history). The names are in
 `GET book` (`run/book.go`): `engine` `{version, api, port}`, `phase` `{phase, message}`, `model`,
 `door` `{held}`, `mind.shape`, `mind.device`, `job`, `install.progress`, `upgrade`, `yield`,
-`recovery`, `room`, `agent` (keyed), and the happenings `request`, `error`, `nudge`, `mind.exit`,
+`recovery`, `room`, `agent` (keyed), `pairing` (keyed, §7f), `client` (keyed, §7f), and the happenings `request`, `error`, `nudge`, `mind.exit`,
 `mind.hang`, `mind.oom`, `network`, `mark`. No secret is ever on the stream (the external API key
 and the tokens are in no fact). The three paths pass the same gate and token as every other.
 
@@ -1123,6 +1140,142 @@ answered when the model is ready, instead of a 503:
 - The phase is said **before** a stop begins (yield, sleep, a person's stop, shutdown): a request
   that arrives during the stop is answered by that phase (yielded, held to wake again, 503), never
   proxied to a server being stopped. `stopping` is now said on the stream by the engine itself.
+
+### 7f. Hello, discovery and pairing (a client on another machine)
+
+A game on one machine and the engine on another (the PC with the card): the client finds the
+engine on the local network and pairs by comparing a six-digit code. Nothing is typed from one
+device into another. Packages `discover` (mDNS), `pair` (the requests), `api/pair.go` (the paths).
+
+**Hello.** `GET /engine/v1/hello` needs no token on any listener and never answers 401 (the
+host, origin and preflight rules of the gate still apply). 200:
+
+```json
+{"name":"den-pc","engine":"easy-engine","api":1,"version":"0.4.0","engine_id":"9f2c...32 hex",
+ "model_name":"Gemma 4 26B","phase":"ready","card":"NVIDIA GeForce RTX 4080",
+ "pairing":true,"token_required":true}
+```
+
+`name` is the `name` setting or the host name; `engine_id` is a stable random id made once and
+kept in `<data dir>/engine-id`; `model_name` the human name of the selected model (its id when it
+has none); `card` the adapter the engine uses ("" before the first reading, or on CPU);
+`pairing` is true only on a non-loopback listener with tokens in force; `token_required` the same
+condition without the pairer. With an `Authorization: Bearer` header the engine checks: a valid
+token adds `"paired":true,"client_id":"<id>"` (`"master"` for the master token); a revoked one
+`"paired":false,"revoked":true`; an unknown one `"paired":false`. Hello carries no paths, no user
+name, no tokens and no client list.
+
+**Discovery.** While the listener is not loopback (not `127.0.0.0/8`, `::1` or `localhost`) and
+the `discovery` setting is on, the engine announces itself by mDNS/DNS-SD and answers queries,
+on `224.0.0.251:5353` and `[ff02::fb]:5353` on every up, multicast-capable interface:
+
+- service `_easy-engine._tcp.local.`; instance `<name> [<engine_id[:6]>]._easy-engine._tcp.local.`;
+  SRV target `easy-engine-<engine_id[:8]>.local.` on the listening port (never the machine's own
+  host name, which the system's responder owns), with A/AAAA records for it;
+- TXT `id=<engine_id>`, `api=<n>`, `name=<name>`, nothing else.
+
+It announces at start and when the system says the network changed (`host.NetworkChanges`),
+answers each query that asks for it (by unicast to a querier on another port than 5353, RFC 6762
+§6.7, or that sets the QU bit), re-announces on a rename, and says goodbye (TTL 0) when turned off
+and on Quit. There is no timed repeat. A loopback listener announces nothing.
+`easy-engine find` sends one query from an ephemeral port and lists what answers within
+`--wait` (a network timeout):
+
+```
+NAME    ADDRESS             ENGINE ID                         API
+den-pc  192.168.1.20:47480  9f2c4e...                         1
+```
+
+(`--json`: `[{"name","engine_id","api","address","host"}]`; with none: `No engine answered on
+this network.`)
+
+**Pairing.** Offered only when `hello.pairing` is true (a non-loopback listener with tokens; with
+`--open` there is nothing to pair for, and `POST pair` answers 404 `pairing_off`). The client's
+side needs no token; non-GET calls carry `X-Easy-Engine: 1` like every other.
+
+| Method, path | Answers |
+|---|---|
+| `POST pair {name}` | 200 `{"id":"<32 hex, secret>","code":"493201"}`. `name` is the client's name for itself, shown to the person: control and format characters dropped, spaces folded, at most 40 characters (`unnamed client` when empty). 404 `{"error","code":"pairing_off"}` where pairing is not offered; 400 `{"error","code":"bad_request"}` for a body that is not `{name}` JSON (capped at 4 KiB); 410 `pair_gone` while the engine ends; 500 `{"error","code":"pair_failed"}` if the engine could not open it. A new ask from an address that already has a request waiting replaces it: the old `id`'s GET gets 410 |
+| `GET pair/{id}` | held until the person answers. 200 `{"token","client_id","engine_id"}` on Allow: the token is issued now and shown this once; 403 `{"error","code":"pair_denied"}` on Deny; 410 `{"error","code":"pair_gone"}` when the request is gone: collected already, withdrawn, pushed out by the cap, never known, replaced by a newer ask from the same address, or the engine restarted or quit; 500 `{"error","code":"issue_failed"}` when the token could not be written (the Allow stands: GET again). A client that hangs up leaves its request waiting and may GET it again |
+| `DELETE pair/{id}` | the client withdraws for good: 204; 410 `pair_gone` if unknown |
+| `GET pairing` | the person's side (loopback listener or the master token only; else 403 `not_allowed`, and 401 with no token on the network): 200 `{"offered":bool,"requests":[{"key","name","code","from","quiet"?}]}`, oldest first; `quiet: true` on a request from an address the person denied in this life |
+| `POST pairing/answer {key?, code, allow}` | the same rule: the answer names the `code` the person compared, with the request's `key` beside it when the caller has it (the page and the tray do; `easy-engine pair` answers by code alone). 200 `{"key","name","code","allowed"}`; 404 no waiting request with that key or code; 409 `{"error","code":"pair_changed"}` when the key's request now shows another code (its source asked again since): nothing is answered, look again; 409 a code two requests show (by code alone); 400 without `code` or `allow` |
+
+A request waits until it is answered, withdrawn, replaced or pushed out. One source address has
+at most one waiting request: a new ask from it replaces the old one (whose held GET gets 410)
+under the same public `key`, with a new code and id, so the person is not notified again. Because
+the key outlives a replacement, every answer binds to the code the person saw: an Allow or Deny
+named for the old code is refused (`pair_changed`), ends nothing and issues nothing; the person
+looks again at the new code. At most
+4 wait across sources, and a new one over that pushes the oldest out. Answered requests not yet
+collected are capped at 4 the same way. Once the person has denied a request from an address, that
+address's later requests in this life are still listed but marked `quiet` and raise no
+notification. There is no expiry timer and no rate clock: counts bound it. The code is drawn so
+no two waiting requests show the same one. `key` is a public handle for the person's side (the
+fact is keyed by it); the secret `id` is never said on the hub. A keyless path's error bodies are
+fixed text with a code; the detail of an internal error (which could name the data dir) goes only
+to the engine's log.
+
+Where the person answers:
+
+- the setup page: a Pairing card with the code, the name, the address it came from, and Allow /
+  Deny, shown while a request waits (it reads `GET pairing` when a `pairing` event arrives);
+- the tray: one notification per request not yet answered (none for a `quiet` one, none for a
+  replacement by the same address), `Allow <name> (493 201)?`, and while it waits two menu
+  items above the standing four, `Allow <name> (493 201)` and `Deny <name> (493 201)`;
+- headless: `easy-engine pair` lists them (`CODE  NAME  FROM`, or `No pairing request is
+  waiting.`), `easy-engine pair --approve 493201` / `--deny 493201` answer one (spaces in the code
+  are ignored; exit 1 with `pair: no waiting request shows 493 201`, or `pair: two waiting requests
+  show 493 201; answer on the setup page or in the tray`). They reach the running engine through
+  the lock with the master token.
+
+The hub says a waiting request as the fact `pairing` (key: its `key`; body `{name, code, from,
+quiet}`; said again on a replacement; gone when answered, withdrawn or pushed out), and a paired
+client the first time the gate accepts its token in a life as the fact `client` (key: its client
+id; body `{name}`), gone as soon as its token no longer stands: the app follows `tokens.json`
+(`host.Changes`), so `easy-engine token --revoke` takes it down at once. Neither ever carries a
+token.
+
+**A client's recipe, from find to paired.**
+
+1. Find: browse `_easy-engine._tcp.local.` (or ask the person to run `easy-engine find`); take
+   the address and port from SRV/A, and `id` from TXT. Remember the engine by its `engine_id`, not
+   its address.
+2. `GET /engine/v1/hello` there: check `engine == "easy-engine"`, `api >= 1`. If you hold a token
+   for this `engine_id`, send it: `paired: true` means use it; `revoked: true` means drop it and
+   pair again; `paired: false` means it is not known here.
+3. If `pairing` is true: `POST /engine/v1/pair {"name":"<your name>"}` with `X-Easy-Engine: 1`;
+   show the `code` large ("493 201") with "Compare this code with the one on the engine's screen
+   and press Allow there".
+4. `GET /engine/v1/pair/<id>` and wait (no timeout of your own needed; if the connection drops,
+   GET again). 200: keep `token` with `engine_id`, send it as `Authorization: Bearer` on every
+   call. 403: the person denied it. 410: start again from 3. When the person cancels on your
+   side, `DELETE /engine/v1/pair/<id>`.
+5. A later 401 with `code: token_revoked` means pair again; `token_invalid` means the engine does
+   not know this token (another engine at this address, or its file was replaced).
+
+**Security.** What an unauthenticated host on the LAN can now do, and its bound:
+
+- `hello`: read the engine's name, id, version, phase, model name and card name. Nothing secret;
+  no paths, user name, tokens or client list.
+- mDNS: see the same name, id and port; its queries are answered, each with one small packet.
+- `POST pair`: open a request, which shows a name it chose on the person's screen. One address
+  has one waiting request (a flood from it only replaces its own, under the same key) and raises
+  one notification until the person answers; after a Deny, none at all. At most 4 wait across
+  addresses. The name is cleaned and capped. (A host that can take many addresses on the LAN can
+  still raise one notification per address; that is the bound.)
+- Error bodies on these paths are fixed text: no file system or OS error reaches the network.
+- It cannot answer a request: answering needs a loopback listener or the master token; a paired
+  client's token is refused (403), and so is anything without a token from the network (401).
+- The six-digit code is a comparison code, not a secret: the client and the engine both show
+  it so the person can tell the right request from another; nothing accepts it as proof, and the
+  only path that takes a code (`pairing/answer`) is closed to the network.
+- The request `id` (128 random bits) is what collects the token; it is given only to the client
+  that asked, never said on the hub, never logged. A token travels once, in the 200 body of the
+  held GET (`Cache-Control: no-store`), and is never in a URL, a log line or an event. Only its
+  SHA-256 is kept. Every token comparison is constant-time.
+- On Quit every waiting request ends: held GETs are answered 410, the facts go, no token is
+  issued after, and the network hears the mDNS goodbye before the listener closes.
 
 ### The chat window
 
@@ -1254,7 +1407,10 @@ easy-engine plan    [--profile F]         prints the plan as JSON
 easy-engine gpu     [--profile F] [--host-pid N] [--json]   adapters, processes, reserve and free memory (§4a); asks a running engine, else senses here
 easy-engine install --model ID [--yes]    headless install with a text progress bar
 easy-engine import  PATH
-easy-engine token   [--new]               prints the bearer token for a non-loopback listener (§7); --new replaces it
+easy-engine token   [--new | --list | --revoke ID]   prints the master token for a non-loopback listener (§7); --new replaces it;
+                      --list shows the paired clients (id, name, created); --revoke ID revokes one (§7f)
+easy-engine find    [--wait D] [--json]   engines that answer one mDNS query on this network (default wait 2s) (§7f)
+easy-engine pair    [--approve CODE | --deny CODE]   lists the pairing requests waiting at the running engine, or answers one (§7f)
 easy-engine status | stop
 easy-engine version
 ```

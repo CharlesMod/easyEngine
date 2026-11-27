@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/CharlesMod/easyEngine/internal/tokens"
 )
 
 // Checker decides whether a bearer token is accepted and names the client it belongs to.
@@ -19,6 +21,7 @@ type ctxKey int
 const (
 	clientKey ctxKey = iota
 	bearerKey
+	verdictKey
 )
 
 // Client ids the gate attaches when no token named one.
@@ -104,7 +107,7 @@ func (a *API) gate(next http.Handler) http.Handler {
 			fail(w, http.StatusForbidden, "preflight refused")
 			return
 		}
-		client, used := ClientLoopback, false
+		client, used, verdict := ClientLoopback, false, tokenNone
 		switch {
 		case !a.AnyHost:
 		case a.Tokens != nil && setupPage(r):
@@ -113,22 +116,108 @@ func (a *API) gate(next http.Handler) http.Handler {
 			// the address. Every call the page makes goes through the token.
 			client = ClientPage
 		case a.Tokens != nil:
-			id, ok := a.Tokens.Check(bearerOf(r))
-			if !ok {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				fail(w, http.StatusUnauthorized, "bearer token required (easy-engine token prints it)")
+			bearer := bearerOf(r)
+			id, v := a.verify(bearer)
+			verdict = v
+			if v != tokenValid && keyless(r) {
+				// hello and the client's side of pairing need no token and never answer 401;
+				// hello says what it made of the token it was sent.
+				client = ""
+				break
+			}
+			switch v {
+			case tokenValid:
+			case tokenRevoked:
+				unauthorized(w, CodeTokenRevoked, "bearer token required (easy-engine token prints it)")
+				return
+			case tokenUnknown:
+				unauthorized(w, CodeTokenInvalid, "bearer token required (easy-engine token prints it)")
+				return
+			default:
+				unauthorized(w, CodeTokenRequired, "bearer token required (easy-engine token prints it)")
 				return
 			}
 			client, used = id, true
+			a.sawClient(id)
 		case a.Open:
 			client = ClientOpen
+		case keyless(r):
+			client = ""
 		default:
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			fail(w, http.StatusUnauthorized, "no token configured")
+			unauthorized(w, CodeTokenRequired, "no token configured")
 			return
 		}
 		ctx := context.WithValue(r.Context(), clientKey, client)
 		ctx = context.WithValue(ctx, bearerKey, used)
+		ctx = context.WithValue(ctx, verdictKey, verdict)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// The codes a 401 body carries beside its message: {"error": "<message>", "code": "<code>"}.
+const (
+	CodeTokenRequired = "token_required" // no bearer was sent
+	CodeTokenRevoked  = "token_revoked"  // the bearer was issued here and revoked: pair again
+	CodeTokenInvalid  = "token_invalid"  // the bearer is not one this engine knows
+)
+
+func unauthorized(w http.ResponseWriter, code, msg string) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msg, "code": code})
+}
+
+// What the gate made of a request's bearer.
+type tokenVerdict int
+
+const (
+	tokenNone    tokenVerdict = iota // none sent
+	tokenValid                       // accepted
+	tokenRevoked                     // issued here, then revoked
+	tokenUnknown                     // sent, not known
+)
+
+// Verifier is a Checker that also tells a revoked token from an unknown one
+// (internal/tokens.Store). A Checker without it never says revoked.
+type Verifier interface {
+	Verify(bearer string) (clientID string, v tokens.Verdict)
+}
+
+func (a *API) verify(bearer string) (string, tokenVerdict) {
+	if bearer == "" {
+		return "", tokenNone
+	}
+	if v, ok := a.Tokens.(Verifier); ok {
+		id, verdict := v.Verify(bearer)
+		switch verdict {
+		case tokens.Valid:
+			return id, tokenValid
+		case tokens.Revoked:
+			return id, tokenRevoked
+		}
+		return "", tokenUnknown
+	}
+	if id, ok := a.Tokens.Check(bearer); ok {
+		return id, tokenValid
+	}
+	return "", tokenUnknown
+}
+
+func verdictOf(ctx context.Context) tokenVerdict {
+	v, _ := ctx.Value(verdictKey).(tokenVerdict)
+	return v
+}
+
+// keyless: the paths a client on the network may call before it holds a token: hello, and its
+// own side of pairing (ask, collect, withdraw). The host, origin and preflight rules still apply.
+func keyless(r *http.Request) bool {
+	switch p := r.URL.Path; {
+	case p == "/engine/v1/hello":
+		return r.Method == http.MethodGet || r.Method == http.MethodHead
+	case p == "/engine/v1/pair":
+		return r.Method == http.MethodPost
+	case strings.HasPrefix(p, "/engine/v1/pair/"):
+		rest := strings.TrimPrefix(p, "/engine/v1/pair/")
+		return rest != "" && !strings.Contains(rest, "/") && (r.Method == http.MethodGet || r.Method == http.MethodDelete)
+	}
+	return false
 }

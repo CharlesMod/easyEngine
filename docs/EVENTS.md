@@ -65,7 +65,7 @@ type Event struct {
   for clients not yet moved. *Built* (ee-stream): the three paths are mounted behind the gate
   (`api/api.go`, `event/door.go`, unchanged: they agreed with this section); the `engine` fact and
   status carry `api: 1`; the `door` fact `{held}` is declared; docs/ENGINE.md §7e is the client's
-  contract. Not yet: `client` (a later slice); `context` is built (ee-cache, §6).
+  contract. `pairing` and `client` are said since ee-pair (§7); `context` is built (ee-cache, §6).
 - The first names: `engine` (version, api, port, build), `phase`, `model`, `mind.shape`,
   `mind.device`, `agent` (keyed by client), `client` (keyed), `install.progress` (reading, said per
   step of bytes, never per time), `upgrade`, `room` (reading: adapters, reserve, free for the model),
@@ -146,6 +146,23 @@ processed.
 - A listener that is not loopback requires a token on every request (`Authorization: Bearer`),
   made at first use and kept in the data dir (0600), shown by `easy-engine token`. `--open` turns
   that off by the keeper's own word.
+- A 401 body says why with a code beside its message: `token_required`, `token_revoked` (revoked
+  hashes are remembered in `tokens.json`) or `token_invalid`.
+- *Built* (ee-pair): **hello, discovery and pairing** (docs/ENGINE.md §7f). `GET hello` needs no
+  token and never 401s; it leaks nothing secret. A non-loopback listener announces
+  `_easy-engine._tcp` by mDNS (TXT `id`, `api`, `name`), at start, on `host.NetworkChanges` and
+  in answer to a query, never on a clock; the `discovery` setting turns it off. A client pairs
+  with `POST pair {name}` -> `{id, code}` and a held `GET pair/{id}`; the person compares the
+  six-digit code and answers on the setup page, in the tray or with `easy-engine pair`. Answering
+  needs loopback or the master token, never a paired client's token. No expiry timer and no rate
+  clock: one waiting request per source address (a new ask replaces it under the same key and is not notified again, so an answer names the code
+  the person compared and a stale one is refused, `pair_changed`; a
+  denied address is listed, never notified), at most 4 across addresses, the oldest pushed out. The token is issued per
+  client (hashed, named, listed, revocable) when the client collects an Allow, shown once, and
+  is never logged, in a URL or on the stream. The facts `pairing` (keyed by a public key, never
+  the secret request id) and `client` (keyed by client id, `{name}`), gone at once on a revoke (the app
+  follows `tokens.json`) say who waits and who
+  connected.
 - `PUT settings` changes only the fields it names. The lock is created with its content in one
   step. `state.json` has one writer, a unique temp file and an fsync; a file that does not parse is
   set aside and said as an error, never silently replaced.
@@ -181,5 +198,6 @@ connection.
   when the door is empty and no pid is attached, and a request or an attach cancels it. A mod does not start
   the engine with a parent pid any more: it finds the engine (the lock, hello), attaches with its
   profile, and only if none runs on its own machine starts the app detached.
-- The tray is also where a pairing request is answered (§7 and the pairing slice): a notification,
-  and an item "Allow <client> (493 201)?" while one waits.
+- The tray is also where a pairing request is answered (§7): a notification "Allow <client>
+  (493 201)?", and while one waits an Allow and a Deny item above the standing four. *Built*
+  (ee-pair).

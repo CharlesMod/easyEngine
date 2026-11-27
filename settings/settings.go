@@ -71,8 +71,13 @@ type File struct {
 	Streamer string `json:"streamer"`
 	// KeepContext is the context keeper: on (default) | off | always.
 	KeepContext string `json:"keep_context"`
-	Listen      Listen `json:"listen"`
-	Yield       Yield  `json:"yield"`
+	// Name is this engine's human name, shown to clients that find it on the network (hello, the
+	// mDNS name); empty is the host name.
+	Name string `json:"name"`
+	// Discovery is the mDNS/DNS-SD announce of a non-loopback listener: on (default) | off.
+	Discovery string `json:"discovery"`
+	Listen    Listen `json:"listen"`
+	Yield     Yield  `json:"yield"`
 }
 
 // KVTypes are the cache types llama-server takes.
@@ -87,10 +92,13 @@ var Streamers = []string{"on", "off"}
 // KeepContexts are the keep_context setting's values.
 var KeepContexts = []string{"on", "off", "always"}
 
+// NameMax caps the name setting, in bytes.
+const NameMax = 63
+
 // Defaults is every setting at its default.
 func Defaults() File {
 	return File{
-		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on", KeepContext: "on",
+		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on", KeepContext: "on", Discovery: "on",
 		Listen: Listen{Host: "127.0.0.1", Port: DefaultPort},
 		Yield:  Yield{Except: []string{}, Ignore: []string{}, FloorMiB: 128, GraceS: 15, SteadyS: 60},
 	}
@@ -131,6 +139,10 @@ func (f File) Validate() (key, why string) {
 		return "streamer", "streamer must be on or off"
 	case !in(KeepContexts, f.KeepContext):
 		return "keep_context", "keep_context must be on, off or always"
+	case f.Discovery != "" && !in(Streamers, f.Discovery):
+		return "discovery", "discovery must be on or off"
+	case len(f.Name) > NameMax:
+		return "name", fmt.Sprintf("name must be at most %d bytes", NameMax)
 	case f.LingerS < 0:
 		return "linger_s", "linger_s must not be negative"
 	case f.Listen.Port < 1 || f.Listen.Port > 65535:
@@ -162,6 +174,9 @@ func (f File) Normalize() File {
 	}
 	if f.KeepContext == "" {
 		f.KeepContext = "on"
+	}
+	if f.Discovery == "" {
+		f.Discovery = "on" // never written empty, like streamer
 	}
 	return f
 }

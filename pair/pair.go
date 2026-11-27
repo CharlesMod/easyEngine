@@ -39,7 +39,7 @@ var (
 	ErrNoRequest = errors.New("no such pairing request")                 // 404 to the answerer, 410 to the client
 	ErrAmbiguous = errors.New("that code matches more than one request") // refused: answer by id
 	ErrClosed    = errors.New("the engine is ending")
-	ErrChanged   = errors.New("the request changed; look again")         // the key now shows another code
+	ErrChanged   = errors.New("the request changed; look again") // the key now shows another code
 )
 
 // Issuer makes a token for a named client (internal/tokens.Store).

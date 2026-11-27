@@ -15,16 +15,16 @@ import (
 	"github.com/CharlesMod/easyEngine/core/fit"
 )
 
-var helpCache sync.Map // bin path -> map[string]bool
+var helpCache sync.Map // bin path -> *Help (nil when the help could not be read)
 
 var flagRe = regexp.MustCompile(`(?:^|[\s,\[|(])(--?[A-Za-z][A-Za-z0-9_-]*)`)
 
-// knownFlags runs `llama-server --help` once per binary and returns the flag
-// names it mentions. nil means the help could not be read (keep every flag).
-func knownFlags(bin string, env []string) map[string]bool {
+// helpOf runs `llama-server --help` once per binary and parses it. nil means the
+// help could not be read (keep every flag).
+func helpOf(bin string, env []string) *Help {
 	if v, ok := helpCache.Load(bin); ok {
-		m, _ := v.(map[string]bool)
-		return m
+		h, _ := v.(*Help)
+		return h
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -32,18 +32,22 @@ func knownFlags(bin string, env []string) map[string]bool {
 	cmd.Dir = filepath.Dir(bin)
 	cmd.Env = llamaEnv(bin, env)
 	out, _ := cmd.CombinedOutput()
-	var m map[string]bool
+	var h *Help
 	if len(out) > 0 {
-		m = map[string]bool{}
-		for _, mm := range flagRe.FindAllStringSubmatch(string(out), -1) {
-			m[mm[1]] = true
-		}
-		if len(m) < 5 {
-			m = nil
-		}
+		h = ParseHelp(string(out))
 	}
-	helpCache.Store(bin, m)
-	return m
+	helpCache.Store(bin, h)
+	return h
+}
+
+// knownFlags returns the flag names the binary's help mentions. nil means the
+// help could not be read (keep every flag).
+func knownFlags(bin string, env []string) map[string]bool {
+	h := helpOf(bin, env)
+	if h == nil {
+		return nil
+	}
+	return h.Flags
 }
 
 func has(known map[string]bool, names ...string) bool {

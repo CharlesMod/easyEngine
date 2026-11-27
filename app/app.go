@@ -292,7 +292,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	attached := make(chan struct{}, 1) // a parent was attached (resident: the connection)
 	var ctl *controller
 	if o.Tray != nil {
-		ctl = newController(o.Tray, o.Menu, sup, dir, func() {
+		ctl = newController(o.Tray, o.Menu, sup, dir, ChatURL(host, port), func() {
 			select {
 			case shutdown <- struct{}{}:
 			default:
@@ -384,6 +384,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		}()
 	}
 	if ctl != nil {
+		go ctl.watch(wctx)
 		go ctl.serve(wctx)
 	}
 	select {

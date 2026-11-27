@@ -161,20 +161,23 @@ func TestTrayMenuClicksAndQuit(t *testing.T) {
 		Autostart: place, Exe: exe,
 		Open: func(p string) error { mu.Lock(); opened = append(opened, p); mu.Unlock(); return nil },
 	}})
-	// Exactly three items, in this order, and a tooltip that says what stands.
+	// Exactly four items, in this order, and a tooltip that says what stands.
 	waitFor(t, func() bool {
 		items, tip, _ := ft.snap()
-		return len(items) == 3 && strings.HasPrefix(tip, "easy-engine: ")
+		return len(items) == 4 && strings.HasPrefix(tip, "easy-engine: ")
 	}, "the menu")
 	items, tip, _ := ft.snap()
-	want := []string{"Launch at Startup", "Settings", "Quit"}
+	want := []string{"Chat", "Launch at Startup", "Settings", "Quit"}
 	for i, it := range items {
 		if it.Title != want[i] {
 			t.Fatalf("item %d is %q, want %q", i, it.Title, want[i])
 		}
 	}
-	if !items[0].Checkable || items[0].Checked {
-		t.Fatalf("Launch at Startup: %+v", items[0])
+	if !items[0].Disabled {
+		t.Fatalf("Chat must be off with no model ready: %+v", items[0])
+	}
+	if !items[1].Checkable || items[1].Checked {
+		t.Fatalf("Launch at Startup: %+v", items[1])
 	}
 	if tip != "easy-engine: no model installed" {
 		t.Fatalf("tooltip %q", tip)

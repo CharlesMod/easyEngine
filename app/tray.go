@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/CharlesMod/easyEngine/autostart"
 	"github.com/CharlesMod/easyEngine/catalog"
@@ -42,6 +46,7 @@ type Autostarter interface {
 type MenuOptions struct {
 	Autostart Autostarter                                    // default autostart.Real()
 	Open      func(path string) error                        // default openfile.Open
+	Chat      func(url string) error                         // shows the chat page in a small window; default openfile.Popup
 	Exe       string                                         // the program to start at login; default this one (ExePath)
 	Args      []string                                       // its arguments; default ["app"]
 	Run       func(context.Context, tray.Spec) (Tray, error) // default tray.Run
@@ -53,6 +58,9 @@ func (m *MenuOptions) defaults() {
 	}
 	if m.Open == nil {
 		m.Open = func(p string) error { _, err := openfile.Open(p); return err }
+	}
+	if m.Chat == nil {
+		m.Chat = openfile.Popup
 	}
 	if m.Exe == "" {
 		m.Exe = ExePath()
@@ -93,12 +101,14 @@ func ExePath() string {
 // view is what the menu is drawn from.
 type view struct {
 	autostart bool
+	chat      bool // a model is ready to talk to, and this engine's chat page can be reached
 }
 
-// menu is the whole menu as a function of state: three items, nothing else. A later slice
+// menu is the whole menu as a function of state: four items, nothing else. A later slice
 // adds an item (a pairing request that waits) by adding a field to view and a line here.
 func menu(v view) []tray.Item {
 	return []tray.Item{
+		{ID: "chat", Title: "Chat", Disabled: !v.chat},
 		{ID: "autostart", Title: "Launch at Startup", Checkable: true, Checked: v.autostart},
 		{ID: "settings", Title: "Settings"},
 		{ID: "quit", Title: "Quit"},
@@ -123,16 +133,18 @@ type controller struct {
 	sup  *run.Supervisor
 	file string // settings.json
 	quit func()
+	chat string // the chat page in popup form ("" when this engine's page cannot be reached from here)
 
 	mu    sync.Mutex
 	v     view
 	names map[string]string
 	last  string
+	drawn []tray.Item // the menu as last drawn
 }
 
-func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir string, quit func()) *controller {
+func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir, chat string, quit func()) *controller {
 	m.defaults()
-	c := &controller{t: t, m: m, sup: sup, file: settings.Path(dir), quit: quit, names: map[string]string{}}
+	c := &controller{t: t, m: m, sup: sup, file: settings.Path(dir), quit: quit, chat: chat, names: map[string]string{}}
 	if cat, err := catalog.Load(dir); err == nil && cat != nil {
 		for _, md := range cat.Models {
 			c.names[md.ID] = md.Name
@@ -162,6 +174,14 @@ func (c *controller) click(id string) {
 	switch id {
 	case "autostart":
 		c.toggleAutostart()
+	case "chat":
+		if c.chatReady() {
+			go func() { // the launcher waits for the browser to start
+				if err := c.m.Chat(c.chat); err != nil {
+					log.Printf("easy-engine: open chat %s: %v", c.chat, err)
+				}
+			}()
+		}
 	case "settings":
 		go func() { // the opener waits for the editor to start
 			if err := c.m.Open(c.file); err != nil {
@@ -192,13 +212,53 @@ func (c *controller) toggleAutostart() {
 	c.mu.Unlock()
 }
 
+// chatReady: Chat is on only while a model is ready and the page is reachable.
+func (c *controller) chatReady() bool {
+	return c.chat != "" && c.sup.Status().Phase == "ready"
+}
+
+// ChatURL is the chat page in its popup form (?mini=1: the bar with one button) on this engine,
+// or "" when the engine listens beyond loopback, where the page cannot send a token.
+func ChatURL(host string, port int) string {
+	if !IsLoopbackHost(host) {
+		return ""
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)) + "/chat/?mini=1"
+}
+
+// watch redraws the menu and tooltip when the phase moves them (Chat turns on when a model is
+// ready), until ctx ends.
+func (c *controller) watch(ctx context.Context) {
+	tk := time.NewTicker(2 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			c.mu.Lock()
+			c.v.chat = c.chatReady()
+			stale := c.tooltip() != c.last || !reflect.DeepEqual(menu(c.v), c.drawn)
+			c.mu.Unlock()
+			if stale {
+				c.refresh()
+			}
+		}
+	}
+}
+
 // refresh draws the menu and the tooltip from what stands now.
 func (c *controller) refresh() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
+	c.v.chat = c.chatReady()
 	items := menu(c.v)
+	c.drawn = items
 	tip := c.tooltip()
 	same := tip == c.last
 	c.last = tip

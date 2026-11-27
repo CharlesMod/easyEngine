@@ -377,7 +377,13 @@ var blackwell = regexp.MustCompile(`(?i)RTX\s*(PRO\s*)?(50\d\d|[4-9]\d\d\d\s*Bla
 
 // preTuring names NVIDIA cards older than Turing (Maxwell, Pascal, Volta): CUDA 13 no longer
 // builds for them, so a CUDA 13 build is never offered to a machine whose cards are all such.
-var preTuring = regexp.MustCompile(`(?i)\bGTX\s*(9\d\d|10\d\d)\b|\bTITAN\s*(X|Xp|V)\b|\bTesla\s*[KMPV]\d|\bQuadro\s*[KMPGV]P?\d|\b[PV]100\b|\bP(4|6|40)\b|\bGT\s*10[0-9]0\b|\bMX\s*[1-3]\d0\b`)
+//
+// The names, from NVIDIA's own lists: Volta (TITAN V, Quadro GV100, Tesla V100, V100S), Pascal
+// (GeForce GTX 10xx, GT 1030, MX 1xx/2xx/3xx, TITAN X/Xp, Quadro P and GP100, Tesla P4/P6/P40/P100),
+// Maxwell (GTX 9xx and 750, Quadro M, Tesla M, the Maxwell TITAN X) and Kepler (GTX 6xx/7xx,
+// Quadro K, Tesla K). GTX 16xx, the RTX cards, Quadro RTX, TITAN RTX and Tesla T4 are Turing or
+// later and are not matched.
+var preTuring = regexp.MustCompile(`(?i)\bGTX\s*(6\d\d|7\d\d|9\d\d|10\d\d)\b|\bGT\s*10[34]0\b|\bMX\s*[1-3]\d0\b|\bTITAN\s*(X|Xp|V|Black|Z)\b|\bQuadro\s*(GV100|GP100|[KMP]\d)|\bTesla\s*([KMP]\d|V100)|\bV100S?\b|\bP100\b|\bP(4|6|40)\b`)
 
 // Driver floors (NVIDIA's CUDA compatibility table): a CUDA 13 build needs driver 580 or later,
 // a CUDA 12 build 525 or later (minor-version compatibility). An unknown driver (0) passes.

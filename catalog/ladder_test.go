@@ -160,3 +160,31 @@ func TestLadderValidate(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// preTuring against the names nvidia-smi gives, from NVIDIA's lists: every pre-Turing card
+// matched, no Turing or later card matched.
+func TestPreTuringNames(t *testing.T) {
+	old := []string{
+		"NVIDIA TITAN V", "Quadro GV100", "Tesla V100-SXM2-16GB", "Tesla V100S-PCIE-32GB", "Tesla V100-PCIE-32GB", // Volta
+		"Tesla P40", "Tesla P100-PCIE-16GB", "Tesla P4", "Tesla P6", "Quadro P4000", "Quadro P400", "Quadro GP100", // Pascal
+		"NVIDIA GeForce GTX 1080 Ti", "GeForce GTX 1050", "NVIDIA GeForce GT 1030", "GeForce MX150", "NVIDIA GeForce MX350",
+		"NVIDIA TITAN Xp", "NVIDIA TITAN X (Pascal)",
+		"GeForce GTX 980", "GeForce GTX 750 Ti", "Quadro M4000", "Quadro M2000M", "Tesla M60", "Tesla M40 24GB", "GeForce GTX TITAN X", // Maxwell
+		"Tesla K80", "Quadro K2200", "GeForce GTX 780", "GeForce GTX TITAN Black", // Kepler
+	}
+	modern := []string{
+		"NVIDIA GeForce GTX 1660 SUPER", "NVIDIA GeForce GTX 1650", "NVIDIA GeForce RTX 2080", "Quadro RTX 4000", "NVIDIA TITAN RTX",
+		"Tesla T4", "NVIDIA A100-SXM4-40GB", "NVIDIA RTX A4000", "NVIDIA GeForce RTX 3050 Laptop GPU", "NVIDIA GeForce RTX 4090",
+		"NVIDIA GeForce RTX 5080", "NVIDIA H100 80GB HBM3", "NVIDIA L4", "NVIDIA GeForce MX450", "NVIDIA GeForce MX550", "NVIDIA GB10",
+	}
+	for _, n := range old {
+		if !preTuring.MatchString(n) {
+			t.Errorf("pre-Turing %q not matched", n)
+		}
+	}
+	for _, n := range modern {
+		if preTuring.MatchString(n) {
+			t.Errorf("%q (Turing or later) matched", n)
+		}
+	}
+}

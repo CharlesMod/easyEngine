@@ -248,18 +248,28 @@ stock llama-server.
   memory out on Linux).
 - **On disk.** A build is installed under `backends/<id>@<tag>`; one installed before the engine
   recorded tags sits under `backends/<id>` (tag unknown). `state.json` `backend` and `build` name
-  the build that runs, `next_build` the pin installed beside it.
+  the build that runs, `next_build` the pin staged beside it. A fetched build carries `.unpacked` (its archive's sha256), a smoke-tested one `.installed`.
 - **The pin moves.** When the selected build is not the one the catalog gives this machine for its
-  backend (a stock b12651 or an unrecorded install, or an older pin), the engine installs the pin
-  beside it in the background (status `build.next`: downloading, installing, then ready). Words,
-  not clocks: it is looked at on the engine's start, an install's end and each load; a failed
-  download or smoke test leaves the engine serving on what it has, says why (`build.next.state`
-  `waiting`, `error`, and status `errors`) and is tried again on the next word (a nudge such as a
-  request at the door or a client's start, the network coming back). The next load of the model
-  server (a start, a reshape, a yield's end, a wake) runs the pin; a planned stop with the pin
-  staged saves no context (the context key carries the build, so nothing could be laid back), and
-  contexts of another build are let go. Once the new build has served ready every other complete
-  build under `backends/` is removed (not while an install, the move or a remove runs).
+  backend (a stock b12651 or an unrecorded install, or an older pin), the engine fetches the pin
+  beside it in the background (status `build.next`: downloading, installing, then `staged`):
+  downloaded, checked against its sha256 and unpacked, never run, since a model server may hold
+  the card. The disk is checked first (too little: `waiting`, the reason said). The next load of
+  the model server (a start, a reshape, a yield's end, a wake), with the card free, smoke-tests the
+  staged build as the engine's own process (inside `host.Own`, its pid among the engine's for the
+  room watch) and runs it. A smoke test that fails there leaves the engine starting on the build it
+  has, says `failed` and why, and is not run again for that tag until the pin, the driver or a
+  person's or client's word (an API start, attach, wake, host, install, a settings change) changed;
+  nothing is downloaded again, what was verified stays. A failed fetch (`waiting`, `error`, and
+  status `errors`) is tried again on the network coming back or such a word, never on a request
+  at the door alone and never on a clock. A move begins only while no install job, move or remove
+  runs, and stages nothing if the selection changed or a remove ran meanwhile. An install job never
+  replaces a complete selected build (main's layout included): only the move brings the pin. A
+  planned stop with the pin staged saves no context (the context key carries the build, so nothing
+  could be laid back), and contexts of another build are let go. Once the new build has served
+  ready, the other builds of the same backend id are removed, by exact names only (`backends/<id>`,
+  `backends/<id>@<tag>`, and main's old archives in `downloads/`; never past a symlink, never
+  another backend's, not while an install, the move or a remove runs; said as `build.pruned`). A
+  failure of the old build while a staged one waits is recorded under the old build's keys.
 - **Keyed by the build.** What the engine remembers per build carries the full tag: the prompt
   cache key (`id@tag@sha256`), the out-of-memory cap's build (let go when it differs), and the
   book's key (`model|card|id@tag`), so b12651 and b12651-easy1, whose CUDA memory behaves
@@ -928,7 +938,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
 | `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
 | `GET hello`, `POST pair`, `GET`/`DELETE pair/{id}`, `GET pairing`, `POST pairing/answer` | who this engine is, and pairing a client on the network (§7f); the first four need no token |
-| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|ready, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |

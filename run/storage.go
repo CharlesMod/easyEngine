@@ -267,6 +267,7 @@ func (s *Supervisor) RemoveDownloads() error {
 		return ErrBusy
 	}
 	s.removing = true
+	s.removeGen++ // a move under way stages nothing it fetched before this (build.go)
 	s.mu.Unlock()
 	s.wg.Add(1)
 	go func() {
@@ -355,12 +356,11 @@ func (s *Supervisor) runRemoveDownloads() {
 // emptyDir deletes the contents of dir (a directory directly under the data dir), never following
 // a symlink or junction, and returns the bytes freed and the paths that remain.
 func (s *Supervisor) emptyDir(dir string) (freed int64, left []string) {
-	fi, err := os.Lstat(dir)
-	if err != nil {
+	if _, err := os.Lstat(dir); err != nil {
 		os.MkdirAll(dir, 0o755)
 		return 0, nil
 	}
-	if !fi.IsDir() { // a link or file where the directory should be: leave it, it may point out
+	if !realDir(dir) { // a link or file where the directory should be: leave it, it may point out
 		return 0, []string{filepath.Base(dir)}
 	}
 	ents, _ := os.ReadDir(dir)

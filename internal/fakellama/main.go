@@ -316,7 +316,7 @@ func main() {
 	if ctl != "" {
 		f, err := os.OpenFile(filepath.Join(ctl, "starts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
-			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), strings.Join(args, " "))
+			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s bin=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), os.Args[0], strings.Join(args, " "))
 			f.Close()
 		}
 	}

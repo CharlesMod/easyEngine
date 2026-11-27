@@ -97,7 +97,17 @@ func (s *Supervisor) backendSteps(cat *catalog.Catalog, hw probe.Hardware, want 
 		}
 	}
 	a, ok := cat.Asset(want)
-	if !ok || backendInstalled(s.dir, a.ID, a.Tag) {
+	if !ok {
+		return nil
+	}
+	return s.buildDiskSteps(cat, a)
+}
+
+// buildDiskSteps are the downloads build a needs (with its extras), none when it is already
+// unpacked from its archive (installBuild, the move: fetchBuildLocked fetches nothing then).
+// The install job and the move check the disk with these before they download.
+func (s *Supervisor) buildDiskSteps(cat *catalog.Catalog, a catalog.Asset) []plan.DiskStep {
+	if buildUnpacked(s.dir, a.ID, a.Tag, a.SHA256) {
 		return nil
 	}
 	var extras []catalog.Asset

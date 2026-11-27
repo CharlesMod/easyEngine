@@ -160,6 +160,7 @@ type server struct {
 	port      int
 	shape     fit.Shape
 	key       string
+	build     string // the build it runs (install.build): a failure is recorded under it (recordLC)
 	fp        fit.Footprint
 	seed      fit.Footprint // the header's seed, which every reading is held to (never fp)
 	startedAt time.Time
@@ -247,9 +248,18 @@ type Supervisor struct {
 	moveCancel context.CancelFunc
 	vmm        string
 	buildMu    sync.Mutex // one build install at a time: the job's and the move's may name one build
-	swapping   bool
-	removing   bool          // remove-downloads job running (storage.go)
-	stoCache   *storageCache // last complete storage walk
+	// smoking is the pid of a smoke test the engine runs (install.go smokeOwned): the engine's
+	// own for the room watch. smokeFail is the staged build whose smoke test failed at a load,
+	// with what stood then; the same tag is not tried again until one of them changed.
+	smoking   ourPID
+	smokeFail *smokeFailure
+	// removeGen counts the removes of the downloads (under mu): a move that began before one does
+	// not stage what it fetched. words counts the words a failed move waits for (moveWord).
+	removeGen uint64
+	words     atomic.Uint64
+	swapping  bool
+	removing  bool          // remove-downloads job running (storage.go)
+	stoCache  *storageCache // last complete storage walk
 
 	opMu sync.Mutex
 	srv  *server
@@ -1086,7 +1096,7 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.reshape = true
 		s.mu.Unlock()
 	}
-	s.nudge("settings") // after reshape is set: the reactor sees it when it wakes
+	s.Nudge("settings") // after reshape is set: the reactor sees it when it wakes
 	return nil
 }
 

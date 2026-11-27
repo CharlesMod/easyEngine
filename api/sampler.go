@@ -72,12 +72,12 @@ func RewriteSampler(body []byte, mode string, prof catalog.SamplerProfile) ([]by
 // to what really happened: a profile and mode when the body was rewritten, else none;<reason>.
 // It must run before the request is forwarded. It returns false after answering 400 itself,
 // when the request body could not be read; the caller must not forward then.
-func (a *API) applySampler(w http.ResponseWriter, r *http.Request) bool {
+func (a *API) applySampler(w http.ResponseWriter, r *http.Request, att string) bool {
 	asked := strings.TrimSpace(legacy.HeaderOr(r.Header, SamplerHeader, legacy.SamplerHeader))
 	name := strings.ToLower(asked)
 	r.Header.Del(SamplerHeader)
 	legacy.StripRequest(r.Header) // the upstream (possibly the player's own server) does not need it
-	info := a.S.Sampler()
+	info := a.S.SamplerFor(att)   // the attachment's own profiles first
 	set := func(v string) { legacy.SetApplied(w.Header(), AppliedHeader, v) }
 	if r.Method != http.MethodPost || !completionPath(r.URL.Path) {
 		set("none;not-a-completion")

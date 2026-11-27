@@ -1055,7 +1055,7 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 	s.logf("clients: %s (%s) left", a.name, a.id)
 	s.sayGone("attachment", a.id)
 	s.sayClients()
-	s.sayClientAttachments(a.identity)
+	s.SayClientAttachments(a.identity)
 	s.agentChanged()
 	s.wakeMind(func(c *causes) { c.clients = true })
 }
@@ -1221,7 +1221,7 @@ func (s *Supervisor) EnterAs(reqID, att, identity string) (Route, ClientDoor, fu
 			return rt, d, nil
 		}
 	}
-	return rt, d, s.begin(reqID)
+	return rt, d, s.beginAs(reqID, d.ID)
 }
 
 // PickSlot is the slot a request of an attachment that named none (or -1) goes to: its lowest
@@ -1362,7 +1362,7 @@ func (s *Supervisor) sayClients() {
 
 // sayClientAttachments says a paired client's attachments in its client fact, where that fact
 // stands (the gate says it the first time it accepts the client's token in a life).
-func (s *Supervisor) sayClientAttachments(identity string) {
+func (s *Supervisor) SayClientAttachments(identity string) {
 	if s.hub == nil || identity == identityLoopback || identity == "" {
 		return
 	}

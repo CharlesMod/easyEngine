@@ -39,7 +39,7 @@ func up(phase string) bool {
 func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, attached <-chan struct{},
 	linger func() time.Duration, after func()) {
 	hub := sup.Hub()
-	wk, err := hub.Wake("request", "door", "phase")
+	wk, err := hub.Wake("request", "door", "phase", "attachment")
 	if err != nil {
 		return
 	}
@@ -74,7 +74,7 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 	defer disarm()
 	for {
 		door := sup.InFlight() + sup.Held()
-		pids := len(w.PIDs())
+		pids := len(w.PIDs()) + sup.Attached() // attached parents and the clients' attachments (held or by pid)
 		if door > 0 || pids > 0 {
 			connected = true
 		}
@@ -99,7 +99,7 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 		case <-wk.C():
 		case <-fired:
 			fired, cancel = nil, nil
-			if sup.Begun() != armedAt || len(w.PIDs()) > 0 || sup.InFlight()+sup.Held() > 0 {
+			if sup.Begun() != armedAt || len(w.PIDs())+sup.Attached() > 0 || sup.InFlight()+sup.Held() > 0 {
 				continue // somebody came: looked at again at the top
 			}
 			if up(sup.Phase()) {

@@ -118,6 +118,15 @@ type fwd struct {
 	sw *streamWriter
 	// onEnd takes the streamer's summary of a streamed reply (stream.Options.OnEnd).
 	onEnd func(stream.Summary)
+	// slotsOf is the attachment's engine slots when its reply's slot numbers are its own (the
+	// streamer reads the client's number; the end says the engine's slot and the client's).
+	slotsOf []int
+}
+
+// slots is f for a request whose reply numbers slots in the client's numbering.
+func (f fwd) slots(s []int) fwd {
+	f.slotsOf = s
+	return f
 }
 
 // ending is f with the streamer's summary kept in *to (said in the request's end).
@@ -129,6 +138,14 @@ func (f fwd) ending(to **run.RequestEnd) fwd {
 		if s.Slot >= 0 {
 			slot := s.Slot
 			re.Slot = &slot
+			if f.slotsOf != nil {
+				cs := s.Slot
+				re.ClientSlot = &cs
+				if cs < len(f.slotsOf) {
+					e := f.slotsOf[cs]
+					re.Slot = &e
+				}
+			}
 		}
 		*to = re
 	}

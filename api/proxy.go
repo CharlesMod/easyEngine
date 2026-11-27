@@ -47,7 +47,16 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	id := requestID(r)
 	w.Header().Set(RequestIDHeader, id)
-	rt, done := a.S.Enter(id)
+	att, who := strings.TrimSpace(r.Header.Get(ClientHeader)), identity(r)
+	r.Header.Del(ClientHeader) // the engine's word, not the model server's
+	if len(att) > 64 {
+		att = "-" // no attachment has such an id: answered as unknown
+	}
+	rt, door, done := a.S.EnterAs(id, att, who)
+	if door.Err != nil && !rt.Hold {
+		clientFail(w, door.Err)
+		return
+	}
 	var sw *streamWriter // a streamed request's stream, opened before its hold
 	if rt.Hold {
 		if a.S.Streamer() && r.Method == http.MethodPost && completionPath(r.URL.Path) {
@@ -64,8 +73,32 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var ok bool
-		if rt, done, ok = a.hold(r, id); !ok {
+		if rt, door, done, ok = a.hold(r, id, att, who); !ok {
 			return // the client went away while held
+		}
+		if door.Err != nil {
+			if sw != nil {
+				sw.refuse(run.Route{Kind: "unavailable", Message: door.Err.Msg})
+				return
+			}
+			clientFail(w, door.Err)
+			return
+		}
+	}
+	// a request of an attachment: its slot numbers are its own (mapped below), said in the end
+	var clientSlot *int
+	var engineSlots []int
+	if door.ID != "" {
+		end := done
+		done = func(re *run.RequestEnd) {
+			if re == nil {
+				re = &run.RequestEnd{}
+			}
+			re.Attachment = door.ID
+			if re.ClientSlot == nil {
+				re.ClientSlot = clientSlot
+			}
+			end(re)
 		}
 	}
 	var sum *run.RequestEnd // what the streamer read of the reply, said in the request's end
@@ -99,7 +132,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad external URL")
 			return
 		}
-		if !a.applySampler(w, r) {
+		if !a.applySampler(w, r, door.ID) {
 			return
 		}
 		rest := strings.TrimPrefix(r.URL.Path, "/v1")
@@ -128,8 +161,26 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			unavailable(w, 502, "bad_gateway", "bad server URL")
 			return
 		}
-		if !a.applySampler(w, r) {
+		if !a.applySampler(w, r, door.ID) {
 			return
+		}
+		if len(door.Slots) > 0 {
+			cs, es, ok := a.mapClientRequest(w, r, door.Slots)
+			if !ok {
+				return
+			}
+			if es >= 0 {
+				clientSlot = &cs
+				defer a.S.Busy(es)()
+			}
+			engineSlots = door.Slots
+		}
+		modify := dropCORS
+		if engineSlots != nil {
+			modify = func(resp *http.Response) error {
+				dropCORS(resp)
+				return slotsBack(resp, engineSlots)
+			}
 		}
 		rp := &httputil.ReverseProxy{
 			Transport:     transport,
@@ -139,10 +190,10 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 				pr.Out.Host = target.Host
 				pr.Out.Header.Del("Authorization") // a client's credentials never go to the local model server
 			},
-			ModifyResponse: dropCORS,
+			ModifyResponse: modify,
 			ErrorHandler:   badGateway,
 		}
-		forward(w, r, rp, a.fwd(false, id).with(sw).ending(&sum))
+		forward(w, r, rp, a.fwd(false, id).with(sw).slots(engineSlots).ending(&sum))
 	}
 }
 
@@ -166,7 +217,7 @@ func slotFiles(r *http.Request) bool {
 
 // holdOn are the names whose change can end a hold: the phase, the model and mode (a switch to
 // external), the yield, and the upgrade (the swap to the full model).
-var holdOn = []string{"phase", "model", "yield", "upgrade"}
+var holdOn = []string{"phase", "model", "yield", "upgrade", "attachment", "wants"}
 
 // hold is a request the door holds (docs/ENGINE.md, "The door holds"): Enter said Hold (the
 // model is on its way up). The request waits on the hub, never on a clock: listen first, then
@@ -174,25 +225,28 @@ var holdOn = []string{"phase", "model", "yield", "upgrade"}
 // context) or the engine's end. The held request is counted (Supervisor.Hold: the door fact, the
 // resident app's linger), never in flight. It answers the route to forward by and the end of its
 // count in flight; ok is false when the client went away while held.
-func (a *API) hold(r *http.Request, id string) (rt run.Route, end func(*run.RequestEnd), ok bool) {
+func (a *API) hold(r *http.Request, id, att, who string) (rt run.Route, door run.ClientDoor, end func(*run.RequestEnd), ok bool) {
 	hub := a.S.Hub()
 	wk, err := hub.Wake(holdOn...)
 	if err != nil { // a book without the names: answer as before the hold
-		return run.Route{Kind: "unavailable", Message: "Loading model"}, func(*run.RequestEnd) {}, true
+		return run.Route{Kind: "unavailable", Message: "Loading model"}, run.ClientDoor{}, func(*run.RequestEnd) {}, true
 	}
 	defer wk.Close()
 	release := a.S.Hold()
 	defer release()
 	for {
-		if rt, end = a.S.Enter(id); !rt.Hold {
-			return rt, end, true
+		if rt, door, end = a.S.EnterAs(id, att, who); !rt.Hold {
+			if end == nil {
+				end = func(*run.RequestEnd) {}
+			}
+			return rt, door, end, true
 		}
 		select {
 		case <-wk.C():
 		case <-r.Context().Done():
-			return rt, nil, false
+			return rt, door, nil, false
 		case <-hub.Done():
-			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, func(*run.RequestEnd) {}, true
+			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, run.ClientDoor{}, func(*run.RequestEnd) {}, true
 		}
 	}
 }

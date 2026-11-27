@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/pair"
@@ -24,6 +26,8 @@ type API struct {
 	S *run.Supervisor
 	// Attach adds a parent pid to the watch list.
 	Attach func(pid int) error
+	// Present is told after every attach (the app: a client came; wake the model if it sleeps).
+	Present func()
 	// Shutdown asks the process to exit (POST shutdown).
 	Shutdown func()
 	// AnyHost marks a non-loopback listener (--host): the Host header is not restricted, and a
@@ -54,11 +58,18 @@ type API struct {
 	seen sync.Map
 }
 
+// ListenKeepAlive is TCP keepalive on every accepted connection: a held connection whose peer
+// vanished (a laptop off the network, a crash that sent no FIN) ends after about a minute of
+// unanswered probes, so a held attachment leaves and a held events stream or pair/{id} ends.
+// network timeout: idle 30 s, then 3 probes 10 s apart (the kernel's, never a poll of ours)
+var ListenKeepAlive = net.KeepAliveConfig{Enable: true, Idle: 30 * time.Second, Interval: 10 * time.Second, Count: 3}
+
 // Listen binds host:base, falling back to base+1 .. base+9.
 func Listen(host string, base int) (net.Listener, int, error) {
 	var last error
+	lc := net.ListenConfig{KeepAliveConfig: ListenKeepAlive}
 	for p := base; p < base+10; p++ {
-		l, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(p)))
+		l, err := lc.Listen(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(p)))
 		if err == nil {
 			return l, p, nil
 		}
@@ -134,6 +145,12 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 	ctx := r.Context()
+	if strings.HasPrefix(name, "attach/") {
+		if need("DELETE") {
+			a.detach(w, r, strings.TrimPrefix(name, "attach/"))
+		}
+		return
+	}
 	if strings.HasPrefix(name, "custom/") && a.customRoute(w, r, ctx, name, need) {
 		return
 	}
@@ -316,25 +333,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "attach":
 		if need("POST") {
-			if a.stopping.Load() {
-				fail(w, 409, "engine is stopping")
-				return
-			}
-			var in struct{ Pid int }
-			if err := decode(r, &in); err != nil || in.Pid <= 0 {
-				fail(w, 400, "body must be {\"pid\": n}")
-				return
-			}
-			if a.Attach == nil {
-				fail(w, 501, "attach not available")
-				return
-			}
-			if err := a.Attach(in.Pid); err != nil {
-				fail(w, 400, err.Error())
-				return
-			}
-			a.S.Nudge("attach")
-			writeJSON(w, 200, map[string]any{"status": "attached", "pid": in.Pid})
+			a.attach(w, r)
 		}
 	case "facts":
 		if need("GET") {

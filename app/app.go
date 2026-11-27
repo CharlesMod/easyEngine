@@ -338,7 +338,8 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		prof = p
 	}
 	w := lifecycle.NewWatcher()
-	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident} // the app waits for a connection
+	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident, // the app waits for a connection
+		ProfileGiven: o.Profile != nil || o.ProfilePath != ""} // a profile given is the base client
 	if o.Yield != nil {
 		y := *o.Yield
 		y.Except = append(append([]string{}, y.Except...), prof.YieldExcept...)
@@ -387,7 +388,17 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		})
 	}
 	attach := w.Add
+	present := func() {} // serve: a client's attach changes nothing of the engine's life
 	if o.Resident {
+		// a client that attached (by pid or a held connection) is the connection the app waits for
+		present = func() {
+			select {
+			case attached <- struct{}{}:
+			default:
+			}
+			wakeForClient(sup)
+			ctl.refresh()
+		}
 		attach = func(pid int) error {
 			if err := w.Add(pid); err != nil {
 				return err
@@ -402,6 +413,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		}
 	}
 	a := &api.API{S: sup, Attach: attach, AnyHost: !loopback, Open: o.Open,
+		Present: present,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:
@@ -520,6 +532,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	case <-shutdown:
 	}
 	a.SetStopping() // status says so and attach is refused from here; the lock is released last
+	sup.EndHolds()  // a held attachment hears {"end":"engine_ending"} before the listener closes
 	if o.Tray != nil {
 		o.Tray.SetTooltip("easy-engine: stopping")
 		defer o.Tray.Close()

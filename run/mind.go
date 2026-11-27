@@ -90,7 +90,10 @@ func (s *Supervisor) Begin() func() {
 
 // begin is Begin with the request's id (said in the begin and the end, so a client pairs them);
 // the end may carry what the streamer read of the reply.
-func (s *Supervisor) begin(id string) func(*RequestEnd) {
+func (s *Supervisor) begin(id string) func(*RequestEnd) { return s.beginAs(id, "") }
+
+// beginAs is begin for a request of an attachment (said in the begin; its end carries it too).
+func (s *Supervisor) beginAs(id, att string) func(*RequestEnd) {
 	d := &s.door
 	d.mu.Lock()
 	d.inflight++
@@ -108,7 +111,7 @@ func (s *Supervisor) begin(id string) func(*RequestEnd) {
 		d.hang.Heard()
 	}
 	d.mu.Unlock()
-	s.say("request", "", requestSaid{What: "begin", Inflight: n, ID: id})
+	s.say("request", "", requestSaid{What: "begin", Inflight: n, ID: id, Attachment: att})
 	if s.listeners.Load() > 0 { // a request is a word for whatever waits for one (an agent, a download)
 		s.nudge("request")
 	}
@@ -148,7 +151,11 @@ func (s *Supervisor) end(id string, re *RequestEnd) {
 		d.hang.Heard()
 	}
 	d.mu.Unlock()
-	s.say("request", "", requestSaid{What: "end", Inflight: n, ID: id, RequestEnd: re})
+	said := requestSaid{What: "end", Inflight: n, ID: id, RequestEnd: re}
+	if re != nil {
+		said.Attachment = re.Attachment
+	}
+	s.say("request", "", said)
 	if n == 0 {
 		select {
 		case s.poke <- struct{}{}:

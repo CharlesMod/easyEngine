@@ -55,6 +55,8 @@ type requestSaid struct {
 	What     string `json:"what"` // begin | end
 	Inflight int    `json:"inflight"`
 	ID       string `json:"id,omitempty"`
+	// Attachment is the attachment a request is for (X-Easy-Client), said in its begin.
+	Attachment string `json:"attachment,omitempty"`
 	*RequestEnd
 }
 

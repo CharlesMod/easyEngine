@@ -55,8 +55,8 @@ type HostSet struct {
 // ErrBadHost is a refused HostSet.
 var ErrBadHost = errors.New("bad host")
 
-// SetHost stores what the host says about itself. The next watchdog tick re-reads the adapters
-// with it; a reading cached for GET /engine/v1/gpu is dropped.
+// SetHost stores what the host says about itself. The room is read again at once with it (its
+// word is an event, run/room.go); a reading cached for GET /engine/v1/gpu is dropped.
 func (s *Supervisor) SetHost(h HostSet) error {
 	switch {
 	case h.PID < 0:
@@ -82,6 +82,7 @@ func (s *Supervisor) SetHost(h HostSet) error {
 	}
 	s.gpu.rep = nil
 	s.mu.Unlock()
+	s.card.event() // the host's word: the room is read again
 	return nil
 }
 
@@ -140,6 +141,7 @@ func (s *Supervisor) measure(ctx context.Context, hw probe.Hardware, ours []int)
 	s.mu.Lock()
 	cp := sum
 	s.gpu.sum = &cp
+	s.say("room", "", cp) // a reading: said only when it changed
 	s.mu.Unlock()
 	return sensed{pic: pic, sum: sum, gpu: gi}
 }

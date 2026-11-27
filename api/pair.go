@@ -23,6 +23,7 @@ type Hello struct {
 	Version       string `json:"version"`
 	EngineID      string `json:"engine_id"`
 	ModelName     string `json:"model_name"`
+	ModelID       string `json:"model_id"` // the selected model's catalog id; "" when none (or a custom file)
 	Phase         string `json:"phase"`
 	Card          string `json:"card"`
 	Pairing       bool   `json:"pairing"`
@@ -108,6 +109,9 @@ func (a *API) hello(r *http.Request) Hello {
 		h.Version, h.Phase, h.ModelName = st.Version, st.Phase, st.ModelName
 		if h.ModelName == "" {
 			h.ModelName = st.Model
+		}
+		if !strings.HasPrefix(st.Model, "custom:") { // a custom file has no catalog id
+			h.ModelID = st.Model
 		}
 		if g := st.GPU; g != nil && g.EngineAdapter >= 0 && g.EngineAdapter < len(g.Adapters) {
 			h.Card = g.Adapters[g.EngineAdapter].Name

@@ -252,21 +252,31 @@ func (t *realTransport) Unicast(data []byte, to *net.UDPAddr) error {
 	return errors.New("discover: no socket for that address family")
 }
 
-// Addrs implements Transport.
+// Addrs implements Transport: that interface's own addresses, no other's.
 func (t *realTransport) Addrs(ifIndex int) []net.IP {
 	var out []net.IP
-	if ifIndex > 0 {
-		for _, ifi := range targets(ifIndex) {
-			if ifi.Index == ifIndex {
-				out = ifaceAddrs(ifi)
-			}
-		}
-		if len(out) > 0 {
-			return out
+	for _, ifi := range eligible() {
+		if ifIndex == 0 || ifi.Index == ifIndex {
+			out = append(out, ifaceAddrs(ifi)...)
 		}
 	}
+	return out
+}
+
+// Reach implements Transport: the addresses of the interfaces with a subnet holding from.
+func (t *realTransport) Reach(from net.IP) []net.IP {
+	var out []net.IP
 	for _, ifi := range eligible() {
-		out = append(out, ifaceAddrs(ifi)...)
+		as, err := ifi.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range as {
+			if n, ok := a.(*net.IPNet); ok && n.Contains(from) {
+				out = append(out, ifaceAddrs(ifi)...)
+				break
+			}
+		}
 	}
 	return out
 }

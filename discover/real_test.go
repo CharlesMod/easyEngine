@@ -3,7 +3,9 @@ package discover
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,11 +46,39 @@ func TestRealNetwork(t *testing.T) {
 		}
 	}
 	bye := make(chan bool, 1)
+	var wmu sync.Mutex
+	var wrong []string
 	go func() {
 		for {
 			p, err := watch.Read()
 			if err != nil {
 				return
+			}
+			// each announcement or answer carries the addresses of ONE interface and no other
+			// (two NICs on one LAN hear each other's packets, so "heard on" can differ from "sent on")
+			for _, f := range Parse(p.Data) {
+				if f.ID != info.ID {
+					continue
+				}
+				one := false
+				for _, ifi := range eligible() {
+					own := ifaceAddrs(ifi)
+					all := len(f.Addrs) > 0
+					for _, a := range f.Addrs {
+						all = all && hasAddr(own, a)
+					}
+					one = one || all
+				}
+				name := "?"
+				if ifi, err := net.InterfaceByIndex(p.IfIndex); err == nil {
+					name = ifi.Name
+				}
+				t.Logf("heard on %s: %v (one interface's own: %v)", name, f.Addrs, one)
+				if !one {
+					wmu.Lock()
+					wrong = append(wrong, "addresses of more than one interface, heard on "+name)
+					wmu.Unlock()
+				}
 			}
 			var m dnsmessage.Message
 			if m.Unpack(p.Data) != nil || !m.Response {
@@ -68,6 +98,11 @@ func TestRealNetwork(t *testing.T) {
 	case gotBye = <-bye:
 	case <-time.After(3 * time.Second): // network timeout: the goodbye is one packet on the wire
 	}
+	wmu.Lock()
+	for _, w := range wrong {
+		t.Errorf("address of another interface: %s", w)
+	}
+	wmu.Unlock()
 	t.Logf("find saw the engine: %v; goodbye heard on the port: %v", seen, gotBye)
 	if !seen {
 		t.Errorf("find did not see the engine among %d answers", len(got))
@@ -75,4 +110,13 @@ func TestRealNetwork(t *testing.T) {
 	if !gotBye {
 		t.Error("no goodbye (TTL 0) was heard after Close")
 	}
+}
+
+func hasAddr(in []net.IP, a net.IP) bool {
+	for _, x := range in {
+		if x.Equal(a) {
+			return true
+		}
+	}
+	return false
 }

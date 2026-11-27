@@ -130,6 +130,9 @@ func TestHelloAnswersEveryoneAndNever401s(t *testing.T) {
 		h.API != run.APIVersion || !h.Pairing || !h.TokenRequired || h.Paired != nil || h.Phase != "ready" {
 		t.Fatalf("hello with no token: %+v", h)
 	}
+	if want := pe.sup.Status().Model; want == "" || h.ModelID != want || strings.HasPrefix(h.ModelID, "custom:") {
+		t.Fatalf("hello model_id %q, status model %q", h.ModelID, want)
+	}
 	if h := hello(bearer(pe.master)); h.Paired == nil || !*h.Paired || h.ClientID != tokens.MasterID {
 		t.Fatalf("hello with the master: %+v", h)
 	}

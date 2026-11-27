@@ -24,10 +24,14 @@ func gpuNode(link string) bool {
 }
 
 type linuxOS struct {
-	root string
-	ino  int // inotify fd, -1 when unavailable
-	seen map[int]seenProc
-	now  func() time.Time
+	root  string
+	sys   string // /sys and /proc/driver roots, for mapping nodes to an adapter
+	drv   string
+	nodes map[string]bool // the engine adapter's nodes; nil: any GPU node
+	pci   string
+	ino   int // inotify fd, -1 when unavailable
+	seen  map[int]seenProc
+	now   func() time.Time
 }
 
 // seenProc caches what a pid's argv said, so a scan reads only new pids' cmdline. A pid is
@@ -41,7 +45,11 @@ const youngProc = 2 * time.Second
 
 // NewOS watches the real machine. On Linux, device opens wake Wait through inotify IN_OPEN
 // on /dev/nvidia<N>, /dev/dri/renderD* and /dev/dri/card*.
-func NewOS() OS { return newLinuxOS("/proc", "/dev") }
+func NewOS() OS {
+	o := newLinuxOS("/proc", "/dev")
+	o.sys, o.drv = "/sys/class/drm", "/proc/driver/nvidia/gpus"
+	return o
+}
 
 func newLinuxOS(root, dev string) *linuxOS {
 	o := &linuxOS{root: root, ino: -1, seen: map[int]seenProc{}, now: time.Now}
@@ -158,6 +166,48 @@ func (o *linuxOS) Launches() []Launch {
 	return out
 }
 
+// Adapter maps the PCI address to its nodes: the NVIDIA minor from
+// /proc/driver/nvidia/gpus/<pci>/information, DRM nodes whose /sys/class/drm/<node>/device
+// resolves to that address.
+func (o *linuxOS) Adapter(pci string) {
+	pci = strings.ToLower(strings.TrimSpace(pci))
+	if pci == o.pci {
+		return
+	}
+	o.pci, o.nodes = pci, nil
+	if pci == "" || o.sys == "" {
+		return
+	}
+	nodes := map[string]bool{}
+	if b, err := os.ReadFile(filepath.Join(o.drv, pci, "information")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(line, "Device Minor:"); ok {
+				nodes["/dev/nvidia"+strings.TrimSpace(v)] = true
+			}
+		}
+	}
+	ents, _ := os.ReadDir(o.sys)
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasPrefix(n, "card") && !strings.HasPrefix(n, "renderD") || strings.Contains(n, "-") {
+			continue
+		}
+		if dev, err := filepath.EvalSymlinks(filepath.Join(o.sys, n, "device")); err == nil && strings.EqualFold(filepath.Base(dev), pci) {
+			nodes["/dev/dri/"+n] = true
+		}
+	}
+	if len(nodes) > 0 {
+		o.nodes = nodes
+	}
+}
+
+func (o *linuxOS) wanted(link string) bool {
+	if !gpuNode(link) {
+		return false
+	}
+	return o.nodes == nil || o.nodes[link]
+}
+
 func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 	out := map[int]string{}
 	for _, pid := range o.pids() {
@@ -170,7 +220,7 @@ func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 			continue
 		}
 		for _, e := range ents {
-			if l, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && gpuNode(l) {
+			if l, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && o.wanted(l) {
 				out[pid] = o.name(pid)
 				break
 			}

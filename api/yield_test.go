@@ -30,8 +30,9 @@ func (g *gameOS) Wait(ctx context.Context, d time.Duration) bool {
 	}
 	return false
 }
-func (g *gameOS) Drain() {}
-func (g *gameOS) Close() {}
+func (g *gameOS) Drain()         {}
+func (g *gameOS) Adapter(string) {}
+func (g *gameOS) Close()         {}
 
 func TestYieldedReply(t *testing.T) {
 	testkit.SkipWindows(t)

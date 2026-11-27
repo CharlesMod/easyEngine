@@ -33,5 +33,6 @@ func (o *otherOS) Launches() []Launch {
 func (o *otherOS) Openers(func(int) bool) map[int]string          { return nil }
 func (o *otherOS) Under(int, int) bool                            { return false }
 func (o *otherOS) Wait(ctx context.Context, d time.Duration) bool { return sleepCtx(ctx, d) }
+func (o *otherOS) Adapter(string)                                 {}
 func (o *otherOS) Drain()                                         {}
 func (o *otherOS) Close()                                         {}

@@ -72,8 +72,9 @@ func (f *fakeYieldOS) Wait(ctx context.Context, d time.Duration) bool {
 	}
 	return false
 }
-func (f *fakeYieldOS) Drain() {}
-func (f *fakeYieldOS) Close() {}
+func (f *fakeYieldOS) Drain()         {}
+func (f *fakeYieldOS) Adapter(string) {}
+func (f *fakeYieldOS) Close()         {}
 
 func (f *fakeYieldOS) memProcs(ctx context.Context, as []gpusense.Adapter) []gpusense.Process {
 	f.mu.Lock()

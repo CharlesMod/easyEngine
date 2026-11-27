@@ -273,3 +273,40 @@ func TestLinuxNoDeviceFallsBackToSleep(t *testing.T) {
 		t.Fatal("cancel ignored")
 	}
 }
+
+func TestLinuxAdapterNodes(t *testing.T) {
+	root := t.TempDir()
+	proc, sys, drv := filepath.Join(root, "proc"), filepath.Join(root, "sys"), filepath.Join(root, "drv")
+	devs := filepath.Join(root, "devices")
+	for _, d := range []string{filepath.Join(drv, "0000:0b:00.0"), filepath.Join(drv, "0000:84:00.0"), filepath.Join(devs, "0000:0b:00.0"), filepath.Join(devs, "0000:84:00.0"), filepath.Join(sys, "renderD128"), filepath.Join(sys, "renderD129"), filepath.Join(sys, "card1-DP-1")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(drv, "0000:0b:00.0", "information"), []byte("Model: x\nDevice Minor: \t 0\n"), 0o644)
+	os.WriteFile(filepath.Join(drv, "0000:84:00.0", "information"), []byte("Model: x\nDevice Minor: \t 1\n"), 0o644)
+	os.Symlink(filepath.Join(devs, "0000:0b:00.0"), filepath.Join(sys, "renderD128", "device"))
+	os.Symlink(filepath.Join(devs, "0000:84:00.0"), filepath.Join(sys, "renderD129", "device"))
+	// pid 10 holds GPU 0's card node, pid 11 GPU 1's, pid 12 GPU 1's render node
+	for pid, link := range map[int]string{10: "/dev/nvidia0", 11: "/dev/nvidia1", 12: "/dev/dri/renderD129", 13: "/dev/dri/renderD128"} {
+		fd := filepath.Join(proc, strconv.Itoa(pid), "fd")
+		os.MkdirAll(fd, 0o755)
+		os.Symlink(link, filepath.Join(fd, "3"))
+		os.WriteFile(filepath.Join(proc, strconv.Itoa(pid), "comm"), []byte("p"+strconv.Itoa(pid)+"\n"), 0o644)
+	}
+	o := newLinuxOS(proc, filepath.Join(root, "nodev"))
+	defer o.Close()
+	o.sys, o.drv = sys, drv
+	if got := o.Openers(nil); len(got) != 4 {
+		t.Fatalf("no adapter: want all 4 openers, got %v", got)
+	}
+	o.Adapter("0000:0B:00.0")
+	got := o.Openers(nil)
+	if len(got) != 2 || got[10] == "" || got[13] == "" {
+		t.Fatalf("adapter 0: got %v", got)
+	}
+	o.Adapter("0000:99:00.0") // unknown: every node again
+	if got := o.Openers(nil); len(got) != 4 {
+		t.Fatalf("unknown adapter: got %v", got)
+	}
+}

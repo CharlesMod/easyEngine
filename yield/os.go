@@ -13,6 +13,9 @@ type OS interface {
 	// Openers lists processes holding a GPU device open (pid -> name), skipping those skip
 	// says; nil where the platform cannot tell.
 	Openers(skip func(pid int) bool) map[int]string
+	// Adapter narrows Openers to the device nodes of the adapter at this PCI address (Linux:
+	// /dev/nvidia<minor>, its DRM card and render nodes); "" or an unknown address: every GPU node.
+	Adapter(pci string)
 	// Under says whether pid descends from anc (false where the platform cannot tell).
 	Under(pid, anc int) bool
 	// Wait returns after d, or early (true) when some process opened a GPU device.

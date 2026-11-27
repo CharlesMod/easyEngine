@@ -200,6 +200,11 @@ func (s *Supervisor) yieldLoop() {
 				games = append(games, l)
 			}
 		}
+		for _, a := range v.adapters {
+			if a.Index == v.engine {
+				o.Adapter(a.PCI)
+			}
+		}
 		skip := s.yieldExcluded(o, except)
 		pending := next == yieldPending
 		fresh := false

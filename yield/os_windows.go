@@ -47,5 +47,6 @@ func registryLaunches(r SteamRegistry) []Launch {
 func (o *windowsOS) Openers(func(int) bool) map[int]string          { return nil }
 func (o *windowsOS) Under(int, int) bool                            { return false }
 func (o *windowsOS) Wait(ctx context.Context, d time.Duration) bool { return sleepCtx(ctx, d) }
+func (o *windowsOS) Adapter(string)                                 {}
 func (o *windowsOS) Drain()                                         {}
 func (o *windowsOS) Close()                                         {}

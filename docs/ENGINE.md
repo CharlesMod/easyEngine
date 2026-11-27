@@ -521,9 +521,11 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   start, before a grow, on an out-of-memory line, when another program opens the engine's card
   device (Linux, inotify), when a program the last picture listed ends, and on the host's word
   (`POST host`). Another living program's memory gives no event (NVIDIA, and everything on
-  Windows and macOS), so while a model is loaded the reading is also kept by the one watchdog
-  for it, inside package `host` (`host.Level`, every 5 s, `RoomEvery`; the status `gpu` is said
-  with each reading). If the model's memory (`Footprint.Need` of the running shape) no longer
+  Windows and macOS), so while a model is loaded, and while a start that failed for want of room
+  waits for the room to change, the reading is also kept by the one watchdog for it, inside
+  package `host` (`host.Level`, every 5 s, `RoomEvery`; the status `gpu` is said with each
+  reading). The engine's own reads open the card too (nvidia-smi); `host.Own` keeps every device
+  watch from hearing them, so a read never causes another. If the model's memory (`Footprint.Need` of the running shape) no longer
   fits the budget the reserve leaves (the player loaded a heavy save), restart at a smaller
   shape **when idle**; never in the middle of a line. The card's used memory is not the test: it
   holds the engine's own server too, and read alone would shrink the model with nothing else on
@@ -545,8 +547,11 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   at the bigger shape. If that fails, restart at the old shape.
 - **Ready by its own lines:** llama-server's output comes line by line; after the line that
   says it listens (`listening on http://…`, fixtures in `run/testdata/ready-*.txt`) `/health` is
-  asked once per following line until it answers 200. A load that says nothing for 15 min
-  (`LoadTimeout`) is a watchdog for silence and fails.
+  asked once per following line until it answers 200. The lines are the first word, not the
+  only one: when the server has said nothing for 2 s (`ReadyQuiet`, a watchdog for silence)
+  `/health` is asked once, listening line or not, and again only after a new line. A load that
+  says nothing for 15 min (`LoadTimeout`) is asked once more and then fails. A build that prints
+  forever and never answers 200 is not bounded.
 - **A hung server:** no periodic `/health`. While requests are in flight a watchdog for silence
   (`HangSilence`, 2 min) is put back by every line of the server, every request beginning or
   ending and every byte of a response (the proxy calls `Heard`). When it fires, `/health` is

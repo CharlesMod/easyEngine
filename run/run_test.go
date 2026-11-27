@@ -287,9 +287,16 @@ func TestQuietIdleServerIsLeftAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer syscall.Kill(pid, syscall.SIGCONT)
+	from := testkit.Mark(t, s, "before")
 	done := s.Begin() // a request begins and ends at once: the silence is disarmed again
 	done()
+	// named moment: well past HangSilence; a watchdog left armed would have fired by now
+	past := time.NewTimer(10 * cfg.HangSilence)
+	<-past.C
 	s.React()
+	if hs := testkit.Said(t, s, from, 0, "mind.hang"); len(hs) != 0 {
+		t.Fatalf("a quiet idle server was asked /health: %v", hs)
+	}
 	if n := len(e.Starts()); n != 1 || s.Phase() != "ready" {
 		t.Fatalf("a quiet idle server was restarted: %v %s", e.Starts(), s.Phase())
 	}

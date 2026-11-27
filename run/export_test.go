@@ -26,6 +26,10 @@ func LogCeiling() int64                                            { return logC
 // and wants to know the engine has looked at it calls it once the change holds (HeldReserve).
 func (s *Supervisor) React() { s.react() }
 
+// Network says the network happening, as the system's word that a link or an address changed
+// would (watchNetwork).
+func (s *Supervisor) Network() { s.say("network", "", nil) }
+
 // HeldReserve is the room's last held reserve (others plus the host's share, MiB), while a model
 // is loaded.
 func (s *Supervisor) HeldReserve() (int, bool) {

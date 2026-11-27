@@ -359,8 +359,9 @@ func TestAgentRestartOnceThenWaitForWord(t *testing.T) {
 	if n := len(lines(logf)); n != 4 {
 		t.Fatalf("%d agent starts after the stable run, want 4", n)
 	}
-	// and a word on a quick failure gives exactly one start and no more
-	sup.Nudge("y")
+	// and a request at the door is a word too (the model is ready, the agent waits): exactly one
+	// start and no more
+	sup.Begin()()
 	testkit.WaitFor(t, 10*time.Second, "agent waiting after one more start", waiting(5))
 	if n := len(lines(logf)); n != 5 {
 		t.Fatalf("%d agent starts after a word, want 5", n)

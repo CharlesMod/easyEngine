@@ -241,7 +241,11 @@ func TestTargetFailureKeepsStarterAndRetries(t *testing.T) {
 		if n := strings.Count(s.order(), "target"); n != i+1 {
 			t.Fatalf("target requested %d times before word %d: retried without one", n, i+1)
 		}
-		sup.Nudge("try again")
+		if i == 0 {
+			sup.Begin()() // a request at the door, the starter serving it, is a word
+		} else {
+			sup.Network() // the network came back
+		}
 		waitStatus(t, sup, "the retry", func(st run.Status) bool { return st.Upgrade == nil || st.Upgrade.State != "retrying" })
 	}
 	waitStatus(t, sup, "swap", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "target" })

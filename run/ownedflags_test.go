@@ -155,7 +155,7 @@ func TestCheckExtraArgsCases(t *testing.T) {
 	}
 	ok := [][]string{
 		{"--top-n-sigma", "1.5"},
-		{"--spec-type", "ngram-mod", "--spec-draft-n-max", "16"},
+		{"--spec-type", "ngram-mod", "--spec-ngram-mod-n-max", "16"},
 		{"-C", "0xff"},
 		{"--temp", "-0.5"},
 		{"--lora", "a.gguf"},

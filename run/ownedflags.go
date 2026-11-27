@@ -133,6 +133,12 @@ var ownedFlagNames = []string{
 	"--no-ui", "--no-webui", "--webui-config", "--webui-config-file", "--log-verbose", "--verbose",
 	"--verbosity", "--log-verbosity", "--reasoning", "--no-jinja", "--alias", "--help", "--usage",
 	"--cache-list",
+	// Vision and draft models are not a client's to bring (a projector comes from the catalog per
+	// model in a later version; a draft model is not sized): every projector, media and draft flag.
+	"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto", "--mmproj-offload", "--no-mmproj-offload",
+	"--image-min-tokens", "--image-max-tokens", "--mtmd-batch-max-tokens", "--video-fps",
+	"--video-timestamp-interval", "--draft", "--draft-n", "--draft-max", "--draft-min", "--draft-n-min",
+	"--draft-p-split", "--draft-p-min", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft",
 }
 
 var ownedSet = func() map[string]bool {
@@ -158,9 +164,11 @@ func normFlag(name string) string {
 }
 
 // ownedNamed is the name-only part of ownedFlag: the owned set and the preset
-// patterns (any "...-default" or "--fim-..." shortcut loads a model or server config).
+// patterns (any "...-default" or "--fim-..." shortcut loads a model or server config; every
+// "--spec-draft-..." flag is a draft model's, every "--mmproj..." a projector's).
 func ownedNamed(n string) bool {
-	return ownedSet[n] || strings.HasSuffix(n, "-default") || strings.HasPrefix(n, "--fim-")
+	return ownedSet[n] || strings.HasSuffix(n, "-default") || strings.HasPrefix(n, "--fim-") ||
+		strings.HasPrefix(n, "--spec-draft-") || strings.HasPrefix(n, "--mmproj")
 }
 
 // ownedFlag reports whether the engine owns the flag. With a help, any spelling

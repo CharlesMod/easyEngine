@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -34,20 +33,16 @@ import (
 // ServerOpts is a profile's launch options: what the launch needs that sizing must know, and
 // extra llama-server arguments. Each is checked against the build's --help before it is used.
 type ServerOpts struct {
-	Ubatch      int       `json:"ubatch,omitempty"`
-	Reasoning   string    `json:"reasoning,omitempty"`
-	MMProj      string    `json:"mmproj,omitempty"`
-	Speculative *SpecOpts `json:"speculative,omitempty"`
-	ExtraArgs   []string  `json:"extra_args,omitempty"`
-	// Required names options (ubatch, reasoning, mmproj, speculative.draft, agent, model, or an
-	// extra flag such as --spec-type) whose refusal refuses the attach (409) instead of telling.
+	Ubatch    int      `json:"ubatch,omitempty"`
+	Reasoning string   `json:"reasoning,omitempty"`
+	ExtraArgs []string `json:"extra_args,omitempty"`
+	// Required names options (ubatch, reasoning, agent, model, or an extra flag such as
+	// --spec-type) whose refusal refuses the attach (409) instead of telling.
 	Required []string `json:"required,omitempty"`
-}
-
-// SpecOpts is speculative decoding with a draft model file (a local client's path). Other kinds
-// (ngram, MTP) go through extra_args, checked.
-type SpecOpts struct {
-	Draft string `json:"draft,omitempty"`
+	// MMProj and Speculative are not offered: a projector comes from the catalog per model in a
+	// later version, and a draft model is not sized. They are read only to refuse them plainly.
+	MMProj      json.RawMessage `json:"mmproj,omitempty"`
+	Speculative json.RawMessage `json:"speculative,omitempty"`
 }
 
 // ModelPrefs is advice: the models a client can use and prefers. The selection stays the
@@ -86,7 +81,7 @@ const (
 
 // option is one launch option an attachment asks for.
 type option struct {
-	Name  string   // ubatch | reasoning | mmproj | speculative.draft | agent | --flag (extra)
+	Name  string   // ubatch | reasoning | agent | --flag (extra); a later option adds a case to optionsOf
 	Value string   // compared between attachments
 	Args  []string // what goes on the command line
 	Flags []string // the spellings the build's help must know (none: not a flag)
@@ -196,13 +191,6 @@ func optionsOf(p Profile) []option {
 		}
 		if sv.Reasoning != "" {
 			out = append(out, option{Name: "reasoning", Value: sv.Reasoning, Args: []string{"--reasoning", sv.Reasoning}, Flags: []string{"--reasoning", "-rea"}})
-		}
-		if sv.MMProj != "" {
-			out = append(out, option{Name: "mmproj", Value: sv.MMProj, Args: []string{"--mmproj", sv.MMProj}, Flags: []string{"--mmproj", "-mm"}})
-		}
-		if sv.Speculative != nil && sv.Speculative.Draft != "" {
-			d := sv.Speculative.Draft
-			out = append(out, option{Name: "speculative.draft", Value: d, Args: []string{"-md", d}, Flags: []string{"-md", "--model-draft", "--spec-draft-model"}})
 		}
 		for _, g := range extraGroups(sv.ExtraArgs) {
 			name := normFlag(flagName(g[0]))
@@ -463,23 +451,6 @@ func withOptions(args []string, opts [][]string, h *Help) []string {
 		add = append(add, o...)
 	}
 	return withBefore(out, "--host", add)
-}
-
-// clientFilesMiB is the size of the projector and draft files the clients' options take.
-func (s *Supervisor) clientFilesMiB() int {
-	r := &s.clients
-	r.mu.Lock()
-	_, vals, _ := launchOpts(r.list, nil)
-	r.mu.Unlock()
-	n := int64(0)
-	for _, k := range []string{"mmproj", "speculative.draft"} {
-		if p := vals[k]; p != "" {
-			if st, err := os.Stat(p); err == nil {
-				n += st.Size()
-			}
-		}
-	}
-	return int((n + (1 << 20) - 1) >> 20)
 }
 
 // startMap sets the running map for a server that started at shape with the options of ls.

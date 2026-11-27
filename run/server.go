@@ -105,9 +105,6 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
 		s.save()
 	}
-	// a projector or a draft model a client brings sits beside the model: its file is counted in
-	// the host's reserve (predicted)
-	room.GameReserve += s.clientFilesMiB()
 	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG, sum: sn.sum}
 	return lc, room, s.wantsFor(key), nil
 }

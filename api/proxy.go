@@ -86,7 +86,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// a request of an attachment: its slot numbers are its own (mapped below), said in the end
-	var clientSlot *int
+	var clientSlot, engineSlot *int
 	var engineSlots []int
 	if door.ID != "" {
 		end := done
@@ -97,6 +97,9 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			re.Attachment = door.ID
 			if re.ClientSlot == nil {
 				re.ClientSlot = clientSlot
+			}
+			if re.Slot == nil {
+				re.Slot = engineSlot // the slot the door sent it to (a streamed reply says its own)
 			}
 			end(re)
 		}
@@ -170,7 +173,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if es >= 0 {
-				clientSlot = &cs
+				clientSlot, engineSlot = &cs, &es
 				defer a.S.Busy(es)()
 			}
 			engineSlots = door.Slots

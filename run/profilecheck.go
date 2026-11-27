@@ -1,7 +1,6 @@
 package run
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -18,7 +17,7 @@ var (
 )
 
 // requiredNames are the options a profile may mark required (beside an extra flag's name).
-var requiredNames = []string{"ubatch", "reasoning", "mmproj", "speculative.draft", "agent", "model"}
+var requiredNames = []string{"ubatch", "reasoning", "agent", "model"}
 
 // checkProfile vets a client's profile; it lower-cases sampler names (a request's X-Easy-Sampler
 // is looked up lower-cased, so a name with capitals could never match).
@@ -97,10 +96,6 @@ func checkProfile(p *Profile, local bool, h *Help) *ClientError {
 			switch {
 			case len(sv.ExtraArgs) > 0:
 				return cerr(400, "extra_args_not_allowed", "a client on another machine may send ubatch and reasoning only, no extra_args")
-			case sv.MMProj != "":
-				return cerr(400, "path_not_allowed", "server.mmproj is a path on this machine; a remote client may not send it")
-			case sv.Speculative != nil:
-				return cerr(400, "path_not_allowed", "server.speculative names a file on this machine; a remote client may not send it")
 			}
 		}
 	}
@@ -127,15 +122,11 @@ func checkProfile(p *Profile, local bool, h *Help) *ClientError {
 		default:
 			return bad("server.reasoning must be on, off or auto")
 		}
-		if sv.MMProj != "" {
-			if e := checkLocalFile(sv.MMProj, "server.mmproj"); e != nil {
-				return e
-			}
+		if len(sv.MMProj) > 0 {
+			return cerr(400, "not_offered", "server.mmproj is not offered: a vision projector will come from the catalog with its model")
 		}
-		if sv.Speculative != nil && sv.Speculative.Draft != "" {
-			if e := checkLocalFile(sv.Speculative.Draft, "server.speculative.draft"); e != nil {
-				return e
-			}
+		if len(sv.Speculative) > 0 {
+			return cerr(400, "not_offered", "server.speculative is not offered: a draft model is not sized; ngram speculation goes in a local client's extra_args")
 		}
 		if len(sv.ExtraArgs) > 0 {
 			if _, ae := CheckExtraArgs(sv.ExtraArgs, h); ae != nil {
@@ -159,18 +150,6 @@ func checkProfile(p *Profile, local bool, h *Help) *ClientError {
 				return bad("required option %q is not one of %s or an extra flag", r, strings.Join(requiredNames, ", "))
 			}
 		}
-	}
-	return nil
-}
-
-// checkLocalFile: an absolute path to a regular .gguf file that exists.
-func checkLocalFile(p, field string) *ClientError {
-	if !filepath.IsAbs(p) || !strings.EqualFold(filepath.Ext(p), ".gguf") {
-		return cerr(400, "path_not_allowed", "%s must be an absolute path to a .gguf file", field)
-	}
-	st, err := os.Stat(p)
-	if err != nil || !st.Mode().IsRegular() {
-		return cerr(400, "bad_request", "%s: no such file", field)
 	}
 	return nil
 }

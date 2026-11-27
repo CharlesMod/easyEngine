@@ -1,6 +1,7 @@
 # Events, not clocks (design and contract)
 
-Status: design, 2026-11-27. This file lands in the repo as `docs/EVENTS.md`. It is the contract the
+Status: design, 2026-11-27; built through ee-stream (the stream on the wire, the door holds, the
+law binds every file) except where a row below says otherwise. This file lands in the repo as `docs/EVENTS.md`. It is the contract the
 event-driven redesign is built to. Where it and `docs/ENGINE.md` disagree, this file is the newer word
 and ENGINE.md is brought into line by the step that builds the part.
 
@@ -25,9 +26,9 @@ game mod and the hive under one rule.
 - *Checked by* `laws.Clock`: a test that fails any call to `time.Sleep`, `time.Tick`,
   `time.NewTicker`, `time.After`, `time.AfterFunc` or `time.NewTimer`, in code and in tests, unless
   the call's own line or one of the two lines above carries a comment naming it `watchdog for
-  silence`, `network timeout` or `named moment`. While the tree is converted, `laws/unconverted.txt`
-  lists the files not yet converted; a listed file with no call left fails the test (the list only
-  shrinks), and the redesign is done when the list is empty and deleted.
+  silence`, `network timeout` or `named moment` (and `PageClock`: no `setInterval`/`setTimeout` in
+  the page unless so named). The tree is converted (ee-stream): the ratchet list
+  `laws/unconverted.txt` is empty and deleted, and the law binds every file.
 
 ## 2. Events
 
@@ -61,7 +62,10 @@ type Event struct {
   the stream ends, with a last line `{"gap":true}`, when the history ring (4096) has let go of
   `since`, and when the engine ends, which
   is how a client hears the engine is gone. `GET /engine/v1/status` stays, computed from the facts,
-  for clients not yet moved.
+  for clients not yet moved. *Built* (ee-stream): the three paths are mounted behind the gate
+  (`api/api.go`, `event/door.go`, unchanged: they agreed with this section); the `engine` fact and
+  status carry `api: 1`; the `door` fact `{held}` is declared; docs/ENGINE.md §7e is the client's
+  contract. Not yet: `client` and `context` (later slices).
 - The first names: `engine` (version, api, port, build), `phase`, `model`, `mind.shape`,
   `mind.device`, `agent` (keyed by client), `client` (keyed), `install.progress` (reading, said per
   step of bytes, never per time), `upgrade`, `room` (reading: adapters, reserve, free for the model),
@@ -72,15 +76,15 @@ type Event struct {
 
 | Today | Becomes | Status |
 |---|---|---|
-| Watchdog tick every 5 s (`/health`, `/slots`, `/metrics`, probe, sense) | No tick. Child exit is `Proc.Done`. A hung server is a watchdog for silence on a request in flight. Idle is the door's own count reaching zero (and the engine's `slot released` line where the build says it). Tok/s is read from the replies the door forwards. | Built (ee-mind): exit by `Proc.Done`; hang by `HangSilence` while requests are in flight, put back by the server's lines, Begin/end and the proxy's `Heard` on each write, made again after it fires; idle by the door's count. Handed to the next slice: tok/s from the replies (today one `/metrics` read when the count reaches zero). |
-| `/health` every 250 ms while loading | The server's own lines: after `listening on`, `/health` is asked once per following line; silence is a watchdog. | Built (ee-mind); fixtures in `run/testdata/ready-*.txt`. |
+| Watchdog tick every 5 s (`/health`, `/slots`, `/metrics`, probe, sense) | No tick. Child exit is `Proc.Done`. A hung server is a watchdog for silence on a request in flight. Idle is the door's own count reaching zero (and the engine's `slot released` line where the build says it). Tok/s is read from the replies the door forwards. | Built (ee-mind): exit by `Proc.Done`; hang by `HangSilence` while requests are in flight, put back by the server's lines, Begin/end and the proxy's `Heard` on each write, made again after it fires; idle by the door's count. Tok/s from the replies: a streamed reply's own `timings` (the streamer's summary, said in the `request` end, ee-stream); a non-streamed one still has one `/metrics` read when the count reaches zero. |
+| `/health` every 250 ms while loading | The server's own lines: after `listening on`, `/health` is asked once per following line; silence is a watchdog. | Built (ee-mind); fixtures in `run/testdata/ready-*.txt`. A request held at the door while loading is a word too: `/health` is asked once on it (ee-stream). |
 | Parent pid poll every 1 s | `host.Exits(pid)`: pidfd (Linux), kqueue `EVFILT_PROC` (macOS), a wait on the process handle (Windows). | Built (`host.ExitsOf`). |
 | Yield loop 250 ms / 1 s | Device opens by inotify with no cap (Linux); Steam's `RunningAppID` by registry notification (Windows) and file change (macOS); a stranger's end by `host.Exits`. What has no event (a launcher's argv on Linux, a process's memory on NVIDIA) is a `host` watchdog. | Built (ee-mind); the Windows and macOS watches are compile-checked only. |
 | Sense the card every 5 s | Read when needed, never watched: at a start, before a grow, on a refused start or an out-of-memory line, on a stranger's open or end, on the host's word (`POST host`), on a client's ask. The one `host` watchdog left is the level of the card while a mind shares it with a living program that gives no event. | Built (ee-mind), except that the `host.Level` watchdog (`RoomEvery`) is armed for as long as a model is loaded, not only while a stranger shares the card. Device opens off Linux are compile-checked only. |
 | Sleep loops waiting on our own state (drains, phase waits, job waits) | A `Waker` on the fact that means it. | Built (ee-mind). |
 | Crash, agent, download and upgrade backoff | No cadence. One restart at once; a second failure of the same kind waits for an event that could change the outcome: the room changed, a request arrived, a client or the keeper said so, the network came back (`host`). The fact `recovery` says what it waits for. | Built (ee-mind): `recovery.waiting_for`, `retry_in_s` always 0. The words: a request at the door (said as a nudge while something waits), a client's attach, settings, start, wake, install or `POST host` (api calls `Nudge`), the room (watched while a start waits for it), `host.NetworkChanges` (Windows and macOS compile-checked only). Downloads listen before each attempt. |
-| `503` + `Retry-After` during a load or reshape | The door holds the request and answers it when the mind is up (the client's own timeout bounds it). `yielded`, `not_installed` and `error` are facts and are answered at once. | Handed to the next slice (api/). |
-| Clients polling `status` (page 1 s, mod 2 s, CLI 300 ms, agent 60 s) | The stream of §2. | Handed to the next slice: `Supervisor.Hub()` holds the facts; the stream and its routes are api/. |
+| `503` + `Retry-After` during a load or reshape | The door holds the request and answers it when the mind is up (the client's own timeout bounds it). `yielded`, `not_installed` and `error` are facts and are answered at once. | Built (ee-stream): `Route.Hold`, `Supervisor.Enter/Hold`, `api.hold` waits on the hub and the client's context; a held streamed request gets the waiting word; held requests are not in flight. The phase is said before a stop (yield, sleep, stop, shutdown). Rules: docs/ENGINE.md §7e. |
+| Clients polling `status` (page 1 s, mod 2 s, CLI 300 ms, agent 60 s) | The stream of §2. | Built for the engine's own clients (ee-stream): the setup page and the CLI follow `events`; the tray's tooltip and the resident linger wake on the hub; the app's lock loop waits on `host.Changes` and `host.Exits`. The mod and the agent are theirs to move. |
 
 ## 4. Parts
 
@@ -161,7 +165,9 @@ connection.
   paired client's first call, a request at the door) is the event that loads it; the door holds
   that first request until the mind is up. When the last client is gone (its pid ended, by
   `host.Exits`, or its connection closed for a remote client) and nothing is in flight, the keeper's
-  `linger` (a named moment) runs and the mind is unloaded; the engine stays. A mod does not start
+  `linger` (a named moment) runs and the mind is unloaded; the engine stays. *Built* (ee-stream):
+  a remote client is counted by its requests at the door (in flight or held); the linger is armed
+  when the door is empty and no pid is attached, and a request or an attach cancels it. A mod does not start
   the engine with a parent pid any more: it finds the engine (the lock, hello), attaches with its
   profile, and only if none runs on its own machine starts the app detached.
 - The tray is also where a pairing request is answered (§7 and the pairing slice): a notification,

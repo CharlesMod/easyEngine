@@ -102,6 +102,16 @@ clients ignore comment lines, so they are never taken for tokens.
 Both periods are a *watchdog for silence* in the engine's law (`docs/EVENTS.md`): one timer per
 streamed request, re-armed from the time of the last write, stopped when the request ends.
 
+- **Held at the door.** A streamed request that arrives while the model is on its way up (a load,
+  a reshape, the swap to the full model, a sleep it wakes: docs/ENGINE.md §7e) is held, and its
+  stream is the one above, started when the request arrives: after **2 s** of hold the engine
+  answers 200 with the headers above and `: easy waiting\n\n`, again every 15 s of silence, and
+  when the model is up the request is forwarded and the upstream's events follow in the same
+  reply. A hold shorter than 2 s is not seen at all. A hold that ends in a phase answered at once
+  (yielded, no model installed, the model server's error, a person's stop, the engine stopping)
+  ends the open stream with the terminal event `yielded` or `unavailable` (§5); before the 2 s,
+  the client gets the plain JSON 503 an unstreamed request gets.
+
 ## 5. The terminal error event
 
 When the **engine** ends a started stream early, the last bytes the client receives are one
@@ -145,6 +155,16 @@ reached):
 data: {"error":{"code":"upstream_error","type":"upstream_error","message":"boom","status":500,"request_id":"rid-5"}}\n\n
 ```
 
+`unavailable`: a held request's stream was open (the waiting word went out) and its hold ended in
+a phase that is answered at once without a model; the message is the 503's (here a person's
+stop while the model loaded):
+
+```
+data: {"error":{"code":"unavailable","type":"unavailable_error","message":"Loading model","status":503,"request_id":"rid-6"}}\n\n
+```
+
+`yielded` is used the same way when the hold ends in a yield.
+
 "Early" means: chat and text completions ended (cleanly or by a broken connection) before
 `data: [DONE]`, and before any `finish_reason` (a server that sends a `finish_reason` and then
 ends without `[DONE]` has finished); native `/completion` ended before an event with
@@ -163,7 +183,11 @@ What never gets a terminal event:
 
 - Treat `data: {"error":...}` as the end of the reply, whatever the code. `yielded` and
   `model_server_gone` are worth a retry after the engine is `ready` again (`GET /engine/v1/status`
-  or the events stream); `upstream_ended` and `upstream_error` come from the player's endpoint.
+  or the events stream); `unavailable` is worth one when the engine says a phase that serves
+  again; `upstream_ended` and `upstream_error` come from the player's endpoint.
+- The streamer's summary of each reply (how it ended, finish reason, token counts, tok/s, slot)
+  is said on the engine's event stream as the `request` end happening, with the `X-Request-Id`
+  (docs/ENGINE.md §7e).
 - A reply that ends without `[DONE]` (or `"stop": true`) and without an error event did not come
   through the streamer (it is off, or the reply was compressed).
 - Ignore lines that start with `:`.

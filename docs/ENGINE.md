@@ -627,12 +627,16 @@ a service or a shell: no tray, and it ends with its parents, as described next.
 - **Waits for the connection.** The app starts with no model loaded (phase `sleeping`, "Model
   not loaded"; `Config.StartSleeping`); the agent and an unfinished upgrade wait for the first
   load too. The app never ends because clients are gone. A client that
-  attaches a pid (`POST attach`) wakes the model if it sleeps; a request at the proxy wakes it too
-  (the first reply is the usual 503 `Retry-After`). When the last attached pid is gone and no
-  request is in flight, the keeper's `linger_s` runs and then the model is **put to sleep**
-  (`POST sleep`'s unload); the engine stays. A client that never attached a pid (a remote
-  client) does not trigger the unload yet. `serve --parent-pid` keeps its behaviour: the engine
-  ends with its parents.
+  attaches a pid (`POST attach`) wakes the model if it sleeps; a request at the proxy wakes it too,
+  and the door **holds** that request until the model is up (§7e). The clients are the attached
+  pids and the requests at the door (in flight or held: a remote client that never attached a
+  pid counts by its requests). Once a client has come, when no pid is attached and the door is
+  empty while a model is up, the keeper's `linger_s` (a named moment) runs; a request or an
+  attach cancels it, and it runs again from the door's next empty. When it ends with nobody
+  there the model is **put to sleep** (`POST sleep`'s unload); the engine stays. A model a person
+  started with no client ever coming is not put to sleep by the linger. The tooltip follows the
+  hub (phase, model, door), not only clicks, and says `(N waiting)` while the door holds N
+  requests. `serve --parent-pid` keeps its behaviour: the engine ends with its parents.
 
 #### Launch commands per OS (for a mod's launcher)
 
@@ -763,7 +767,10 @@ other timer: streams and long model calls run as long as the client keeps them.
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET facts` | everything that stands on the engine's hub: `{life, seq, facts: [Event], readings: [Event]}` (§7e) |
+| `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
+| `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
+| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
@@ -777,7 +784,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once. `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off). `GET settings` shows `streamer`. `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid}` | adds a parent pid; **409** once the engine is stopping |
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
@@ -805,9 +812,9 @@ line, so a first install stages it:
    phase to `resizing` (message "Switching to the full model"), waits for requests in flight and
    busy slots to finish (at most `SwapDrain`, default 2 min), stops the old server and starts the
    target with a fresh fit (`fit.Choose` with the live room). Nothing is cut off mid-reply.
-3. **Clients during the swap get a short 503 with `Retry-After: 2`**, body message "Switching to
-   the full model", the same shape as "Loading model"; the proxy never queues. Reason: every
-   client already retries a 503, and nothing holds a connection through a model load (10-60 s).
+3. **Clients during the swap are held** at the door (§7e) and answered by the target once it is
+   ready: a slower reply, not an error. (Before API 1 they got a 503 "Switching to the full
+   model".)
 4. No starter when: the target is already on disk; the target is the smallest that fits (a
    CPU-only machine picks the smallest) or less than twice the next smaller model; the starter
    would not fit the disk; the install runs from the CLI (`easy-engine install` exits with the
@@ -918,10 +925,12 @@ recovers.
 ### Proxy
 
 Every other path (`/v1/*`, `/completion`, `/slots`, `/props`, `/health`, `/metrics`, `/tokenize`, …)
-is forwarded unchanged to llama-server (streaming included). While the model is loading or
-resizing the engine answers **503** with
-`{"error":{"code":503,"type":"unavailable_error","message":"Loading model"}}` (llama-server's
-own shape, so clients that already retry on 503 work). While the card is yielded (§6b) it
+is forwarded unchanged to llama-server (streaming included). While the model is on its way up
+the door **holds** the request and answers it when the model is ready (§7e). Where a request is
+answered at once without a model (no model installed, the model server's error, a person's stop,
+a download, the engine stopping) the engine answers **503** with `Retry-After: 2` and
+`{"error":{"code":503,"type":"unavailable_error","message":"..."}}` (llama-server's own shape, so
+clients that already retry on 503 work). While the card is yielded (§6b) it
 answers **503** with `Retry-After: 10` and
 `{"error":{"code":"yielded","type":"unavailable_error","message":"Paused while <reason> runs"}}`,
 where `<reason>` is, for example, `AppId 123 (game.exe)`. The string code tells "paused for
@@ -962,7 +971,81 @@ hardware, the recommended model with a one-click **Install**, the other models w
 verdicts, a progress bar with speed and ETA, the live phase and shape, the Local/External
 switch with a **Test** button and a green/amber/red light, the sampler policy (selectable) with the
 profiles in force (read-only), and the three log tails. On a non-loopback listener it takes the
-token from the address fragment (see Token above).
+token from the address fragment (see Token above). It has no timer: it reads `facts` once and
+follows `events` with a stream reader (§7e), re-reading `status` once per batch of events and the
+open log tails on an event; on a 409, a gap or the stream's end it reads the facts again. An
+engine it cannot reach is shown with a **Reconnect** button (the click, the browser going online
+and the page becoming visible again are the words that try again).
+
+### 7e. The event stream and the door (API 1)
+
+The engine says what happens on its hub (docs/EVENTS.md §2): facts that stand until replaced or
+said gone, readings (levels said when they change) and happenings (history). The names are in
+`GET book` (`run/book.go`): `engine` `{version, api, port}`, `phase` `{phase, message}`, `model`,
+`door` `{held}`, `mind.shape`, `mind.device`, `job`, `install.progress`, `upgrade`, `yield`,
+`recovery`, `room`, `agent` (keyed), and the happenings `request`, `error`, `nudge`, `mind.exit`,
+`mind.hang`, `mind.oom`, `network`, `mark`. No secret is ever on the stream (the external API key
+and the tokens are in no fact). The three paths pass the same gate and token as every other.
+
+An event: `{"seq":12,"at":"2026-11-27T14:09:47.11-06:00","life":"3f9c0a1b2d4e5f60","name":"phase","kind":"fact","body":{"phase":"ready","message":"Ready"}}`
+(`key` where a name is keyed, `gone: true` when a fact stops standing; `at` is data only).
+
+- `GET /engine/v1/facts` → 200 `{"life":L,"seq":N,"facts":[...],"readings":[...]}`, sorted by
+  name and key.
+- `GET /engine/v1/events?life=L&since=N[&prefix=P]` → 200 `application/x-ndjson`, one event per
+  line, oldest first, flushed as said, held open for as long as the client keeps it. `prefix`
+  keeps names beginning with it (`phase`, `mind.`). **409** `{"error":"not this life's seq: read
+  the facts whole","life":L2,"seq":N2}` when L is not this run of the engine or N is past its
+  seq; **400** for a bad `since` or an undeclared prefix. When the history ring (4096 events) has
+  let go of N the stream ends with a last line `{"gap":true}`. The stream ends when the engine
+  ends.
+- `GET /engine/v1/book` → 200 `[{"name","kind","keyed"?,"what"}]`.
+
+**A client's recipe.** Read `facts` (keep `life`, `seq` and what stands). Follow
+`events?life=<life>&since=<seq>`, applying each line (a fact replaces the one of its name and key,
+or removes it when `gone`), and keep the last seq. On a 409, a `{"gap":true}` line or the
+stream's end, read `facts` again and follow again; a refused connection means the engine is gone.
+Never decide from a happening's history, only from what stands.
+
+The `request` happening: `{"what":"begin","inflight":1,"id":"rid-7"}` when a request passes the
+door, `{"what":"end","inflight":0,"id":"rid-7", ...}` when it ends (the id is the reply's
+`X-Request-Id`, so a client pairs them), and for a streamed reply the end carries what the
+streamer read: `end` (done, upstream_error, ended_early, client_gone), `events`, `finish_reason`,
+`prompt_tokens`, `cached_tokens`, `completion_tokens`, `tok_s`, `prompt_ms`, `predicted_ms`,
+`slot`. A streamed reply's `tok_s` is status `tok_s`; otherwise `/metrics` is read once when the
+door goes idle (`{"what":"idle","tok_s":...}`).
+
+**The door holds.** A proxied request that arrives while the model is on its way up is held and
+answered when the model is ready, instead of a 503:
+
+- **Held:** phase `starting`, `loading`, `resizing` (a reshape, or the swap to the full model),
+  `ready` while a swap has begun, and `sleeping` unless a person stopped it (the request is also
+  the word that wakes it).
+- **Answered at once, exactly as before:** yielded (503, `"code":"yielded"`, `Retry-After: 10`),
+  `not_installed`, `error`, a person's Stop (`sleeping`, message "Stopped"), `downloading`,
+  `installing`, `removing`, `stopping`, every external-mode error, and everything the gate
+  refuses.
+- **How a hold ends:** it waits on the hub (the `phase`, `model`, `yield` and `upgrade` facts),
+  never on a clock: when the phase becomes `ready` the request is forwarded; when it becomes one
+  of the answered-at-once phases the request gets that answer then; when the client goes away
+  the hold ends silently; when the engine ends it gets 503 "The engine is stopping". There is no
+  engine timeout on a hold: the client's own timeout bounds it.
+- **A held streamed completion** (`"stream": true`, the streamer on) gets its stream opened as
+  for a slow upstream (docs/STREAMING.md §4): after 2 s, 200 `text/event-stream` and `: easy
+  waiting`, repeated every 15 s; the reply follows in the same stream. A hold that ends in an
+  answered-at-once phase after the stream was opened ends it with the terminal event, code
+  `yielded` or `unavailable`, `"status":503` (STREAMING.md §5); before the stream opened, the
+  JSON 503 above.
+- A held request is counted in the `door` fact `{held}` and status `held`, **not** in flight: the
+  hang watchdog does not arm for a request the model server has not seen, and a drain (a reshape,
+  a swap, a yield) does not wait for a request that waits for it. Its `request` begin is said when
+  it passes the door. The resident app counts held requests as clients (§6a).
+- A request held while the model loads is a word: the load asks `/health` once on it (one ask
+  per held request), so a build whose `/health` turns 200 long after its last log line is found
+  ready by the next request, not by `LoadTimeout`.
+- The phase is said **before** a stop begins (yield, sleep, a person's stop, shutdown): a request
+  that arrives during the stop is answered by that phase (yielded, held to wake again, 503), never
+  proxied to a server being stopped. `stopping` is now said on the stream by the engine itself.
 
 ### 7c. Disk need
 

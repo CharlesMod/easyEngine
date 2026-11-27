@@ -112,7 +112,7 @@ func (a *API) attach(w http.ResponseWriter, r *http.Request) {
 		clientFail(w, &run.ClientError{Status: 400, Code: "bad_request", Msg: "name is longer than 256 bytes"})
 		return
 	}
-	if in.Pid > 0 && a.Attach == nil {
+	if in.Pid > 0 && a.Attach == nil && in.Profile == nil && !in.Hold { // the old wire, as before
 		fail(w, 501, "attach not available")
 		return
 	}
@@ -122,7 +122,7 @@ func (a *API) attach(w http.ResponseWriter, r *http.Request) {
 		clientFail(w, ce)
 		return
 	}
-	if in.Pid > 0 {
+	if in.Pid > 0 && a.Attach != nil {
 		// the pid is a parent as before (serve ends with its parents; the app counts it)
 		if err := a.Attach(in.Pid); err != nil {
 			a.S.Detach(v.Attachment, "loopback")

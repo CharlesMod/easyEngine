@@ -20,6 +20,8 @@
 //	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
 //	                           id_slot 0, timings with predicted_per_second 50) before [DONE]
 //	FAKELLAMA_SLOT_BYTES       bytes a saved slot file holds per token (default 16)
+//	FAKELLAMA_ID_SLOT          set: every reply says the slot it used (id_slot in the JSON reply, in
+//	                           every streamed chunk and in the timings chunk)
 //	(every completion request body is saved to <ctl>/lastbody.json)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
@@ -73,6 +75,7 @@ var withValue = map[string]bool{
 	"--typical": true, "--repeat-last-n": true, "--presence-penalty": true, "--frequency-penalty": true,
 	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
 	"--slot-save-path": true,
+	"-ub": true, "--ubatch-size": true, "--top-n-sigma": true, "--spec-type": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 
@@ -117,6 +120,9 @@ func helpText(hidden map[string]bool) string {
 		"--dry-base N                   set DRY sampling base value",
 		"--dry-allowed-length N         set allowed length for DRY sampling",
 		"--dry-penalty-last-n N         set DRY penalty for the last n tokens",
+		"-ub,   --ubatch-size N         physical maximum batch size",
+		"--top-nsigma, --top-n-sigma N  top-n-sigma sampling",
+		"--spec-type TYPE               speculative decoding type",
 	}
 	for _, l := range lines {
 		skip := false
@@ -200,12 +206,12 @@ func promptTokens(raw []byte) int {
 }
 
 // account books a completion request on its slot and returns what the answer's timings say.
-func account(raw []byte, task int32, predicted int) (cacheN, promptN int) {
+func account(raw []byte, task int32, predicted int) (cacheN, promptN, id int) {
 	var b struct {
 		IDSlot *int `json:"id_slot"`
 	}
 	json.Unmarshal(raw, &b)
-	id := 0
+	id = 0
 	if b.IDSlot != nil && *b.IDSlot >= 0 {
 		id = *b.IDSlot
 	}
@@ -225,7 +231,7 @@ func account(raw []byte, task int32, predicted int) (cacheN, promptN int) {
 	sl.decoded = predicted
 	sl.held = true
 	sl.task = task
-	return cacheN, promptN
+	return cacheN, promptN, id
 }
 
 // recordBody writes the last completion request body to <ctl>/lastbody.json so tests can see
@@ -515,7 +521,9 @@ func main() {
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
 		json.Unmarshal(raw, &body)
-		cacheN, promptN := account(raw, t, 5)
+		cacheN, promptN, slot := account(raw, t, 5)
+		// FAKELLAMA_ID_SLOT: every reply says the slot it used, as llama-server's native replies do
+		withSlot := os.Getenv("FAKELLAMA_ID_SLOT") != ""
 		if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl := w.(http.Flusher)
@@ -525,7 +533,11 @@ func main() {
 			}
 			gated := os.Getenv("FAKELLAMA_STREAM_GATE") != "" && ctl != ""
 			for i := 0; i < 5; i++ {
-				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d \"}}]}\n\n", i)
+				if withSlot {
+					fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d \"}}],\"id_slot\":%d}\n\n", i, slot)
+				} else {
+					fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d \"}}]}\n\n", i)
+				}
 				fl.Flush()
 				if gated && i < 4 {
 					// the next chunk only once the test has read this one: <ctl>/go.<i+1>, by
@@ -551,7 +563,11 @@ func main() {
 			}
 			if os.Getenv("FAKELLAMA_TIMINGS") != "" { // the last chunk llama-server sends: finish, slot, timings
 				tm := map[string]any{"cache_n": cacheN, "prompt_n": promptN, "prompt_ms": 12.5, "predicted_n": 5, "predicted_ms": 100, "predicted_per_second": 50}
-				last, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}, "id_slot": 0, "timings": tm})
+				said := 0
+				if withSlot {
+					said = slot
+				}
+				last, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}, "id_slot": said, "timings": tm})
 				fmt.Fprintf(w, "data: %s\n\n", last)
 				fl.Flush()
 			}
@@ -562,7 +578,11 @@ func main() {
 		if d, _ := time.ParseDuration(os.Getenv("FAKELLAMA_CHAT_DELAY")); d > 0 {
 			time.Sleep(d) // named moment: FAKELLAMA_CHAT_DELAY, how long the fake takes to answer
 		}
-		js(w, map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}})
+		reply := map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}}
+		if withSlot {
+			reply["id_slot"] = slot
+		}
+		js(w, reply)
 	}
 	mux.HandleFunc("/v1/chat/completions", chat)
 	mux.HandleFunc("/completion", func(w http.ResponseWriter, r *http.Request) {
@@ -573,8 +593,12 @@ func main() {
 		defer finish(t)
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
-		cacheN, promptN := account(raw, t, 5)
-		js(w, map[string]any{"content": "ready", "stop": true, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}})
+		cacheN, promptN, slot := account(raw, t, 5)
+		reply := map[string]any{"content": "ready", "stop": true, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}}
+		if os.Getenv("FAKELLAMA_ID_SLOT") != "" {
+			reply["id_slot"] = slot
+		}
+		js(w, reply)
 	})
 	addr := vals["--host"] + ":" + vals["--port"]
 	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,

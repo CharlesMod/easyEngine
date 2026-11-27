@@ -49,7 +49,9 @@ func ladder() *Catalog {
 func TestLadderPick(t *testing.T) {
 	c := ladder()
 	g := func(v, n, drv string) probe.GPU { return probe.GPU{Vendor: v, Name: n, Driver: drv} }
-	hw := func(os, arch string, gs ...probe.GPU) probe.Hardware { return probe.Hardware{OS: os, Arch: arch, GPUs: gs} }
+	hw := func(os, arch string, gs ...probe.GPU) probe.Hardware {
+		return probe.Hardware{OS: os, Arch: arch, GPUs: gs}
+	}
 	cases := []struct {
 		name string
 		hw   probe.Hardware

@@ -93,7 +93,7 @@ func wantSteps(t *testing.T, n plan.DiskNeed, want ...string) {
 
 func (d *diskFix) installBackend(t *testing.T) {
 	t.Helper()
-	dir := filepath.Join(d.e.Data, "backends", d.be.ID)
+	dir := filepath.Join(d.e.Data, "backends", d.be.ID+"@"+d.be.Tag) // the catalog's build of it: id@tag
 	os.MkdirAll(dir, 0o755)
 	bin := "llama-server"
 	if runtime.GOOS == "windows" {

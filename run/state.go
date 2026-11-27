@@ -34,6 +34,12 @@ type State struct {
 	SamplerPolicy string `json:"-"`
 	Model         string `json:"model"`
 	Backend       string `json:"backend"`
+	// Build is the llama.cpp release tag the selected backend was installed from (backendDir:
+	// backends/<backend>@<build>); "" for one installed before the engine recorded it
+	// (backends/<backend>). NextBuild is the catalog's pin installed beside it, which the next
+	// start of the model server runs (run/build.go).
+	Build     string `json:"build,omitempty"`
+	NextBuild string `json:"next_build,omitempty"`
 	// Target is the model a first run is still upgrading to while a smaller starter serves (run/starter.go).
 	Target string `json:"target,omitempty"`
 	// StarterOwned is the starter model this engine downloaded only to bridge a first run. It is

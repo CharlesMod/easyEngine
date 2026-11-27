@@ -22,7 +22,7 @@ type GPU struct {
 	VRAMTotalMiB  int    `json:"vram_total_mib"`
 	VRAMUsedMiB   int    `json:"vram_used_mib"` // all processes, ours included
 	UnifiedMemory bool   `json:"unified_memory"`
-	Source        string `json:"source"` // nvidia-smi | sysfs | sysctl | llama-list-devices | wmi
+	Source        string `json:"source"`           // nvidia-smi | sysfs | sysctl | llama-list-devices | wmi
 	Driver        string `json:"driver,omitempty"` // NVIDIA driver version from nvidia-smi ("580.95.05"); empty when not read
 
 	sysfsPath string // unexported: lets Others re-read live use

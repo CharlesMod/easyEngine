@@ -20,6 +20,7 @@ var book = []event.Decl{
 	{Name: "agent", Kind: event.Fact, Keyed: true, What: "the agent of a client (key: the profile's name): status agent"},
 	{Name: "install.progress", Kind: event.Reading, What: "the download or install step in progress (status progress), said per step of bytes; gone when none"},
 	{Name: "job", Kind: event.Fact, What: "an install, import or remove job: {kind, running}; gone when none runs"},
+	{Name: "build", Kind: event.Fact, What: "the llama.cpp build (status build): {backend, tag, patched, rung, why, pin, vmm, next: {backend, tag, state: downloading|installing|waiting|ready, error, attempt, progress}}; tag is the release (b12651-easy1), rung its place in the catalog's ladder (0 the pin, -1 not named), why says why a build is not patched, vmm the patched server's CUDA buffer line, next the move to the pin; gone with no build installed"},
 	{Name: "upgrade", Kind: event.Fact, What: "the starter-to-target upgrade (status upgrade); gone when none"},
 	{Name: "room", Kind: event.Reading, What: "the adapters and the measured reserve, as last sensed (status gpu)"},
 	{Name: "room.held", Kind: event.Reading, What: "the reserve the room watch holds to (two reads agreed): {reserve_mib}; gone when the watch is let go"},

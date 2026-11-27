@@ -253,6 +253,7 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 // The user's own GGUF file is only forgotten here: its path lies outside the data dir and is never deleted.
 func (s *Supervisor) forgetDownloadsLocked() {
 	s.st.Model, s.st.Target, s.st.StarterOwned, s.st.Backend, s.st.Previous = "", "", "", "", ""
+	s.st.Build, s.st.NextBuild, s.move = "", "", nil
 	s.st.Custom, s.st.CustomPrev = nil, ""
 	s.st.Book.Entries = nil
 	s.st.defaults()
@@ -286,12 +287,12 @@ func (s *Supervisor) runRemoveDownloads() {
 	// until the "job" and "upgrade" facts say neither is left.
 	s.Cancel()
 	for {
-		w, err := s.hub.Wake("job", "upgrade") // before looking, so an end said in between is heard
+		w, err := s.hub.Wake("job", "upgrade", "build") // before looking, so an end said in between is heard
 		if err != nil {
 			return
 		}
 		s.mu.Lock()
-		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState())
+		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState()) && s.moveCancel == nil
 		if free {
 			s.jobRunning = true
 			s.refreshLocked()

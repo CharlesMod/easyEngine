@@ -60,14 +60,17 @@ type ExternalInfo struct {
 type Status struct {
 	Version string `json:"version"`
 	// API is the version of the control API (APIVersion).
-	API       int          `json:"api"`
-	Port      int          `json:"port"`
-	Mode      string       `json:"mode"`
-	Phase     string       `json:"phase"`
-	Message   string       `json:"message"`
-	Progress  *Progress    `json:"progress"`
-	Model     string       `json:"model"`
-	Backend   string       `json:"backend"`
+	API      int       `json:"api"`
+	Port     int       `json:"port"`
+	Mode     string    `json:"mode"`
+	Phase    string    `json:"phase"`
+	Message  string    `json:"message"`
+	Progress *Progress `json:"progress"`
+	Model    string    `json:"model"`
+	Backend  string    `json:"backend"`
+	// Build is the llama.cpp build: its release tag, patched or stock, its rung and why, the
+	// pin and the move to it (build.go); nil with no build installed.
+	Build     *BuildInfo   `json:"build,omitempty"`
 	Shape     *ShapeInfo   `json:"shape"`
 	ServerURL string       `json:"server_url"`
 	Agent     AgentStatus  `json:"agent"`
@@ -237,9 +240,14 @@ type Supervisor struct {
 
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
-	swapping  bool
-	removing  bool          // remove-downloads job running (storage.go)
-	stoCache  *storageCache // last complete storage walk
+	// move is the install of the catalog's pin beside the build that runs (build.go); nil when
+	// none. moveCancel is set while its job runs. vmm is the patched server's CUDA buffer line.
+	move       *BuildNext
+	moveCancel context.CancelFunc
+	vmm        string
+	swapping   bool
+	removing   bool          // remove-downloads job running (storage.go)
+	stoCache   *storageCache // last complete storage walk
 
 	opMu sync.Mutex
 	srv  *server
@@ -341,6 +349,7 @@ func (s *Supervisor) refreshLocked() {
 	var st Status
 	s.stagingLocked(&st)
 	sayPtr(s, "upgrade", "", st.Upgrade)
+	sayPtr(s, "build", "", s.buildInfoLocked())
 	sayPtr(s, "recovery", "", s.recoveryLocked())
 	switch {
 	case s.removing:
@@ -437,6 +446,7 @@ func (s *Supervisor) Status() Status {
 	st.Recovery = s.recoveryLocked()
 	st.Held = int(s.door.held.Load())
 	st.Contexts = s.kept.info()
+	st.Build = s.buildInfoLocked()
 	return st
 }
 
@@ -613,15 +623,16 @@ type install struct {
 	modelPath string
 	bin       string
 	backend   string
-	// build is the engine build a cap is measured with: the backend id and the sha256 of the
-	// archive installed under it (its .installed marker), so a new llama.cpp build installed under
-	// the same id is another build. With no marker read, the id alone.
+	tag       string // the llama.cpp release the build is from; "" when installed before tags were recorded
+	// build is the engine build a cap is measured with and the prompt cache is keyed by
+	// (buildKey): the backend id, the release's full tag and the sha256 of the archive installed
+	// (its .installed marker), so b12651 and b12651-easy1 are two builds.
 	build string
 }
 
 func (s *Supervisor) resolveInstall() (install, bool) {
 	s.mu.Lock()
-	id, be := s.st.Model, s.st.Backend
+	id, be, tag := s.st.Model, s.st.Backend, s.st.Build
 	s.mu.Unlock()
 	if id == "" || be == "" {
 		return install{}, false
@@ -648,15 +659,16 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 		}
 		mpath = s.modelPath(m)
 	}
-	bin := findServer(filepath.Join(s.dir, "backends", be))
+	dir := backendDir(s.dir, be, tag)
+	bin := findServer(dir)
 	if bin == "" {
 		return install{}, false
 	}
-	build := be
-	if sha, err := os.ReadFile(filepath.Join(s.dir, "backends", be, ".installed")); err == nil && len(sha) > 0 {
-		build = be + "@" + strings.TrimSpace(string(sha))
+	sha := ""
+	if b, err := os.ReadFile(filepath.Join(dir, ".installed")); err == nil {
+		sha = strings.TrimSpace(string(b))
 	}
-	return install{model: m, modelPath: mpath, bin: bin, backend: be, build: build}, true
+	return install{model: m, modelPath: mpath, bin: bin, backend: be, tag: tag, build: buildKey(be, tag, sha)}, true
 }
 
 // ---- proxy helpers ------------------------------------------------------------------------
@@ -769,6 +781,9 @@ func (s *Supervisor) Run() {
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.mind() }()
 	s.watchNetwork()
+	if !s.cfg.NoAutoStart {
+		s.checkPin() // the engine's start: a build other than the catalog's pin moves to it
+	}
 	if s.cfg.Yield != nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.yieldLoop() }()

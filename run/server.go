@@ -65,6 +65,9 @@ func (s *Supervisor) roomSensed(ctx context.Context, hw probe.Hardware, ourPIDs 
 }
 
 func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wants, error) {
+	if s.srv == nil { // every load starts here (start, restart, reshape, yield's end): the staged pin runs from it
+		s.promoteNext()
+	}
 	in, ok := s.resolveInstall()
 	if !ok {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, errors.New("not installed")
@@ -78,7 +81,7 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if sn.gpu >= 0 { // the adapter the engine runs on, not the one with the most dedicated memory
 		g, hasG = hw.GPUs[sn.gpu], true
 	}
-	key := fit.BookKey(in.model.SHA256, g.Name, in.backend)
+	key := fit.BookKey(in.model.SHA256, g.Name, bookBackend(in.backend, in.tag))
 	s.mu.Lock()
 	kv := s.st.KVType
 	s.mu.Unlock()
@@ -127,6 +130,7 @@ func (s *Supervisor) startLocked() error {
 	if s.yielded() != nil { // the card is yielded: the yield's end loads again
 		return nil
 	}
+	s.checkPin() // a start is a word for a move that is still to be made (build.go)
 	if _, ok := s.resolveInstall(); !ok {
 		if s.customMissingPhase() {
 			return nil
@@ -282,6 +286,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	if err != nil {
 		return launchResult{err: err}
 	}
+	s.setVMM("") // what an earlier server said of its buffers is not this one's
 	// Ready is heard in the server's own lines (docs/EVENTS.md section 3): after the line that
 	// says it listens, /health is asked once per following line until it answers. The lines are
 	// the first word, not the only one: when the server has said nothing for ReadyQuiet after a
@@ -323,6 +328,9 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		quiet.Heard()
 		s.Heard()
 		oomw.line(l)
+		if v := vmmLine(l); v != "" {
+			s.setVMM(v)
+		}
 		if !listening.Load() && saysListening(l) {
 			listening.Store(true)
 		}
@@ -410,6 +418,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			s.layBack(srv, url)
 			s.mindUp(srv)
 			s.setPhase("ready", "Ready")
+			s.pruneBuilds(lc.in) // this build served ready: the builds it replaced go
 			return launchResult{ok: true}
 		}
 	}

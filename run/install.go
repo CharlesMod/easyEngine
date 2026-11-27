@@ -123,6 +123,7 @@ func (s *Supervisor) endJob(ctx context.Context, err error, what string) {
 	case err == nil:
 		s.logf("%s finished", what)
 		s.settle()
+		s.checkPin() // an install's end: the build it left may not be the catalog's pin
 		if !s.cfg.NoAutoStart {
 			s.startAgent()
 			if s.Status().Mode == "local" {
@@ -147,6 +148,7 @@ func (s *Supervisor) Cancel() {
 		c()
 	}
 	s.cancelUpgrade()
+	s.cancelMove()
 	s.forgetSwitch()
 }
 
@@ -216,7 +218,8 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 		}
 	}
 	s.mu.Lock()
-	s.st.Model, s.st.Backend, s.st.Target = serve.ID, be, target
+	s.st.Model, s.st.Target = serve.ID, target
+	s.selectBuildLocked(be)
 	s.mu.Unlock()
 	s.save()
 	if target != "" {
@@ -227,67 +230,77 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 
 // ensureBackend installs the first build that passes its smoke test; models are what the setup
 // installs after it (for the space check before each fallback build).
-func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string, models ...catalog.Model) (string, error) {
+//
+// The list is the catalog's ladder for this machine (catalog.Backends): each accelerator's build
+// comes from one rung only, so a build that fails is followed by the next accelerator's, never by
+// another release's build of the same one (a patched CUDA build that fails is not replaced by
+// stock CUDA). The asset installed is returned with its tag.
+func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string, models ...catalog.Model) (catalog.Asset, error) {
 	var list []catalog.Asset
 	if want != "" {
 		a, ok := cat.Asset(want)
 		if !ok {
-			return "", fmt.Errorf("unknown backend %q", want)
+			return catalog.Asset{}, fmt.Errorf("unknown backend %q", want)
 		}
 		list = []catalog.Asset{a}
 	} else {
 		list = cat.Backends(hw)
 	}
 	if len(list) == 0 {
-		return "", errors.New("no llama.cpp build in the catalog for this machine")
+		return catalog.Asset{}, errNoBuild
 	}
 	var last error
 	for i, a := range list {
 		if i > 0 { // a fallback build: the failed one stays on disk; check again from here
 			if err := s.checkNeed(s.setupNeed(cat, hw, a.ID, models...), a.ID); err != nil {
-				return "", err
+				return catalog.Asset{}, err
 			}
 		}
-		if err := s.installBackend(ctx, cat, a); err != nil {
+		if err := s.installBuild(ctx, cat, a, s.jobSteps()); err != nil {
 			if ctx.Err() != nil {
-				return "", ctx.Err()
+				return catalog.Asset{}, ctx.Err()
 			}
-			s.addError("backend %s: %v", a.ID, err)
+			s.addError("backend %s (llama.cpp %s): %v", a.ID, a.Tag, err)
 			if errors.Is(err, ErrAppControl) {
-				return "", err // every build from this release is blocked alike: don't fetch the others
+				return catalog.Asset{}, err // every build from this release is blocked alike: don't fetch the others
 			}
 			last = err
 			continue
 		}
-		return a.ID, nil
+		return a, nil
 	}
-	return "", fmt.Errorf("no backend passed its smoke test: %w", last)
+	return catalog.Asset{}, fmt.Errorf("no backend passed its smoke test: %w", last)
 }
 
-func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a catalog.Asset) error {
-	dir := filepath.Join(s.dir, "backends", a.ID)
+// installBuild installs build a under backends/<id>@<tag> (backendDir), its extras (cudart) from
+// its own release, and smoke-tests it; steps says how the install shows itself (the job's phase
+// and progress, or the move's fact).
+func (s *Supervisor) installBuild(ctx context.Context, cat *catalog.Catalog, a catalog.Asset, steps buildSteps) error {
+	dir := backendDir(s.dir, a.ID, a.Tag)
 	marker := filepath.Join(dir, ".installed")
+	stem := filepath.Base(dir)
 	if _, err := os.Stat(marker); err != nil || findServer(dir) == "" {
 		os.RemoveAll(dir) // only a path we build under our own data dir
-		arch := filepath.Join(s.dir, "downloads", a.ID+archiveExt(a.URL))
-		if err := s.download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID)); err != nil {
+		arch := filepath.Join(s.dir, "downloads", stem+archiveExt(a.URL))
+		if err := steps.download(ctx, a.URL, arch, a.SHA256, a.Size, "backend "+a.ID); err != nil {
 			return err
 		}
-		s.setPhase("installing", "Unpacking "+a.ID)
+		steps.phase("Unpacking " + a.ID)
 		if err := fetch.Unpack(arch, dir); err != nil {
 			return err
 		}
 		os.Remove(arch) // unpacked: the archive is only dead weight (hundreds of MB)
 		for _, x := range a.Extra {
-			ea, ok := cat.Asset(x)
+			ea, ok := cat.LlamaAsset(a.Tag, x)
 			if !ok {
-				return fmt.Errorf("catalog has no asset %q", x)
+				return fmt.Errorf("catalog has no asset %q in llama.cpp %s", x, a.Tag)
 			}
-			earch := filepath.Join(s.dir, "downloads", ea.ID+archiveExt(ea.URL))
-			if err := s.download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID)); err != nil {
+			estem := ea.ID + "@" + a.Tag
+			earch := filepath.Join(s.dir, "downloads", estem+archiveExt(ea.URL))
+			if err := steps.download(ctx, ea.URL, earch, ea.SHA256, ea.Size, "backend "+ea.ID); err != nil {
 				return err
 			}
-			tmp := filepath.Join(s.dir, "downloads", ea.ID+"-unpacked")
+			tmp := filepath.Join(s.dir, "downloads", estem+"-unpacked")
 			os.RemoveAll(tmp)
 			if err := fetch.Unpack(earch, tmp); err != nil {
 				return err
@@ -348,7 +361,29 @@ func smokeTest(ctx context.Context, bin, accel string) error {
 	if !strings.Contains(strings.ToLower(out), want) {
 		return fmt.Errorf("--list-devices shows no %s device", accel)
 	}
+	if accel == "vulkan" && !realVulkan(out) {
+		// Mesa's software device (llvmpipe) is a Vulkan device on the CPU: slower than the CPU build
+		return errors.New("--list-devices shows only a software Vulkan device (llvmpipe)")
+	}
 	return nil
+}
+
+// realVulkan reports whether --list-devices names a Vulkan device that is not a software one.
+// Output that names no device in the usual form is taken as it was before (the word sufficed).
+func realVulkan(out string) bool {
+	ds := plan.ParseListDevices(out)
+	seen := false
+	for _, d := range ds {
+		if !strings.HasPrefix(d.Name, "Vulkan") {
+			continue
+		}
+		seen = true
+		n := strings.ToLower(d.Desc)
+		if !strings.Contains(n, "llvmpipe") && !strings.Contains(n, "lavapipe") && !strings.Contains(n, "swiftshader") {
+			return true
+		}
+	}
+	return !seen
 }
 
 // smokeRun runs bin with args under its own time limit; a timeout is reported as one, not as the exit status

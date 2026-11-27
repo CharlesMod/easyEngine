@@ -592,6 +592,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if v := os.Getenv("FAKELLAMA_VMM"); v != "" { // the patched build's word on its CUDA buffers ("on (1 device)")
+		say("easy: CUDA VMM buffers " + v)
+	}
 	readyLines := os.Getenv("FAKELLAMA_READY_LINES")
 	sayReady := func() {
 		say("srv  llama_server: model loaded",

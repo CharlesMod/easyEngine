@@ -84,3 +84,8 @@ func (s *Supervisor) Hold() func() {
 
 // Held is the count of requests held at the door until the model is up (not in InFlight).
 func (s *Supervisor) Held() int { return int(s.door.held.Load()) }
+
+// Begun is the count of requests that have passed the door in this life; it only grows. A
+// caller that must know whether a request came since some moment compares two readings of it
+// (what stands, not the history of happenings).
+func (s *Supervisor) Begun() uint64 { return s.reqSeq() }

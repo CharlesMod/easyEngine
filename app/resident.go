@@ -2,10 +2,8 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
-	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/run"
@@ -65,7 +63,7 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 		connected bool          // a client came since the model last went to sleep
 		fired     chan struct{} // the linger's moment, while armed
 		cancel    func() bool
-		armedAt   uint64 // the hub's seq when the linger was armed: a request begun since cancels it
+		armedAt   uint64 // the door's count of requests begun when the linger was armed: one begun since cancels it
 	)
 	disarm := func() {
 		if cancel != nil {
@@ -80,14 +78,14 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 		if door > 0 || pids > 0 {
 			connected = true
 		}
-		if fired != nil && begunSince(hub.Since(armedAt, "request")) {
+		if fired != nil && sup.Begun() != armedAt {
 			disarm() // a request came during the linger: it runs again from the door's next empty
 		}
 		idle := connected && pids == 0 && door == 0 && up(sup.Phase())
 		switch {
 		case idle && fired == nil:
 			f := make(chan struct{})
-			fired, armedAt = f, hub.Seq()
+			fired, armedAt = f, sup.Begun()
 			cancel = host.Moment(linger(), func() { close(f) }) // named moment: the keeper's linger
 		case !idle && fired != nil:
 			disarm()
@@ -101,7 +99,7 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 		case <-wk.C():
 		case <-fired:
 			fired, cancel = nil, nil
-			if begunSince(hub.Since(armedAt, "request")) || len(w.PIDs()) > 0 || sup.InFlight()+sup.Held() > 0 {
+			if sup.Begun() != armedAt || len(w.PIDs()) > 0 || sup.InFlight()+sup.Held() > 0 {
 				continue // somebody came: looked at again at the top
 			}
 			if up(sup.Phase()) {
@@ -113,23 +111,6 @@ func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor
 			return
 		}
 	}
-}
-
-// begunSince is true when a request began among evs, or the history let go of them (gap).
-func begunSince(evs []event.Event, gap bool) bool {
-	if gap {
-		return true
-	}
-	for _, e := range evs {
-		var b struct {
-			What string `json:"what"`
-		}
-		json.Unmarshal(e.Body, &b)
-		if b.What == "begin" {
-			return true
-		}
-	}
-	return false
 }
 
 func poke(c chan struct{}) {

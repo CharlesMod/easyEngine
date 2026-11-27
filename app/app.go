@@ -154,13 +154,20 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	// first, then look, then wait.
 	changed, stopChanged, err := osevents.Changes(lockPath)
 	if err != nil {
-		return Result{}, fmt.Errorf("cannot watch engine.lock: %w", err)
+		// No watch here (a system that gives none, or one that failed): Serve still starts. A lock
+		// nobody contends for needs no wait at all; a contended one is then ended by the holder's
+		// exit or by the watchdogs for silence below.
+		log.Printf("easy-engine: engine.lock is not watched (%v)", err)
+		changed, stopChanged = nil, func() {}
 	}
 	defer stopChanged()
 	// await returns when the lock file changes, ended closes (nil: it never does), or ctx ends. If
 	// patience is not zero and nothing has come by then, quiet is true: a watchdog for silence.
 	await := func(ended <-chan struct{}, patience time.Duration) (quiet bool, err error) {
 		var fired chan struct{}
+		if patience == 0 && changed == nil && ended == nil {
+			patience = statusPatience // nothing can say a word: the wait must not be endless
+		}
 		if patience > 0 {
 			fired = make(chan struct{})
 			sil := osevents.NewSilence(patience, func() { close(fired) })
@@ -186,7 +193,10 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			// lifecycle.PidStart gives, and on darwin that is not host.StartOf's; alive(d) checks it.)
 			ended, stopEnded, err := osevents.Exits(d.Pid)
 			if err != nil {
-				return Result{}, fmt.Errorf("cannot watch engine pid %d: %w", d.Pid, err)
+				// The pid cannot be watched (a stale lock whose pid now belongs to a process this
+				// user may not open, say): that is not a reason to refuse to start. alive(d) below
+				// still says whether it is the engine, and a wait has the lock's change to end it.
+				ended, stopEnded = nil, func() {}
 			}
 			if alive(d) {
 				// A live engine holds the lock: attach to it.

@@ -684,27 +684,41 @@ func (s *Supervisor) setProgress(step string, p *Progress) {
 // It returns at once; Shutdown ends everything.
 func (s *Supervisor) Run() {
 	s.settle()
-	switch {
-	case s.cfg.NoAutoStart:
-	case s.cfg.StartSleeping:
-		// the app waits for a connection: no model is loaded, and the agent and an unfinished
-		// upgrade wait for the first start too (Start runs them once)
-		s.deferred.Store(true)
-		s.mu.Lock()
-		asleep := s.phase == "starting" // installed, local, not stopped (settle)
-		s.mu.Unlock()
-		if asleep {
-			s.setPhase("sleeping", "Model not loaded")
-		}
-	default:
-		s.startAgent()
+	if !s.cfg.NoAutoStart {
 		s.mu.Lock()
 		local := s.st.Mode == "local"
 		s.mu.Unlock()
-		if local {
-			s.wg.Add(1)
-			go func() { defer s.wg.Done(); s.Start() }()
-			s.resumeUpgrade()
+		// An agent the profile has and the data dir lacks is installed first, by itself: in
+		// external mode (no model install ever runs there), and beside a model that is installed
+		// (its agent was removed). With no model yet, the model's install job installs it.
+		needAgent := s.agentWanted() && !s.agentReady()
+		if needAgent && local {
+			_, needAgent = s.resolveInstall()
+		}
+		if s.cfg.StartSleeping {
+			// the app waits for a connection: no model is loaded, and running the agent and an
+			// unfinished upgrade wait for the first start too (Start runs them once); a missing
+			// agent is still installed now
+			s.deferred.Store(true)
+			s.mu.Lock()
+			asleep := s.phase == "starting" // installed, local, not stopped (settle)
+			s.mu.Unlock()
+			if asleep {
+				s.setPhase("sleeping", "Model not loaded")
+			}
+			if needAgent {
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.installAgentThen(func() {
+						if !s.deferred.Load() { // the first start came while it installed: run it now
+							s.startAgent()
+						}
+					})
+				}()
+			}
+		} else {
+			s.startNow(local, needAgent)
 		}
 	}
 	s.wg.Add(1)
@@ -713,6 +727,33 @@ func (s *Supervisor) Run() {
 	if s.cfg.Yield != nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.yieldLoop() }()
+	}
+}
+
+// startNow is Run's start when the engine does not start asleep: the agent (installed first when
+// it is missing), the model in local mode, and an unfinished upgrade.
+func (s *Supervisor) startNow(local, needAgent bool) {
+	if !needAgent {
+		s.startAgent()
+	}
+	if local || needAgent {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			start := func() {
+				if local {
+					s.Start()
+				}
+			}
+			if needAgent { // the first attempt comes first; a failed one does not hold the model back
+				s.installAgentThen(func() { s.startAgent(); start() })
+				return
+			}
+			start()
+		}()
+	}
+	if local {
+		s.resumeUpgrade()
 	}
 }
 
@@ -734,6 +775,10 @@ func (s *Supervisor) settle() {
 	}
 	if stopped {
 		s.setPhase("sleeping", "Stopped")
+		return
+	}
+	if s.deferred.Load() { // started asleep and not yet woken: no model is loaded
+		s.setPhase("sleeping", "Model not loaded")
 		return
 	}
 	s.setPhase("starting", "Starting")
@@ -769,12 +814,14 @@ func (s *Supervisor) Start() error {
 	s.userStopped = false
 	local := s.st.Mode == "local"
 	s.mu.Unlock()
-	if !local {
-		return nil
-	}
 	if s.deferred.Swap(false) { // the first start of an app that started asleep
 		s.startAgent()
-		s.resumeUpgrade()
+		if local {
+			s.resumeUpgrade()
+		}
+	}
+	if !local {
+		return nil
 	}
 	if s.yielded() != nil {
 		return ErrYielded
@@ -936,12 +983,12 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.stopServerLocked()
 		s.opMu.Unlock()
 		s.setPhase("external", "Using your own endpoint")
-		s.restartAgent()
+		s.restartAgentInstalled()
 	case old != in.Mode:
 		s.restartAgent()
 		go s.Start()
 	case in.Mode == "external":
-		s.restartAgent()
+		s.restartAgentInstalled()
 	case kvChanged:
 		s.mu.Lock()
 		s.reshape = true

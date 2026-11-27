@@ -96,6 +96,8 @@ func newSite(t *testing.T) *site {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := &site{e: e, uvLog: filepath.Join(e.Ctl, "uv.log"), agent: filepath.Join(e.Ctl, "agent.log")}
+	e.WatchFile(s.uvLog) // waits on these files are woken by their changes
+	e.WatchFile(s.agent)
 	t.Setenv("FAKE_UV_LOG", s.uvLog)
 	t.Setenv("FAKE_AGENT_LOG", s.agent)
 	t.Setenv("FAKE_AGENT_DIE", filepath.Join(e.Ctl, "die"))
@@ -151,8 +153,14 @@ func newSite(t *testing.T) *site {
 	return s
 }
 
-func (s *site) sup(t *testing.T) *run.Supervisor {
+func (s *site) sup(t *testing.T) *run.Supervisor { return s.supWith(t, nil) }
+
+// supWith is sup with the config changed first (mod may be nil).
+func (s *site) supWith(t *testing.T, mod func(*run.Config)) *run.Supervisor {
 	cfg := s.e.Config()
+	if mod != nil {
+		mod(&cfg)
+	}
 	sup := s.e.StartSup(cfg)
 	sup.SetPort(4242)
 	return sup

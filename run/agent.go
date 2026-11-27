@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/plan"
 )
 
 type agentMgr struct {
@@ -253,6 +255,127 @@ func (s *Supervisor) restartAgent() {
 	}
 	s.stopAgent()
 	s.startAgent()
+}
+
+// agentWanted says whether the profile has an agent the engine installs (a wheel).
+func (s *Supervisor) agentWanted() bool {
+	ag := s.cfg.Profile.Agent
+	return ag != nil && ag.Wheel != ""
+}
+
+// installAgent installs the agent by itself, as a job of its own: uv, its Python and the wheel,
+// with no model and no model server. The model install job installs the agent on its way, but
+// in external mode no model is ever installed, and a data dir can lose its agent while its model
+// stays; without this the agent stayed not_installed for good and nothing answered the game.
+//
+// It shows the phase and progress the install job shows ("Installing the agent"), and its disk
+// need is the agent's alone. A failure is said in the status errors and in the agent's own
+// status and blocks nothing: the phase settles as if no job had run. It does nothing when there
+// is no agent to install, when it is installed, or when another job runs (that job installs it).
+// It returns when the attempt has ended: whether to try again (a failure that was not a cancel),
+// for installAgentThen, which waits for a word before it does.
+func (s *Supervisor) installAgent() (again bool) {
+	if !s.agentWanted() || s.agentReady() {
+		return false
+	}
+	s.mu.Lock()
+	if s.jobRunning {
+		s.mu.Unlock()
+		return false
+	}
+	s.jobRunning = true
+	ctx, cancel := context.WithCancel(s.root)
+	s.jobCancel = cancel
+	s.refreshLocked() // the job fact
+	s.mu.Unlock()
+	defer cancel()
+	err := func() error {
+		cat, err := s.catalog()
+		if err != nil {
+			return err
+		}
+		if err := s.checkNeed(plan.NeedOf(s.agentSteps(cat), s.logRoom(), s.hostFiles()), "the agent"); err != nil {
+			return err
+		}
+		return s.ensureAgent(ctx, cat)
+	}()
+	s.mu.Lock()
+	s.jobRunning = false
+	s.jobCancel = nil
+	s.progress = nil
+	sayPtr(s, "install.progress", "", s.progress)
+	s.refreshLocked()               // the job fact
+	mine := s.phase == "installing" // ensureAgent's own phase: nothing else took the phase since
+	s.mu.Unlock()
+	switch {
+	case err == nil:
+		s.logf("Agent install finished")
+	case errors.Is(err, context.Canceled) || ctx.Err() != nil:
+		s.agent.set("", "", 0)
+		s.addError("Agent install cancelled")
+	default:
+		s.agent.set("error", "install failed: "+err.Error()+" (waiting for a request, the network or a word from a client)", 0)
+		s.addError("Agent install failed: %v", err)
+		again = true
+	}
+	if mine {
+		s.settle()
+	}
+	return again
+}
+
+// installAgentThen installs a missing agent (installAgent), then calls then (start it, start the
+// model); a failed install does not hold then back. It tries again with no cadence: after a
+// failure it waits for a word that could change the outcome (a request at the door, a client's
+// settings, install or nudge, the network coming back), then runs again, until it is installed,
+// is cancelled, or the engine ends. Run it in a goroutine counted in s.wg.
+func (s *Supervisor) installAgentThen(then func()) {
+	for {
+		w, err := s.listenQuiet() // before the attempt, so a word said while it runs is heard
+		if err != nil {
+			if then != nil {
+				then()
+			}
+			return
+		}
+		again := s.installAgent()
+		if then != nil {
+			then()
+			then = nil
+		}
+		if !again {
+			w.Close()
+			return
+		}
+		w.count() // it waits now: a request is a word for it
+		if s.awaitWord(s.root, w) != nil {
+			return
+		}
+		if s.agentReady() || !s.agentWanted() {
+			return
+		}
+		s.agent.set("", "", 0) // trying again: the install's own status takes over
+		then = s.startAgent    // an install that works starts the agent, as the first would have
+	}
+}
+
+// restartAgentInstalled restarts the agent, installing it first when the profile has one that
+// is not installed (external mode: the settings are the only word that it is wanted). The
+// install runs in the background; a settings change is also how a failed install is tried again.
+func (s *Supervisor) restartAgentInstalled() {
+	if s.cfg.NoAutoStart {
+		return
+	}
+	s.stopAgent()
+	if !s.agentWanted() || s.agentReady() {
+		s.startAgent()
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.installAgentThen(s.startAgent)
+	}()
 }
 
 func (s *Supervisor) agentLoop(ctx context.Context) {

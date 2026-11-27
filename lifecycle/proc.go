@@ -31,7 +31,10 @@ type Proc struct {
 	g     *Group
 }
 
-// Done is closed when the child has exited.
+// Done is closed when the child has exited and cmd.Wait has returned. Because
+// Log is not an *os.File, os/exec copies the child's stdout and stderr into it
+// through goroutines that Wait joins: every line the child wrote has reached
+// the LogSink by the time Done is closed.
 func (p *Proc) Done() <-chan struct{} { return p.done }
 
 // Err is the exit error, valid after Done is closed.
@@ -63,11 +66,11 @@ func (p *Proc) Stop(grace time.Duration) {
 	terminate(p, false)
 	select {
 	case <-p.done:
-	case <-time.After(grace):
+	case <-time.After(grace): // watchdog for silence: a child that ignores the terminate is killed after the grace
 		terminate(p, true)
 		select {
 		case <-p.done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(5 * time.Second): // watchdog for silence: a child that outlives even the kill
 		}
 	}
 }
@@ -80,7 +83,7 @@ func (p *Proc) Kill() {
 	terminate(p, true)
 	select {
 	case <-p.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): // watchdog for silence: a child that outlives even the kill
 	}
 }
 

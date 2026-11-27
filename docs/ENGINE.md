@@ -488,44 +488,75 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   notch and is recorded.
 - **Runtime OOM** lowers the stored cap for that (model, device) so the next start is smaller.
   A crash whose last words carry a memory error restarts one step smaller at once.
-- **Crashes without a memory error** restart after a growing wait: 2 s, 5 s, 15 s, then every
-  30 s (`CrashBackoff`), through the normal choose path, which reads the room again. Failed
-  starts wait the same way. After 3 quick crashes in a row at one shape (each within 2 min of
-  its start, `CrashQuick`/`CrashSteps`) it is read as a memory problem, most often another app
-  taking the card: one step down, and the cap is lowered too when the sensed reserve grew past
-  64 MiB since the shape was chosen. A run that stays up 2 min clears the record. A shortfall
-  (the model does not fit, out of memory at every shape) is retried every 30 s while the host
-  app runs, never given up for good: the other app may close. The status `recovery` block has
-  the failures and crashes in a row, the last error, the seconds to the next try, whether the
-  crashes were read as memory, and the ctx of the shape the engine will not return to.
+- **No clock in any of this** (docs/EVENTS.md): every reaction below is woken by the event that
+  means it (`run/mind.go`), and the only timers are a watchdog for silence, a network timeout or
+  a named moment, each named where it stands.
+- **Crashes without a memory error** restart at once, through the normal choose path, which
+  reads the room again. A failed start is tried again once at once. After 2 quick crashes in a
+  row at one shape (each within 2 min of its start, `CrashQuick`/`CrashSteps`) it is read as a
+  memory problem, most often another app taking the card: one step down at once, and the cap is
+  lowered too when the sensed reserve grew past 64 MiB since the shape was chosen. A run that
+  stays up 2 min (a named moment) clears the record. With nothing left to try (a second failed
+  start in a row, the model does not fit, out of memory at every shape, crashes at the smallest
+  shape) the engine waits for an **event** that could change the outcome: the room on the card
+  moved, a request at the door, a client's word (`start`, `install`, a nudge). It never gives up
+  for good and never retries on a cadence. The status `recovery` block has the failures and
+  crashes in a row, the last error, `waiting_for` (what the next try waits for; empty while it
+  tries at once), `retry_in_s` (always 0, kept for old clients), whether the crashes were read
+  as memory, and the ctx of the shape the engine will not return to.
 - **A shape that failed is a ceiling:** a shape that ran out of memory, crashed into a step
   down, or failed a grow is not chosen or grown back to for 10 min (`GrowBackoff`); a grow may
   then try once more. A shape shrunk away from because another app took room is not one: it
   grows back once the app lets go.
 - **Out-of-memory the server survives:** llama-server can fail a request on a CUDA OOM and keep
   running. Its output is watched line by line (the memory patterns of `ParseOOM`, pinned host
-  memory fallbacks excepted); out-of-memory lines in two ticks within 60 s (`OOMHold`) step the
-  model down, record the cap, at idle or as below. One failed request alone is let go.
-- **Make room for the game:** every 5 s sense the adapters and measure the reserve (§4a; the
-  status `gpu` is refreshed by this tick). If the model's memory (`Footprint.Need` of the running
-  shape) no longer fits the budget the reserve leaves (the player loaded a heavy save), restart
-  at a smaller shape **when idle** (no slot processing on two checks, from `/slots`); never in
-  the middle of a line. The card's used memory is not the test: it holds the engine's own server
-  too, and read alone would shrink the model with nothing else on the card. A change reshapes
-  the model only when **held**: two consecutive reads of the reserve (others plus host) agree
-  within 64 MiB. Other programs are never touched. The game's room wins over ctx.
+  memory fallbacks excepted); out-of-memory lines said during two different requests within
+  60 s (`OOMHold`, a named moment) step the model down, record the cap, at idle or as below.
+  The lines of one failed request are let go.
+- **Idle is exact:** every request reaches the model server through the engine's door (it
+  listens on a private loopback port), so idle is the door's count of requests in flight
+  reaching zero. `/slots` is not read. Tok/s is read once from `/metrics` each time the count
+  returns to zero.
+- **Make room for the game:** the room is read when needed, never on a clock of its own: at each
+  start, before a grow, on an out-of-memory line, when another program opens the engine's card
+  device (Linux, inotify), when a program the last picture listed ends, and on the host's word
+  (`POST host`). Another living program's memory gives no event (NVIDIA, and everything on
+  Windows and macOS), so while a model is loaded, and while a start that failed for want of room
+  waits for the room to change, the reading is also kept by the one watchdog for it, inside
+  package `host` (`host.Level`, every 5 s, `RoomEvery`; the status `gpu` is said with each
+  reading). The engine's own reads open the card too (nvidia-smi); `host.Own` keeps every device
+  watch from hearing them, so a read never causes another. If the model's memory (`Footprint.Need` of the running shape) no longer
+  fits the budget the reserve leaves (the player loaded a heavy save), restart at a smaller
+  shape **when idle**; never in the middle of a line. The card's used memory is not the test: it
+  holds the engine's own server too, and read alone would shrink the model with nothing else on
+  the card. A change reshapes the model only when **held**: two consecutive reads of the reserve
+  (others plus host) agree within 64 MiB. Other programs are never touched. The game's room wins
+  over ctx.
   The shrink goes in one restart to the shape the room fits (`fit.Choose`), or, when no shape
   fits, to the smallest the steps reach; the model keeps serving there until the room comes back.
   A held shortfall of 256 MiB or more (`DrainMinMiB`) does not wait for a pause: llama-server
   holds its memory from load, so the reply in flight is safe to finish. New requests get
-  "Loading model" (phase `resizing`) while it does, and the model shrinks once the slots are
-  idle, or after 2 min (`DrainMax`) if a reply outlasts that. A smaller shortfall, or one read
-  once, waits for idle. If the smaller shape fails to load on an out-of-memory, the engine
-  records it and steps down from there, never back to the shape that no longer fit.
-- **Grow back when idle:** if measured room allows at least one more step (ctx or one fewer
-  CPU-MoE layer), the reserve is held and the server has been idle for 60 s, restart at the
-  bigger shape. If that fails, restart at the old shape.
-- **Health watchdog:** `/health` every 5 s; 6 misses in a row → restart.
+  "Loading model" (phase `resizing`) while it does, and the model shrinks once the count of
+  requests in flight is zero, or after 2 min (`DrainMax`, a named moment) if a reply outlasts
+  that. A smaller shortfall, or one read once, waits for idle. If the smaller shape fails to
+  load on an out-of-memory, the engine records it and steps down from there, never back to the
+  shape that no longer fit.
+- **Grow back when idle:** idle for 60 s (`GrowIdle`, a named moment armed when the count
+  reaches zero and cancelled when a request begins), the room is read again; if it agrees with
+  the held reading and allows at least one more step (ctx or one fewer CPU-MoE layer), restart
+  at the bigger shape. If that fails, restart at the old shape.
+- **Ready by its own lines:** llama-server's output comes line by line; after the line that
+  says it listens (`listening on http://…`, fixtures in `run/testdata/ready-*.txt`) `/health` is
+  asked once per following line until it answers 200. The lines are the first word, not the
+  only one: when the server has said nothing for 2 s (`ReadyQuiet`, a watchdog for silence)
+  `/health` is asked once, listening line or not, and again only after a new line. A load that
+  says nothing for 15 min (`LoadTimeout`) is asked once more and then fails. A build that prints
+  forever and never answers 200 is not bounded.
+- **A hung server:** no periodic `/health`. While requests are in flight a watchdog for silence
+  (`HangSilence`, 2 min) is put back by every line of the server, every request beginning or
+  ending and every byte of a response (the proxy calls `Heard`). When it fires, `/health` is
+  asked once (3 s network timeout): no answer restarts the server, an answer puts it back. A
+  quiet server with nothing in flight is never asked anything.
 
 ## 6. Lifetime
 
@@ -552,9 +583,10 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   rename and a directory sync. A corrupt `state.json` is renamed to
   `state.json.corrupt-<unix time>`, the engine starts from defaults, and status `errors[]` says
   so.
-- **Parent watch:** the engine polls each parent pid every 1 s (the pid plus its start time,
-  so pid reuse cannot fool it). When the last parent is gone, it stops its children and exits
-  within 5 s. `--linger <dur>` (setting, default 0) keeps the model loaded for a while for
+- **Parent watch:** the engine follows each parent pid by the system's word of its end (Linux a
+  pidfd, macOS kqueue, Windows a wait on the process handle: `host.ExitsOf`, with the pid's start
+  time so pid reuse cannot fool it). When the last parent is gone, it stops its children and
+  exits within 5 s. `--linger <dur>` (setting, default 0) keeps the model loaded for a while for
   quick restarts.
 - **Children die with the engine:** Linux `Pdeathsig=SIGKILL` + own process group; Windows a
   Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; macOS process group + the children
@@ -563,7 +595,15 @@ a service or a shell: no tray, and it ends with its parents, as described next.
 - **Pause:** `POST /engine/v1/sleep` unloads the model (stops llama-server) and keeps the
   agent; any proxied model request or `POST /engine/v1/wake` starts it again. The game may
   call it in the main menu. Not used by default.
-- Stop order: agent first (SIGTERM, 5 s, then kill), then llama-server.
+- Stop order: agent first (SIGTERM, 5 s, then kill: a watchdog for silence on the child), then
+  llama-server.
+- **The agent** restarts once at once when it exits; a second quick exit in a row (a run
+  shorter than 60 s, `AgentStable`) waits for a request or a client's word, and its status says
+  so (phase `error`).
+- **Downloads** have no retry cadence: an attempt that moved bytes resumes at once; one that
+  moved none waits for the network coming back (`host.NetworkChanges`), a client's `install`
+  or nudge, or the engine's next start. The 60 s stall timer on a stream is a watchdog for
+  silence. Progress is said per 1 % of the file (or per 4 MiB with no size), never per time.
 
 ### 6a. The app (`easy-engine app`)
 
@@ -583,7 +623,9 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   extension, a Windows service session) the app logs one line and runs without an icon.
   `easy-engine` typed with no command in a terminal, where no tray can be shown, prints the usage
   instead of starting a server.
-- **Waits for the connection.** The app never ends because clients are gone. A client that
+- **Waits for the connection.** The app starts with no model loaded (phase `sleeping`, "Model
+  not loaded"; `Config.StartSleeping`); the agent and an unfinished upgrade wait for the first
+  load too. The app never ends because clients are gone. A client that
   attaches a pid (`POST attach`) wakes the model if it sleeps; a request at the proxy wakes it too
   (the first reply is the usual 503 `Retry-After`). When the last attached pid is gone and no
   request is in flight, the keeper's `linger_s` runs and then the model is **put to sleep**
@@ -614,23 +656,28 @@ and loads again once it is free. The engine process, its port and its API stay u
 1. **A launcher starts a game.** Linux: a process whose argv is Steam's
    `reaper SteamLaunch AppId=<n> -- …` (it lives exactly as long as the game), a Lutris
    `lutris-wrapper: <title>`, or `umu-run` (Heroic and Lutris run Proton games through it;
-   best effort). New pids are looked at every 250 ms, and only new or young pids have their
-   cmdline read. Windows: `HKCU\Software\Valve\Steam\RunningAppID` (0 = none). macOS:
-   `RunningAppID` in `~/Library/Application Support/Steam/registry.vdf`. A launch usually comes
+   best effort). argv gives no event: it is read through the yield's `host.Level` watchdog
+   (every `--yield-every`, default 1 s, only while the watch is armed), and only new or young
+   pids have their cmdline read. Windows: `HKCU\Software\Valve\Steam\RunningAppID` (0 = none),
+   re-read on the registry's change notification. macOS: `RunningAppID` in
+   `~/Library/Application Support/Steam/registry.vdf`, re-read when the file changes. A launch usually comes
    before the game opens the GPU at all. gamescope is not a signal: in Steam's game mode it is
    the compositor and always runs (games inside it still show as `reaper`).
 2. **A process opens the engine's GPU** (Linux only). A program must open `/dev/nvidia<minor>`
-   or a DRM card/render node before it can allocate. inotify `IN_OPEN` on those nodes wakes the
-   watch at once; it then reads `/proc/<pid>/fd` of every process (about 25 ms) and looks again
-   200 ms later. A process that still holds one of the engine adapter's nodes (mapped from
+   or a DRM card/render node before it can allocate. inotify `IN_OPEN` on those nodes
+   (`host.Opens`, no time cap) wakes the watch at once; it then reads `/proc/<pid>/fd` of every
+   process (about 25 ms) and reads the level again at once. A process that still holds one of the engine adapter's nodes (mapped from
    `/proc/driver/nvidia/gpus/<pci>/information` and `/sys/class/drm/<node>/device`) and is not
    in the baseline is a newcomer. `nvidiactl` alone does not count (NVML monitors open it),
    and neither does a short-lived probe such as `nvidia-smi` that is gone by the second look.
-3. **Memory on the engine's adapter.** Every second (Linux `nvidia-smi -q -d PIDS`, about
+3. **Memory on the engine's adapter.** No event exists for it, so it is read by the yield's
+   `host.Level` watchdog, every second while the watch is armed (a model loaded or the card
+   yielded) (Linux `nvidia-smi -q -d PIDS`, about
    0.02 s of CPU against 0.11 s for `-q -x`; AMD/Intel fdinfo; Windows the GPU Process Memory
    counters): a process not in the baseline holding any memory there (`--yield-min-mib`,
    default 0), or a baseline process grown by more than `--yield-floor-mib` (default 128),
-   each seen in two reads in a row. On an idle desktop (an RTX 5080, 600 one-second reads),
+   each held in two reads in a row (inside `host.Level`). A newcomer's end is heard by
+   `host.Exits`. On an idle desktop (an RTX 5080, 600 one-second reads),
    baseline processes moved by 0 to 2 MiB.
 
 Memory can be seen only after the allocation has been served, so this signal always lets the
@@ -646,7 +693,7 @@ the agent's pids), the host pid, `--yield-ignore` names, launches whose app id i
 `--yield-except` or in the profile's `yield_except`, and anything those launches started.
 
 **Yield.** New requests get the 503 below at once. Replies already running finish for up to
-20 s. Then llama-server stops (a load in progress is cancelled), and the phase becomes
+20 s (the door's count reaching zero, bounded by that named moment). Then llama-server stops (a load in progress is cancelled), and the phase becomes
 `yielded` with `status.yield = {reason, kind: game|gpu, since, draining}`. While draining,
 the phase is still `ready` and `yield.draining` is true. A yield never touches the model book,
 the caps or the recovery record, and it counts no restart. A yield is not a crash and not a
@@ -654,13 +701,13 @@ shortfall. `start` answers an error while the card is yielded, and `sleep` does 
 `stop` ends the yield and keeps the engine stopped; the watch comes back with the next `start`.
 
 **Coming back.**
-- A game keeps the engine away until 15 s after its launcher process is gone (`--yield-grace`).
-  If the game comes back during that time, the wait starts again.
+- A game keeps the engine away until 15 s after its launcher process is gone (`--yield-grace`,
+  a named moment). If the game comes back during that time, the wait starts again.
 - When no newcomer is left, the engine loads again. The shape is chosen afresh, which gives
   the same shape when the game left nothing behind; if it left something, the usual fit
   logic applies.
 - A non-game newcomer that still runs lets the engine back once its use has held within the
-  floor for 60 s (`--yield-steady`). The engine then loads only a shape that fits the room the
+  floor for 60 s (`--yield-steady`, a named moment). The engine then loads only a shape that fits the room the
   newcomer leaves; if none fits, it stays yielded and checks again after another steady
   period. A later growth yields again. `--yield-strict` waits until every newcomer has exited.
 
@@ -1041,9 +1088,14 @@ easy-engine version
   corrupt hash, cancel), GGUF headers (small generated files), the fit planner (tables of
   hardware × model → shape, including the 16 GB/12 GB/8 GB/CPU cases and "dense never split"),
   and a **fake llama-server** binary (`internal/fakellama`) that honours `-c/-np/-ngl`,
-  reports `/health` 503→200, can be told to OOM at load or at run time and to be busy on
-  `/slots`. Lifecycle tests: parent death stops children; second `serve` attaches; stale pids
-  killed.
+  reports `/health` 503→200, says the lines the real server says in the same order (the
+  listening line, a line per request taken and released), and can be told by control files
+  (followed by `host.Changes`) to OOM at load or at run time or to crash. Lifecycle tests:
+  parent death stops children; second `serve` attaches; stale pids killed.
+- **Tests keep the clock law too:** they wait on the supervisor's hub (`testkit.WaitFor`,
+  `WaitPhase`), bounded by a watchdog for silence; a test that something did not happen does the
+  thing, makes the engine look (`React`, a marker on the hub, a counted read) and then asserts.
+  No sleep stands in for an event.
 - The sizing core (`core/`) is its own module, so the root's `go test ./...` does not reach it:
   `./core-check.sh` (run first by `build.sh`) tests it, and builds and vets it for Linux,
   Windows and macOS, at its own go line (§13).

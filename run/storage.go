@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 // Storage: what the engine keeps on disk, removing it, and deleting one model file
@@ -271,37 +273,45 @@ func (s *Supervisor) RemoveDownloads() error {
 		s.runRemoveDownloads()
 		s.mu.Lock()
 		s.removing = false
+		s.refreshLocked()
 		s.mu.Unlock()
 	}()
 	return nil
 }
 
-func (s *Supervisor) waitUntil(d time.Duration, f func() bool) bool {
-	end := time.Now().Add(d)
-	for {
-		if f() {
-			return true
-		}
-		if time.Now().After(end) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 func (s *Supervisor) runRemoveDownloads() {
 	s.setPhase("removing", "Removing downloaded files")
-	// Cancel the install job and any upgrade, then take the job slot so no install starts.
+	// Cancel the install job and any upgrade, then take the job slot so no install starts. Cancel
+	// is the bound: the job and the upgrade end when their context says so, and nothing is deleted
+	// until the "job" and "upgrade" facts say neither is left.
 	s.Cancel()
-	s.waitUntil(30*time.Second, func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.jobRunning || s.upg != nil && s.upg.activeState() {
-			return false
+	for {
+		w, err := s.hub.Wake("job", "upgrade") // before looking, so an end said in between is heard
+		if err != nil {
+			return
 		}
-		s.jobRunning = true
-		return true
-	})
+		s.mu.Lock()
+		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState())
+		if free {
+			s.jobRunning = true
+			s.refreshLocked()
+		}
+		s.mu.Unlock()
+		if free {
+			w.Close()
+			break
+		}
+		select {
+		case <-s.root.Done(): // the engine is shutting down (Shutdown waits for this goroutine)
+			w.Close()
+			return
+		case <-s.hub.Done():
+			w.Close()
+			return
+		case <-w.C():
+		}
+		w.Close()
+	}
 	s.mu.Lock()
 	s.userStopped = true
 	lc := s.loadCancel
@@ -328,9 +338,9 @@ func (s *Supervisor) runRemoveDownloads() {
 	s.progress = nil
 	s.tokS = 0
 	s.userStopped = false
-	s.jobRunning = false
-	s.jobCancel = nil
+	s.jobRunning = false // the slot this job took, and only that
 	s.stoCache = nil
+	s.refreshLocked()
 	s.mu.Unlock()
 	s.save()
 	msg := fmt.Sprintf("Removed downloaded files (%.1f GB freed)", float64(freed)/1e9)
@@ -375,7 +385,7 @@ func (s *Supervisor) removeEntry(p string) (freed int64, left []string) {
 			left = append(left, l...)
 		}
 		if len(left) == 0 {
-			if !retry(func() error { return os.Remove(p) }) {
+			if !s.retry(func() error { return os.Remove(p) }) {
 				left = append(left, p)
 			}
 		}
@@ -385,20 +395,28 @@ func (s *Supervisor) removeEntry(p string) (freed int64, left []string) {
 	if fi.Mode().IsRegular() {
 		size = fi.Size()
 	}
-	if !retry(func() error { return os.Remove(p) }) {
+	if !s.retry(func() error { return os.Remove(p) }) {
 		return 0, []string{p}
 	}
 	return size, nil
 }
 
-// retry runs f a few times: on Windows a file just released by a stopped process can stay locked briefly.
-func retry(f func() error) bool {
-	for i := 0; i < 8; i++ {
+// retry runs f until it works. Our own children have ended before anything is removed (the
+// remove waits for the job's end), so a file still held is held by a stranger (on Windows an
+// antivirus scan or an indexer) and nothing says when it lets go: host.Unheld looks again while
+// it is held, for as long as heldLinger, then the file is reported as left.
+func (s *Supervisor) retry(f func() error) bool {
+	// named moment: how long a held file may linger before the remove reports it as left
+	ctx, cancel := context.WithTimeout(s.root, heldLinger)
+	defer cancel()
+	return host.Unheld(ctx, func() error {
 		err := f()
-		if err == nil || os.IsNotExist(err) {
-			return true
+		if os.IsNotExist(err) {
+			return nil
 		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return false
+		return err
+	}) == nil
 }
+
+// heldLinger bounds the wait for a file a stranger holds open (retry).
+const heldLinger = 2 * time.Second

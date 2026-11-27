@@ -79,10 +79,17 @@ func TestMachineGameGrace(t *testing.T) {
 	// Game returns during grace: grace restarts from this sighting.
 	back := last.Add(grace - time.Second)
 	m.Step(Input{Now: back, Games: []Launch{game}})
-	if d := m.Step(Input{Now: back.Add(grace - time.Second)}); d.Action != None {
+	gone := back.Add(grace - time.Second) // the step that finds the game gone is its last sighting
+	if d := m.Step(Input{Now: gone}); d.Action != None {
 		t.Fatalf("game restarts during grace: %+v", d)
 	}
-	d := m.Step(Input{Now: back.Add(grace)})
+	if left := m.Due(gone.Add(time.Second)); left != grace-time.Second {
+		t.Fatalf("grace left %v", left)
+	}
+	if d := m.Step(Input{Now: gone.Add(grace - time.Second)}); d.Action != None {
+		t.Fatalf("inside grace: %+v", d)
+	}
+	d := m.Step(Input{Now: gone.Add(grace)})
 	if d.Action != Resume || d.Beside {
 		t.Fatalf("after grace: %+v", d)
 	}
@@ -213,5 +220,41 @@ func TestMachineReset(t *testing.T) {
 func TestDescribeNoGameWords(t *testing.T) {
 	if s := describe(Change{PID: 1}); !strings.HasPrefix(s, "pid 1") {
 		t.Fatal(s)
+	}
+}
+
+func TestMachineDue(t *testing.T) {
+	m := newTestMachine(false)
+	if m.Due(t0) != 0 {
+		t.Fatal("due while active")
+	}
+	m.Step(Input{Now: t0, Games: []Launch{game}})
+	if m.Due(t0) != 0 {
+		t.Fatal("a game running waits on no time")
+	}
+	m.Step(Input{Now: t0.Add(time.Second)}) // the game is gone
+	if got := m.Due(t0.Add(2 * time.Second)); got != grace-time.Second {
+		t.Fatalf("grace left %v", got)
+	}
+	// past the grace with a newcomer beside: the steady wait runs from its first sighting
+	at := t0.Add(time.Second + grace)
+	m.Step(Input{Now: at, Changes: []Change{chg(1, 500)}})
+	if got := m.Due(at.Add(5 * time.Second)); got != steady-5*time.Second {
+		t.Fatalf("steady left %v", got)
+	}
+	if got := m.Due(at.Add(steady)); got != 0 {
+		t.Fatalf("steady over: %v", got)
+	}
+	// strict never resumes beside: no time to wait for
+	st := newTestMachine(true)
+	st.Step(Input{Now: t0, Changes: []Change{chg(1, 500)}})
+	st.Step(Input{Now: t0.Add(time.Second), Changes: []Change{chg(1, 500)}})
+	if st.Due(t0.Add(2*time.Second)) != 0 {
+		t.Fatal("strict waits on no time")
+	}
+	// no newcomers left: resume is due at once
+	m.Step(Input{Now: at.Add(time.Second)})
+	if m.Due(at.Add(time.Second)) != 0 {
+		t.Fatal("nothing beside: due now")
 	}
 }

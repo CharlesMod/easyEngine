@@ -58,6 +58,9 @@ func (h *holderScan) scan(pci string) map[int]string {
 	if f := holderScanHook.Load(); f != nil {
 		return (*f)()
 	}
+	if f := h.s.cfg.Holders; f != nil {
+		return f()
+	}
 	if h.o == nil {
 		if y := h.s.cfg.Yield; y != nil && y.OS != nil {
 			h.o = y.OS()

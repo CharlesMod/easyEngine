@@ -17,7 +17,6 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	run.EveryWordMoves()
 	code := m.Run()
 	testkit.Cleanup()
 	os.Exit(code)

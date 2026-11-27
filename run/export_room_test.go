@@ -1,7 +1,5 @@
 package run
 
-import "sync/atomic"
-
 // Seams of the room watch for the external tests (room_test.go).
 
 // RoomArm, RoomDisarm and RoomEvent are the room watch's arm, disarm and event.
@@ -39,19 +37,4 @@ func SetRoomWordDone(f func()) func() {
 func SetHolderScan(f func() map[int]string) func() {
 	old := holderScanHook.Swap(&f)
 	return func() { holderScanHook.Store(old) }
-}
-
-// EveryWordMoves makes every word of the card's nodes look like a new holder (the scan answers a
-// fresh pid each time), as every word was a read before the room compared holders: the tests of
-// the supervisor's other behaviour rest on a word making a read. It is never undone.
-func EveryWordMoves() {
-	var n atomic.Int64
-	SetHolderScan(func() map[int]string { return map[int]string{int(n.Add(1)): "stranger"} })
-}
-
-// HolderScans is how many scans of the holders have been made.
-func (s *Supervisor) HolderScans() int {
-	s.holders.mu.Lock()
-	defer s.holders.mu.Unlock()
-	return s.holders.scans
 }

@@ -2,14 +2,17 @@ package run
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/settings"
 )
 
 // External is the player's own OpenAI-compatible endpoint.
@@ -19,14 +22,16 @@ type External struct {
 	APIKey  string `json:"api_key"`
 }
 
-// State is state.json.
+// State is what the engine holds in memory: the keeper's settings (Mode to SamplerPolicy; they
+// come from and go to settings.json, never state.json: json:"-") and what the engine itself
+// learns (state.json, the rest).
 type State struct {
-	Mode     string   `json:"mode"` // local | external
-	External External `json:"external"`
-	LingerS  int      `json:"linger_s"`
-	KVType   string   `json:"kv_type"`
+	Mode     string   `json:"-"` // local | external
+	External External `json:"-"`
+	LingerS  int      `json:"-"`
+	KVType   string   `json:"-"`
 	// SamplerPolicy is enforce (default) | fill | off (docs/SAMPLERS.md).
-	SamplerPolicy string `json:"sampler_policy,omitempty"`
+	SamplerPolicy string `json:"-"`
 	Model         string `json:"model"`
 	Backend       string `json:"backend"`
 	// Target is the model a first run is still upgrading to while a smaller starter serves (run/starter.go).
@@ -63,6 +68,32 @@ func (s *State) defaults() {
 // does not parse is renamed aside to state.json.corrupt-<unix seconds> (never deleted, never
 // overwritten) and note says so; the caller reports it.
 func loadState(dir string) (State, string) {
+	st, _, note, _ := loadAll(dir)
+	return st, note
+}
+
+// loadAll is the start: settings.json (settings an old state.json held are first moved out of
+// it) and state.json. serr is set when settings.json could not be used: the file is left as it
+// is and the defaults stand.
+func loadAll(dir string) (st State, file settings.File, note string, serr *settings.Error) {
+	file, err := settings.Load(dir)
+	if err != nil {
+		if !errors.As(err, &serr) {
+			serr = &settings.Error{Msg: err.Error()}
+		}
+	}
+	st, note = loadEngineState(dir)
+	st.applyFile(file)
+	return st, file, note, serr
+}
+
+// applyFile sets the settings fields from the file.
+func (s *State) applyFile(f settings.File) {
+	s.Mode, s.LingerS, s.KVType, s.SamplerPolicy = f.Mode, f.LingerS, f.KVType, f.SamplerPolicy
+	s.External = External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey}
+}
+
+func loadEngineState(dir string) (State, string) {
 	var st State
 	var note string
 	path := filepath.Join(dir, "state.json")
@@ -107,3 +138,141 @@ func (s *Supervisor) Note(msg string) { s.addError("%s", msg) }
 
 // LoadState reads state.json from a data dir (tests and tools).
 func LoadState(dir string) State { st, _ := loadState(dir); return st }
+
+// ---- settings.json -------------------------------------------------------------------------
+
+// settingsFile is what the engine knows of settings.json beyond the fields in State: the
+// listener and yield options (run does not use them; the app does, at start), the file as it
+// stood at start, and what is wrong with it now. It is under Supervisor.mu.
+type settingsFile struct {
+	listen, startListen settings.Listen
+	yield, startYield   settings.Yield
+	err                 string // settings.json cannot be used: the previous settings stand
+	note                string // a listen or yield edit that waits for a restart
+}
+
+func (f *settingsFile) begin(file settings.File, serr *settings.Error) {
+	f.listen, f.startListen, f.yield, f.startYield = file.Listen, file.Listen, file.Yield, file.Yield
+	if serr != nil {
+		f.err = serr.Error() + "; using the defaults"
+	}
+}
+
+// notes are the lines the status errors carry for the file.
+func (f *settingsFile) notes() []string {
+	var out []string
+	if f.err != "" {
+		out = append(out, f.err)
+	}
+	if f.note != "" {
+		out = append(out, f.note)
+	}
+	return out
+}
+
+// settingsWriteMu serialises every write of settings.json in the process.
+var settingsWriteMu sync.Mutex
+
+func (s *Supervisor) fileLocked() settings.File {
+	e := s.st.External
+	return settings.File{
+		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
+		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
+		Listen: s.sf.listen, Yield: s.sf.yield,
+	}.Normalize()
+}
+
+// SettingsFile is the settings as the engine holds them (the API key included: for the
+// engine's own use, never for a client).
+func (s *Supervisor) SettingsFile() settings.File {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fileLocked()
+}
+
+// InFlight is the number of proxied requests being answered.
+func (s *Supervisor) InFlight() int { return int(s.inflightNow()) }
+
+// saveSettings writes settings.json whole. A file the engine could not read is first set aside
+// as settings.json.bad-<unix> (the engine never overwrites a file it could not read; a person
+// who asks for a change through the API has chosen the engine's version).
+func (s *Supervisor) saveSettings() {
+	s.mu.Lock()
+	f := s.fileLocked()
+	bad := s.sf.err != ""
+	s.mu.Unlock()
+	settingsWriteMu.Lock()
+	defer settingsWriteMu.Unlock()
+	path := settings.Path(s.dir)
+	if bad {
+		aside, err := settings.SetAside(path)
+		if err != nil {
+			s.logf("settings.json is unreadable and could not be set aside: %v", err)
+			return
+		}
+		s.logf("settings.json was unreadable; set aside as %s", aside)
+		s.mu.Lock()
+		s.sf.err = ""
+		s.mu.Unlock()
+	}
+	if err := settings.Write(path, f); err != nil {
+		s.logf("write settings: %v", err)
+	}
+}
+
+// ReloadSettings follows settings.json: the app calls it when the file changes. A file that
+// parses and differs from what the engine holds takes effect through the same code as PUT
+// settings (mode, endpoint, linger, cache type and sampler policy at once); a changed listen
+// or yield section is recorded and waits for a restart. A file that does not parse changes
+// nothing and is said in the status errors until it is fixed. It never writes the file (a
+// missing one is written again, whole).
+func (s *Supervisor) ReloadSettings() {
+	path := settings.Path(s.dir)
+	f, err := settings.Read(path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.saveSettings()
+		return
+	}
+	if err != nil {
+		var se *settings.Error
+		if !errors.As(err, &se) {
+			se = &settings.Error{Msg: err.Error()}
+		}
+		msg := se.Error() + "; using the previous settings"
+		s.mu.Lock()
+		changed := s.sf.err != msg
+		s.sf.err = msg
+		s.mu.Unlock()
+		if changed {
+			s.logf("error: %s", msg)
+		}
+		return
+	}
+	s.mu.Lock()
+	s.sf.err = ""
+	cur := s.fileLocked()
+	s.mu.Unlock()
+	same := f.Mode == cur.Mode && f.External == cur.External && f.LingerS == cur.LingerS &&
+		f.KVType == cur.KVType && f.SamplerPolicy == cur.SamplerPolicy
+	if !same {
+		s.logf("settings.json changed: applying it")
+		s.setSettings(Settings{
+			Mode: f.Mode, External: External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey},
+			ClearAPIKey: f.External.APIKey == "", LingerS: f.LingerS, KVType: f.KVType, SamplerPolicy: f.SamplerPolicy,
+		}, false)
+	}
+	s.mu.Lock()
+	s.sf.listen, s.sf.yield = f.Listen, f.Yield
+	var what []string
+	if f.Listen != s.sf.startListen {
+		what = append(what, "listen address")
+	}
+	if !(settings.File{Yield: f.Yield}).Equal(settings.File{Yield: s.sf.startYield}) {
+		what = append(what, "yield options")
+	}
+	s.sf.note = ""
+	if len(what) > 0 {
+		s.sf.note = "restart easy-engine to apply the new " + strings.Join(what, " and ")
+	}
+	s.mu.Unlock()
+}

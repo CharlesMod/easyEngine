@@ -18,9 +18,11 @@ import (
 	"github.com/CharlesMod/easyEngine/api"
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/dirs"
+	osevents "github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/settings"
 )
 
 // DefaultPort is the control API's first port.
@@ -47,6 +49,16 @@ type Options struct {
 	Yield *run.YieldConfig
 	// Started is called once the engine listens (not when it attached to another).
 	Started func(port int)
+
+	// Resident is the app (easy-engine app): the engine never ends with its clients. The model
+	// waits unloaded for a connection (an attach or a request), and when the last attached
+	// parent is gone and nothing is in flight, the linger runs and the model is put back to
+	// sleep; the engine stays until Quit, a signal or a shutdown request.
+	Resident bool
+	// Tray, when set, is a tray icon already shown (StartTray); Serve answers its clicks, keeps
+	// its tooltip, and closes it at the end. Menu says what the three items act on.
+	Tray Tray
+	Menu MenuOptions
 }
 
 // Result of Serve.
@@ -264,13 +276,45 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		return Result{}, err
 	}
 	sup.SetPort(port)
+	// The keeper's file is followed as it changes (an event, not a poll); the watch is made
+	// before the engine answers anyone, so no edit slips between.
+	ch, stopWatch, werr := osevents.Changes(settings.Path(dir))
+	watching := werr == nil
+	if watching {
+		defer stopWatch()
+	}
 	shutdown := make(chan struct{}, 1)
 	if cfg.Catalog == nil {
 		if _, note, _ := catalog.LoadNote(dir); note != "" {
 			sup.Note(note)
 		}
 	}
-	a := &api.API{S: sup, Attach: w.Add, AnyHost: !loopback, Open: o.Open,
+	attached := make(chan struct{}, 1) // a parent was attached (resident: the connection)
+	var ctl *controller
+	if o.Tray != nil {
+		ctl = newController(o.Tray, o.Menu, sup, dir, func() {
+			select {
+			case shutdown <- struct{}{}:
+			default:
+			}
+		})
+	}
+	attach := w.Add
+	if o.Resident {
+		attach = func(pid int) error {
+			if err := w.Add(pid); err != nil {
+				return err
+			}
+			select {
+			case attached <- struct{}{}:
+			default:
+			}
+			wakeForClient(sup)
+			ctl.refresh()
+			return nil
+		}
+	}
+	a := &api.API{S: sup, Attach: attach, AnyHost: !loopback, Open: o.Open,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:
@@ -291,34 +335,67 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	wctx, wcancel := context.WithCancel(ctx)
 	defer wcancel()
 	gone := make(chan struct{})
-	go func() {
-		defer close(gone)
-		for {
-			if !w.Run(wctx) {
-				return
+	if o.Resident {
+		if len(o.ParentPIDs) > 0 { // parents given on the command line count as the first connection
+			attached <- struct{}{}
+		}
+		go residentLoop(wctx, w, sup, attached, func() time.Duration {
+			if o.LingerSet {
+				return o.Linger
 			}
-			linger := o.Linger
-			if !o.LingerSet {
-				linger = time.Duration(sup.LingerS()) * time.Second
-			}
-			if linger > 0 {
-				select {
-				case <-time.After(linger):
-				case <-wctx.Done():
+			return time.Duration(sup.LingerS()) * time.Second
+		}, ctl.refresh)
+	} else {
+		go func() {
+			defer close(gone)
+			for {
+				if !w.Run(wctx) {
+					return
+				}
+				linger := o.Linger
+				if !o.LingerSet {
+					linger = time.Duration(sup.LingerS()) * time.Second
+				}
+				if linger > 0 {
+					select {
+					case <-time.After(linger):
+					case <-wctx.Done():
+						return
+					}
+				}
+				if len(w.PIDs()) == 0 {
 					return
 				}
 			}
-			if len(w.PIDs()) == 0 {
-				return
+		}()
+	}
+	if watching {
+		go func() {
+			sup.ReloadSettings() // an edit made before the watch began
+			for {
+				select {
+				case <-wctx.Done():
+					return
+				case <-ch:
+					sup.ReloadSettings()
+					ctl.refresh()
+				}
 			}
-		}
-	}()
+		}()
+	}
+	if ctl != nil {
+		go ctl.serve(wctx)
+	}
 	select {
 	case <-ctx.Done():
 	case <-gone:
 	case <-shutdown:
 	}
 	a.SetStopping() // status says so and attach is refused from here; the lock is released last
+	if o.Tray != nil {
+		o.Tray.SetTooltip("easy-engine: stopping")
+		defer o.Tray.Close()
+	}
 	wcancel()
 	sup.Shutdown()
 	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)

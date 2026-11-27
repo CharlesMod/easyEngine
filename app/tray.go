@@ -143,12 +143,21 @@ func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir string, quit 
 	return c
 }
 
-// serve handles clicks until the tray closes or ctx ends.
+// serve handles clicks until the tray closes or ctx ends, and redraws the tooltip when what it
+// says changes on the hub (the phase, the model, the door), not only at a click.
 func (c *controller) serve(ctx context.Context) {
+	var said <-chan struct{}
+	if wk, err := c.sup.Hub().Wake("phase", "model", "door"); err == nil {
+		defer wk.Close()
+		said = wk.C()
+	}
+	c.refresh() // listen first, then look: nothing said before the watch is missed
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-said:
+			c.refresh()
 		case id, ok := <-c.t.Clicks():
 			if !ok {
 				return
@@ -209,9 +218,18 @@ func (c *controller) refresh() {
 	}
 }
 
-// tooltip is one line: the phase and the model.
+// tooltip is one line: the phase and the model, and the requests the door holds while the model
+// comes up.
 func (c *controller) tooltip() string {
 	st := c.sup.Status()
+	tip := c.phaseTip(st)
+	if st.Held > 0 {
+		tip += fmt.Sprintf(" (%d waiting)", st.Held)
+	}
+	return tip
+}
+
+func (c *controller) phaseTip(st run.Status) string {
 	name := st.Model
 	if n := c.names[st.Model]; n != "" {
 		name = n

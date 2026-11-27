@@ -18,11 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
-	"hermesengine/catalog"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 var (
@@ -168,7 +168,7 @@ func (e *Env) Config() run.Config {
 			return fit.Footprint{FixedMiB: 5000, PerTokenMiB: 0.05, ScratchMiB: 500}, nil
 		},
 		CrashBackoff: []time.Duration{40 * time.Millisecond, 80 * time.Millisecond, 120 * time.Millisecond, 160 * time.Millisecond},
-		WatchEvery: 40 * time.Millisecond, GrowIdle: 10 * time.Minute, HealthPoll: 20 * time.Millisecond,
+		WatchEvery:   40 * time.Millisecond, GrowIdle: 10 * time.Minute, HealthPoll: 20 * time.Millisecond,
 		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond, HealthMisses: 3, IdleChecks: 2,
 		AgentBackoffBase: 40 * time.Millisecond, AgentBackoffMax: 200 * time.Millisecond, AgentStable: time.Hour,
 		CmdTimeout: 30 * time.Second,

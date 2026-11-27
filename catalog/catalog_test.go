@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)

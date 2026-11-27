@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // Procs lists the processes holding memory on the given adapters, as cheaply as the platform allows,

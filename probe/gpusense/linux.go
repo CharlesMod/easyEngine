@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 func senseLinux(ctx context.Context, s probe.Sources, p *Picture) {

@@ -1,4 +1,4 @@
-# HermesVoice Engine (design and contract)
+# easyEngine (design and contract)
 
 **easyEngine** is a one-click local LLM runtime for game mods. It is game-agnostic: no source
 file here may name a game (a test enforces it). HermesVoice for RimWorld
@@ -9,12 +9,12 @@ status in game.
 Background: the survey `easy_local_engine.md` (on the keeper's machine under
 `~/.local/share/rimworld-easy-engine-research/`, not in this repository)
 and the keeper's goal (2026-11-24): a GUI installer, the model picked by available RAM/VRAM,
-the hermes ctx balancer, starting when the game starts and tucking away when it exits, and
+the ctx balancer, starting when the game starts and tucking away when it exits, and
 any OpenAI-compatible endpoint as the alternative, with a Test light.
 
 ## 1. What it is
 
-One native Go binary, `hermes-engine` (this repo, Go module `hermesengine`, Go 1.27,
+One native Go binary, `easy-engine` (this repo, Go module `github.com/CharlesMod/easyEngine`, Go 1.27,
 toolchain at `~/.local/go/bin/go`; its sizing core is a nested module at Go 1.23 that other
 programs import, §13). Cross-compiled for `linux-amd64`, `windows-amd64`,
 `darwin-arm64` and `darwin-amd64`; no cgo. Not PyInstaller (AV false positives).
@@ -23,7 +23,7 @@ It does four jobs:
 
 1. **Setup.** Probe the hardware, recommend a model and backend, download them (resumable,
    sha256-checked) and keep the install up to date. GUI: a setup page it serves itself
-   (opened in the browser by `hermes-engine setup`) **and** the same API driven from the
+   (opened in the browser by `easy-engine setup`) **and** the same API driven from the
    game's own setup window. One API, two faces.
 2. **Model server.** Run stock `llama-server` (official llama.cpp release build) as a child,
    with the **ctx balancer** choosing the shape (§5).
@@ -37,9 +37,9 @@ downloaded or started.
 
 ## 2. Files and places
 
-Data dir (`dirs.Data()`): Linux `$XDG_DATA_HOME/hermes-engine` (default
-`~/.local/share/hermes-engine`), Windows `%LOCALAPPDATA%\HermesEngine`, macOS
-`~/Library/Application Support/HermesEngine`. `HERMES_ENGINE_HOME` overrides it (tests always
+Data dir (`dirs.Data()`): Linux `$XDG_DATA_HOME/easy-engine` (default
+`~/.local/share/easy-engine`), Windows `%LOCALAPPDATA%\EasyEngine`, macOS
+`~/Library/Application Support/EasyEngine`. `EASY_ENGINE_HOME` overrides it (tests always
 set it to a temp dir; **tests never touch the real data dir and only remove what they made**).
 
 ```
@@ -83,7 +83,7 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
   },
   "uv": [{"os": "linux", "arch": "amd64", "url": "...", "sha256": "...", "size": 0}],
   "models": [
-    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP (HermesVoice build)",
+    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP",
      "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
      "sha256": "595eddca...", "size": 10001779136,
@@ -108,7 +108,7 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
   the vendor's own values; today all three profiles of all three Gemma 4 models are
   temperature 1.0, top_k 64, top_p 0.95, min_p 0, repeat_penalty 1.0, DRY off. See
   `docs/SAMPLERS.md`.
-- A model with an empty `url` is **import-only** (`hermes-engine import <path>` copies or
+- A model with an empty `url` is **import-only** (`easy-engine import <path>` copies or
   hard-links a local file after checking its sha256). The mechanism stays for future models
   that are not public. gemma4-rp-maxxed is public on Hugging Face (`cmod/gemma4-rp-maxxed-GGUF`)
   and downloads like any other entry; `plan.Verdict.import_only` is true only for entries
@@ -428,7 +428,7 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
 
 ## 6. Lifetime
 
-- The game launches `hermes-engine serve --profile <file> --parent-pid <game pid>`, with no
+- The game launches `easy-engine serve --profile <file> --parent-pid <game pid>`, with no
   console window (Windows `CREATE_NO_WINDOW`).
 - **Single instance:** `engine.lock` plus a status probe on the port. If an engine is already
   running and healthy, a new `serve` adds the new parent pid to its watch list over the
@@ -512,7 +512,7 @@ Listens on **`127.0.0.1:47480`** (falls back to 47481–47489; the port it took 
 `engine.lock` and in the status). Not on the LAN unless `--host` says so.
 
 **Anti-CSRF:** every non-GET `/engine/v1/*` request must carry the header
-`X-Hermes-Engine: 1` and, if it has an `Origin`, the origin must be the engine's own. Browsers
+`X-Easy-Engine: 1` and, if it has an `Origin`, the origin must be the engine's own. Browsers
 cannot send the custom header cross-origin without a preflight that the engine refuses.
 
 ### `/engine/v1/*` (JSON)
@@ -565,7 +565,7 @@ line, so a first install stages it:
    client already retries a 503, and nothing holds a connection through a model load (10-60 s).
 4. No starter when: the target is already on disk; the target is the smallest that fits (a
    CPU-only machine picks the smallest) or less than twice the next smaller model; the starter
-   would not fit the disk; the install runs from the CLI (`hermes-engine install` exits with the
+   would not fit the disk; the install runs from the CLI (`easy-engine install` exits with the
    job and never stages); the only smaller model is a fallback (so a target of E4B downloads
    alone).
    After a successful swap the starter's file is **deleted**, but only when this engine downloaded
@@ -687,7 +687,7 @@ to the external base URL with its key added, so the agent always talks to the en
 
 The proxy applies a sampler policy to every completion request (`POST /v1/chat/completions`,
 `/chat/completions`, `/v1/completions`, `/completions`, `/completion`), for any client. The
-request names a profile with `X-Hermes-Sampler: rp|structured|official` (or a name the game
+request names a profile with `X-Easy-Sampler: rp|structured|official` (or a name the game
 profile adds); missing or unknown means `rp` (unknown is logged). The header is removed before
 forwarding. `sampler_policy` (a setting, saved in `state.json`) is:
 
@@ -701,7 +701,7 @@ forwarding. `sampler_policy` (a setting, saved in `state.json`) is:
 
 Non-sampler fields (`max_tokens`, `grammar`, `json_schema`, `stop`, `seed`, `cache_prompt`,
 `id_slot`, `n_probs`, `logit_bias`, ...) are never touched. Every proxied response carries
-`X-Hermes-Sampler-Applied: <profile>;<mode>` (`none;<reason>` when the request passed through).
+`X-Easy-Sampler-Applied: <profile>;<mode>` (`none;<reason>` when the request passed through).
 In external mode the same policy applies only when the external model name matches a catalog
 model (`sampler_match`); otherwise requests pass through and `status.sampler.note` says so.
 Design, table and how a game adds a profile: `docs/SAMPLERS.md`.
@@ -790,29 +790,31 @@ Control blocks, so the engine runs `uv python install --no-bin 3.12`, installs t
 `uv pip install --python <base> --target runtime\venvs\<agent.id>\site`, records the base
 interpreter in `base-python.txt` there, and runs `<base python> -m <module> <args>` with
 `PYTHONPATH=<that site>` and `PYTHONNOUSERSITE=1`. It adds
-`HERMESVOICE_LLM_URL=http://127.0.0.1:<engine port>` (`/v1` appended in openai mode) to
-the agent's env; the agent already reads that variable. Agent crash → restart with backoff
+`EASY_ENGINE_LLM_URL=http://127.0.0.1:<engine port>` (`/v1` appended in openai mode) and
+`EASY_ENGINE_URL=http://127.0.0.1:<engine port>` to the agent's env (the first name is the
+default of the profile's `llm_url_env`; in openai mode the same prefix also gets `_MODE=openai`
+and `_MODEL=<model>`). The old names are kept too, see "Renamed from hermes-engine" below. Agent crash → restart with backoff
 (1, 2, 4 … 30 s).
 
 ## 9. CLI
 
 ```
-hermes-engine serve   --profile F --parent-pid P [--port N] [--linger D]
+easy-engine serve   --profile F --parent-pid P [--port N] [--linger D]
                       [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                        [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]   §6b
-hermes-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed
-hermes-engine probe                         prints Hardware as JSON
-hermes-engine plan    [--profile F]         prints the plan as JSON
-hermes-engine gpu     [--profile F] [--host-pid N] [--json]   adapters, processes, reserve and free memory (§4a); asks a running engine, else senses here
-hermes-engine install --model ID [--yes]    headless install with a text progress bar
-hermes-engine import  PATH
-hermes-engine status | stop
-hermes-engine version
+easy-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed
+easy-engine probe                         prints Hardware as JSON
+easy-engine plan    [--profile F]         prints the plan as JSON
+easy-engine gpu     [--profile F] [--host-pid N] [--json]   adapters, processes, reserve and free memory (§4a); asks a running engine, else senses here
+easy-engine install --model ID [--yes]    headless install with a text progress bar
+easy-engine import  PATH
+easy-engine status | stop
+easy-engine version
 ```
 
 ## 10. In game: the example integration (HermesVoice for RimWorld, in the RimWorldLLM repo)
 
-- The mod ships the binaries in `Engine/<os>-<arch>/hermes-engine[.exe]` and the agent wheel
+- The mod ships the binaries in `Engine/<os>-<arch>/easy-engine[.exe]` and the agent wheel
   in `Engine/agent/`. `build.sh` here cross-compiles into `dist/<os>-<arch>/`; the csproj deploy target copies them.
 - `Mod/Source/Bridge/EngineLauncher.cs` and `EngineClient.cs` (no Verse references): pick the
   binary for the platform, set the exec bit on Unix, write the profile next to `bridge.json`,
@@ -845,7 +847,7 @@ hermes-engine version
   (case-insensitive), as the agent core's test does.
 - `Mod.Tests`: EngineClient against a fake engine; launcher binary choice per platform; profile
   JSON shape.
-- **Real check on sprinter (RTX 5080 16 GB):** download the reference model from Hugging Face (or `hermes-engine import` a local copy), start
+- **Real check on sprinter (RTX 5080 16 GB):** download the reference model from Hugging Face (or `easy-engine import` a local copy), start
   with the HermesVoice profile, reach `ready` with 3 slots, three concurrent completions answer,
   a VRAM hog (`~/.local/share/sprinter-llm/probe/vram-hog.py`) makes it shrink when idle and grow
   back after, and killing the parent stops everything. Live numbers go in `docs/ENGINE-RESULTS.md`
@@ -963,3 +965,44 @@ taking the engine's downloads, processes or server:
   v0.1.0` (its `go.sum` gets the module's hash on the first fetch), imports
   `github.com/CharlesMod/easyEngine/core/fit` and `.../core/gguf`, and needs only Go 1.23. With
   the module cache filled once (or a vendor directory), it builds with no network.
+
+## 14. Renamed from hermes-engine
+
+The engine was called `hermes-engine`. Every name that carried that product name was renamed;
+the ones that are a wire or disk contract with an installed mod or a running service keep
+working. All of the old names live in one package, `internal/legacy`, and nowhere else in the
+code (`purity_test.go` enforces it).
+
+| Old | New | Compatibility kept |
+|---|---|---|
+| Go module `hermesengine` | `github.com/CharlesMod/easyEngine` | none needed (the nested `core/` module path and its exported names did not change) |
+| binary / command `hermes-engine` (`dist/<os>-<arch>/hermes-engine[.exe]`, `cmd/hermes-engine`) | `easy-engine` | none: a launcher must run the new file name |
+| request header `X-Hermes-Engine: 1` | `X-Easy-Engine: 1` | the engine accepts either; the engine's own clients send both, so a new client can attach to a running old engine |
+| request header `X-Hermes-Sampler` | `X-Easy-Sampler` | read from the new one, else the old one; both are removed before the request goes upstream |
+| response header `X-Hermes-Sampler-Applied` | `X-Easy-Sampler-Applied` | both are sent, with the same value |
+| `HERMES_ENGINE_HOME` | `EASY_ENGINE_HOME` | the new one wins; the old one is honoured when only it is set |
+| agent env `HERMES_ENGINE_URL` | `EASY_ENGINE_URL` | both are set, same value |
+| agent env `HERMESVOICE_LLM_URL` (default of the profile's `llm_url_env`) | `EASY_ENGINE_LLM_URL` | when the profile names no `llm_url_env`, both are set, same value; in openai mode also `..._LLM_MODE=openai` and `..._LLM_MODEL=<model>` under both prefixes. A profile that names its own `llm_url_env` gets only that variable and its prefix, as before |
+| data dir Linux `$XDG_DATA_HOME/hermes-engine` | `$XDG_DATA_HOME/easy-engine` | see below |
+| data dir Windows `%LOCALAPPDATA%\HermesEngine` | `%LOCALAPPDATA%\EasyEngine` | see below |
+| data dir macOS `~/Library/Application Support/HermesEngine` | `~/Library/Application Support/EasyEngine` | see below |
+| catalog model names "... (HermesVoice build)" | "Gemma 4 26B RP", "Gemma 4 E4B RP" (catalog `version` 9) | none (display names only) |
+
+Unchanged on purpose: the control API paths (`/engine/v1/...`), the default port 47480, the
+file names `engine.lock` and `state.json`, and the shape of `GET /engine/v1/status`.
+
+**Data dir.** `dirs.Data()` has no side effects: with no env override it returns the new
+default dir if it exists, else the old default dir if it exists, else the new one. The move is
+a separate step, `dirs.Migrate()`, called once when `serve` or `setup` starts, and only when no
+env override (either name) is set and the new dir does not exist but the old one does:
+
+- if the old dir's `engine.lock` names a live engine (pid alive, start time matches), the old
+  dir is used in place for this run, so the new binary attaches to the running old engine
+  instead of starting a second one;
+- otherwise the old dir is moved to the new path with one `os.Rename` (same file system); on
+  Linux and macOS a symlink is left at the old path so an older client still finds
+  `engine.lock`; if the rename fails for any reason the old dir is used in place and the
+  reason is logged.
+
+The migration never deletes anything. A client that spoke only the old names needs no change
+to keep working; it should move to the new names, and a launcher must call `easy-engine`.

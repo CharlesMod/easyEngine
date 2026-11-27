@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func TestMain(m *testing.M) {

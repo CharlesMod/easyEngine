@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // fakeLister is a llama-server that only answers --list-devices: all listed devices unpinned,

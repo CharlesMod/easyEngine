@@ -9,8 +9,8 @@ import (
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
 
-	"hermesengine/catalog"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // refInfo is the reference model's header as read by core/gguf (the core's fit tests hold the

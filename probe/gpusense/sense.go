@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 const mib = 1 << 20

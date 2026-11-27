@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // DiskHeadroomMiB stays free after the whole setup has written everything it will write

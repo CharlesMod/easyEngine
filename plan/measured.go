@@ -6,7 +6,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 // OtherHardwareSpeed is the fraction of the measured decode speed the planner assumes on a GPU

@@ -2,7 +2,7 @@
 // (llama.cpp, uv) and the Hugging Face API (stock models). Hashes are never typed by hand:
 // they come from the API's asset digest, the LFS object id, or a download-and-hash.
 //
-//	go run ./tools/gencatalog -out catalog/catalog.json -version 8 -llama-tag b12651 -uv-tag 0.13.10
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -llama-tag b12651 -uv-tag 0.13.10
 //
 // Flags: -llama-tag and -uv-tag pin the llama.cpp build and the uv release (default: newest);
 // -cache DIR (default $HOME/.cache/gencatalog) keeps every downloaded archive as <sha256>.<ext>
@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/fetch"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/fetch"
 )
 
 // The reference build is published on Hugging Face by the keeper; its sha256 is checked against
@@ -257,7 +257,7 @@ func (c *client) get(u string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "hermes-engine-gencatalog")
+	req.Header.Set("User-Agent", "easy-engine-gencatalog")
 	req.Header.Set("Accept", "application/json")
 	if c.token != "" && strings.HasPrefix(u, "https://api.github.com/") {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -534,7 +534,7 @@ type modelSpec struct {
 
 var modelSpecs = []modelSpec{
 	// The keeper's rp build of E4B (QAT-exact Q4_0, refusals removed, vocabulary pruned); replaced stock E4B Q4_K_M on 2026-11-25.
-	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP (HermesVoice build)", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
 		useMain: true, quality: 60, chat: "gemma4"},
 	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
 		fallback: true, fallbackNote: "Smallest model: expect repeated lines and weaker understanding of what was said."},
@@ -580,7 +580,7 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 	return catalog.Model{}, fmt.Errorf("%s: file %s not in the repo", sp.repo, sp.file)
 }
 
-var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP (HermesVoice build)", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
+var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
 	moe: true, useMain: true, quality: 100, chat: "gemma4", notes: "reference model"}
 
 func main() {

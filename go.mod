@@ -1,4 +1,4 @@
-module hermesengine
+module github.com/CharlesMod/easyEngine
 
 go 1.27
 

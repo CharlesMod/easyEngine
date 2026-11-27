@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"hermesengine/catalog"
-	"hermesengine/plan"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/plan"
 )
 
 // Switching models while one serves: the current model keeps serving, the new one downloads in
@@ -46,7 +46,7 @@ func (s *Supervisor) trySwitch(model, backend string) (handled bool, err error) 
 		return true, fmt.Errorf("unknown model %q", model)
 	}
 	if m.URL == "" && !s.modelInstalled(m) {
-		return true, fmt.Errorf("%s is import-only: run `hermes-engine import <path>` (or POST /engine/v1/import)", m.Name)
+		return true, fmt.Errorf("%s is import-only: run `easy-engine import <path>` (or POST /engine/v1/import)", m.Name)
 	}
 	if !s.modelInstalled(m) {
 		if err := s.checkDisk(m); err != nil {

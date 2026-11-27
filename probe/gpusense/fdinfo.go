@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // fdClient is one DRM client read from a /proc/<pid>/fdinfo/<fd> file.

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/api"
-	"hermesengine/catalog"
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/api"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func fp(v float64) *float64 { return &v }
@@ -80,7 +80,7 @@ func TestEnforceRewritesEveryField(t *testing.T) {
 	if c != 200 {
 		t.Fatalf("status %d", c)
 	}
-	if got := h.Get("X-Hermes-Sampler-Applied"); got != "rp;enforce" {
+	if got := h.Get("X-Easy-Sampler-Applied"); got != "rp;enforce" {
 		t.Fatalf("applied header %q", got)
 	}
 	var sent map[string]json.RawMessage
@@ -115,7 +115,7 @@ func TestEnforceRewritesEveryField(t *testing.T) {
 
 func TestEnforceOfficialAddsDryOff(t *testing.T) {
 	e, _, srv := samplerEnv(t)
-	do(t, "POST", srv.URL+"/v1/chat/completions", `{"dry_multiplier":0.8,"dry_base":2}`, hdr(map[string]string{"X-Hermes-Sampler": "official"}))
+	do(t, "POST", srv.URL+"/v1/chat/completions", `{"dry_multiplier":0.8,"dry_base":2}`, hdr(map[string]string{"X-Easy-Sampler": "official"}))
 	got := lastBody(t, e)
 	if got["dry_multiplier"] != float64(0) || got["repeat_penalty"] != float64(1) || got["temperature"] != float64(1) {
 		t.Fatalf("official: %v", got)
@@ -132,8 +132,8 @@ func TestFillOnlyFillsMissing(t *testing.T) {
 	}
 	testkit.WaitPhase(t, s, "ready", 5*time.Second)
 	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{"temperature":0.1,"top_k":5,"mirostat":2,"max_tokens":9}`, jsonCT)
-	if h.Get("X-Hermes-Sampler-Applied") != "rp;fill" {
-		t.Fatalf("header %q", h.Get("X-Hermes-Sampler-Applied"))
+	if h.Get("X-Easy-Sampler-Applied") != "rp;fill" {
+		t.Fatalf("header %q", h.Get("X-Easy-Sampler-Applied"))
 	}
 	got := lastBody(t, e)
 	if got["temperature"] != 0.1 || got["top_k"] != float64(5) || got["mirostat"] != float64(2) {
@@ -152,8 +152,8 @@ func TestOffPassesThrough(t *testing.T) {
 	do(t, "PUT", srv.URL+"/engine/v1/settings", `{"sampler_policy":"off","linger_s":0}`, csrf)
 	testkit.WaitPhase(t, s, "ready", 5*time.Second)
 	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", wild, jsonCT)
-	if h.Get("X-Hermes-Sampler-Applied") != "none;off" {
-		t.Fatalf("header %q", h.Get("X-Hermes-Sampler-Applied"))
+	if h.Get("X-Easy-Sampler-Applied") != "none;off" {
+		t.Fatalf("header %q", h.Get("X-Easy-Sampler-Applied"))
 	}
 	var want, got map[string]any
 	json.Unmarshal([]byte(wild), &want)
@@ -180,12 +180,12 @@ func TestHeaderSelectsProfileAndUnknownFallsBackToRP(t *testing.T) {
 	} {
 		h := jsonCT
 		if tc.header != "" {
-			h = hdr(map[string]string{"X-Hermes-Sampler": tc.header})
+			h = hdr(map[string]string{"X-Easy-Sampler": tc.header})
 		}
 		_, _, rh := do(t, "POST", srv.URL+"/v1/chat/completions", `{"temperature":2}`, h)
 		got := lastBody(t, e)
-		if rh.Get("X-Hermes-Sampler-Applied") != tc.applied || got["temperature"] != tc.temp || got["top_k"] != tc.topK {
-			t.Errorf("%s: applied %q body %v", tc.name, rh.Get("X-Hermes-Sampler-Applied"), got)
+		if rh.Get("X-Easy-Sampler-Applied") != tc.applied || got["temperature"] != tc.temp || got["top_k"] != tc.topK {
+			t.Errorf("%s: applied %q body %v", tc.name, rh.Get("X-Easy-Sampler-Applied"), got)
 		}
 	}
 	logs, _ := s.Logs("engine", 200)
@@ -198,12 +198,12 @@ func TestOtherCompletionEndpointsAndNonCompletionPaths(t *testing.T) {
 	e, _, srv := samplerEnv(t)
 	_, _, h := do(t, "POST", srv.URL+"/completion", `{"prompt":"a","temperature":3,"n_predict":4}`, jsonCT)
 	got := lastBody(t, e)
-	if got["temperature"] != 0.9 || got["n_predict"] != float64(4) || h.Get("X-Hermes-Sampler-Applied") != "rp;enforce" {
-		t.Fatalf("/completion: %v %q", got, h.Get("X-Hermes-Sampler-Applied"))
+	if got["temperature"] != 0.9 || got["n_predict"] != float64(4) || h.Get("X-Easy-Sampler-Applied") != "rp;enforce" {
+		t.Fatalf("/completion: %v %q", got, h.Get("X-Easy-Sampler-Applied"))
 	}
 	do(t, "POST", srv.URL+"/v1/completions", `{"prompt":"a","top_p":0.1}`, jsonCT) // fake has no such route: 404 is fine
 	_, _, h = do(t, "GET", srv.URL+"/props", "", nil)
-	if h.Get("X-Hermes-Sampler-Applied") == "" {
+	if h.Get("X-Easy-Sampler-Applied") == "" {
 		t.Fatalf("a proxied non-completion response lacks the header")
 	}
 	// a body that is not a JSON object is forwarded as it came
@@ -217,14 +217,14 @@ func TestStreamingStillWorksWithEnforce(t *testing.T) {
 	e, _, srv := samplerEnv(t)
 	t0 := time.Now()
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true,"temperature":5}`))
-	req.Header.Set("X-Hermes-Sampler", "structured")
+	req.Header.Set("X-Easy-Sampler", "structured")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.Header.Get("X-Hermes-Sampler-Applied") != "structured;enforce" {
-		t.Fatalf("header %q", resp.Header.Get("X-Hermes-Sampler-Applied"))
+	if resp.Header.Get("X-Easy-Sampler-Applied") != "structured;enforce" {
+		t.Fatalf("header %q", resp.Header.Get("X-Easy-Sampler-Applied"))
 	}
 	br := bufio.NewReader(resp.Body)
 	line, _ := br.ReadString('\n')
@@ -286,7 +286,7 @@ func TestExternalKnownAndUnknownModel(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		last.Store(string(b))
-		applied.Store(r.Header.Get("X-Hermes-Sampler"))
+		applied.Store(r.Header.Get("X-Easy-Sampler"))
 		io.WriteString(w, `{"choices":[{"message":{"content":"ready"}}]}`)
 	}))
 	defer up.Close()
@@ -306,19 +306,19 @@ func TestExternalKnownAndUnknownModel(t *testing.T) {
 		testkit.WaitPhase(t, s, "external", 5*time.Second)
 	}
 	put("google/gemma-4-E4B-it")
-	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{"temperature":0.2,"max_tokens":3}`, hdr(map[string]string{"X-Hermes-Sampler": "rp"}))
+	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{"temperature":0.2,"max_tokens":3}`, hdr(map[string]string{"X-Easy-Sampler": "rp"}))
 	var got map[string]any
 	json.Unmarshal([]byte(last.Load().(string)), &got)
-	if got["temperature"] != float64(1) || got["top_k"] != float64(64) || got["max_tokens"] != float64(3) || h.Get("X-Hermes-Sampler-Applied") != "rp;enforce" {
-		t.Fatalf("known external model: %v %q", got, h.Get("X-Hermes-Sampler-Applied"))
+	if got["temperature"] != float64(1) || got["top_k"] != float64(64) || got["max_tokens"] != float64(3) || h.Get("X-Easy-Sampler-Applied") != "rp;enforce" {
+		t.Fatalf("known external model: %v %q", got, h.Get("X-Easy-Sampler-Applied"))
 	}
 	if applied.Load() != "" {
 		t.Fatalf("the sampler header was forwarded to the player's endpoint")
 	}
 	put("some-other-model")
 	_, _, h = do(t, "POST", srv.URL+"/v1/chat/completions", `{"temperature":0.2}`, jsonCT)
-	if last.Load().(string) != `{"temperature":0.2}` || !strings.HasPrefix(h.Get("X-Hermes-Sampler-Applied"), "none;") {
-		t.Fatalf("unknown external model was rewritten: %v %q", last.Load(), h.Get("X-Hermes-Sampler-Applied"))
+	if last.Load().(string) != `{"temperature":0.2}` || !strings.HasPrefix(h.Get("X-Easy-Sampler-Applied"), "none;") {
+		t.Fatalf("unknown external model was rewritten: %v %q", last.Load(), h.Get("X-Easy-Sampler-Applied"))
 	}
 	_, body, _ := do(t, "GET", srv.URL+"/engine/v1/status", "", nil)
 	var st struct{ Sampler run.SamplerInfo }
@@ -338,9 +338,9 @@ func TestGameProfileAddsNamedProfile(t *testing.T) {
 	e.Prof.Samplers = map[string]catalog.SamplerProfile{"cold": {Temperature: fp(0.1), TopK: ip(10)}}
 	s, srv := serve(t, e, e.Config())
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{}`, hdr(map[string]string{"X-Hermes-Sampler": "cold"}))
-	if got := lastBody(t, e); got["temperature"] != 0.1 || got["top_k"] != float64(10) || h.Get("X-Hermes-Sampler-Applied") != "cold;enforce" {
-		t.Fatalf("game profile: %v %q", got, h.Get("X-Hermes-Sampler-Applied"))
+	_, _, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{}`, hdr(map[string]string{"X-Easy-Sampler": "cold"}))
+	if got := lastBody(t, e); got["temperature"] != 0.1 || got["top_k"] != float64(10) || h.Get("X-Easy-Sampler-Applied") != "cold;enforce" {
+		t.Fatalf("game profile: %v %q", got, h.Get("X-Easy-Sampler-Applied"))
 	}
 }
 

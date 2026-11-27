@@ -1,9 +1,9 @@
 package run
 
 import (
-	"hermesengine/catalog"
-	"hermesengine/plan"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // SetAgentNoVenv switches the agent layout (no venv: base Python + <env>/site) for a test; it returns the undo.

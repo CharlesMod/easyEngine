@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // dxgiAdapter is one DXGI_ADAPTER_DESC1, software adapters already dropped.

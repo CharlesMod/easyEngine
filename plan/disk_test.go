@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/catalog"
+	"github.com/CharlesMod/easyEngine/catalog"
 )
 
 func TestNeedOfRunningMaximum(t *testing.T) {

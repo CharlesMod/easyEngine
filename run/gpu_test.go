@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/plan"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // senseFake is an injected Sense: the fake card (nvidia, 16384 MiB) with other apps holding

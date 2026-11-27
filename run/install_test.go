@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
@@ -60,7 +60,7 @@ case "$1" in
     mkdir -p "$4/bin"
     cat > "$4/bin/python" <<'EOS'
 #!/bin/sh
-echo "$(date +%s%N) url=$HERMESVOICE_LLM_URL mode=$HERMESVOICE_LLM_MODE args=$*" >> "$FAKE_AGENT_LOG"
+echo "$(date +%s%N) url=$EASY_ENGINE_LLM_URL mode=$EASY_ENGINE_LLM_MODE args=$*" >> "$FAKE_AGENT_LOG"
 if [ -f "$FAKE_AGENT_DIE" ]; then exit 3; fi
 exec sleep 30
 EOS
@@ -72,7 +72,7 @@ EOS
         b="$UV_PYTHON_INSTALL_DIR/base/bin"; mkdir -p "$b"
         cat > "$b/python" <<'EOS'
 #!/bin/sh
-echo "$(date +%s%N) url=$HERMESVOICE_LLM_URL pythonpath=$PYTHONPATH nousersite=$PYTHONNOUSERSITE args=$*" >> "$FAKE_AGENT_LOG"
+echo "$(date +%s%N) url=$EASY_ENGINE_LLM_URL pythonpath=$PYTHONPATH nousersite=$PYTHONNOUSERSITE args=$*" >> "$FAKE_AGENT_LOG"
 exec sleep 30
 EOS
         chmod +x "$b/python"; echo "$b/python" ;;

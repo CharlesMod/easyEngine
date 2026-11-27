@@ -2,7 +2,7 @@
 
 A one-click local LLM engine for game mods.
 
-A mod ships one small binary, `hermes-engine`. When the game starts, the mod launches it. The engine:
+A mod ships one small binary, `easy-engine`. When the game starts, the mod launches it. The engine:
 
 - **Sets itself up.** It reads the machine's GPU, VRAM, RAM and disk, recommends a model that fits,
   and downloads it together with a pinned llama.cpp build (resumable, sha256-checked). There is a

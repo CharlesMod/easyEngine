@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"hermesengine/catalog"
-	"hermesengine/lifecycle"
-	"hermesengine/plan"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // ErrNoSpace wraps every refusal for lack of disk space.

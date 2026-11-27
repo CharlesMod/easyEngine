@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/app"
-	"hermesengine/lifecycle"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/app"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 func prof() *run.Profile {

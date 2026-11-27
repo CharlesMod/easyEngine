@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // realList is llama-server b12651's --list-devices on a two-card CUDA machine, with the

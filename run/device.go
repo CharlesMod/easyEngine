@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"hermesengine/plan"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 var listCache sync.Map // bin + "\x00" + extra env -> []plan.ListedDevice

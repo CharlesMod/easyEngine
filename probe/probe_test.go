@@ -77,7 +77,7 @@ func TestParseNvidiaSMI(t *testing.T) {
 }
 
 func TestLinuxNvidia(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "linux", goarch: "amd64", cpus: 16, disk: 500000,
 		cmds:  map[string]string{smiQuery: "0, NVIDIA GeForce RTX 5080, 16303, 602\n"},
 		files: map[string]string{"/proc/meminfo": meminfo, "/proc/cpuinfo": cpuinfo}}
@@ -94,7 +94,7 @@ func TestLinuxNvidia(t *testing.T) {
 }
 
 func TestLinuxSysfsAMDAndIntegratedSkipped(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "linux", goarch: "amd64", cpus: 8,
 		files: map[string]string{
 			"/proc/meminfo": meminfo, "/proc/cpuinfo": cpuinfo,
@@ -125,7 +125,7 @@ func TestLinuxSysfsAMDAndIntegratedSkipped(t *testing.T) {
 }
 
 func TestNoGPUNothingReadable(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "linux", goarch: "amd64", cpus: 4}
 	if _, err := ProbeWith(context.Background(), f); err == nil {
 		t.Error("expected error when nothing is readable")
@@ -141,7 +141,7 @@ Pages purgeable:                           20000.
 `
 
 func TestDarwinAppleSilicon(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "darwin", goarch: "arm64", cpus: 10, disk: 100000,
 		cmds: map[string]string{
 			"sysctl -n hw.memsize machdep.cpu.brand_string hw.logicalcpu": "17179869184\nApple M2 Pro\n10\n",
@@ -163,7 +163,7 @@ func TestDarwinAppleSilicon(t *testing.T) {
 }
 
 func TestDarwinIntelNoGPU(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "darwin", goarch: "amd64", cpus: 8,
 		cmds: map[string]string{
 			"sysctl -n hw.memsize machdep.cpu.brand_string hw.logicalcpu": "17179869184\nIntel(R) Core(TM) i9\n16\n",
@@ -179,7 +179,7 @@ const winJSON = `{"cpu":"AMD Ryzen 5 5600X 6-Core Processor","cores":12,"ram_tot
 const winJSONSingleObject = `{"cpu":"Intel(R) Core(TM) i5","cores":8,"ram_total":17179869184,"ram_free_kb":8388608,"gpus":{"name":"Intel(R) UHD Graphics 630","adapter_ram":1073741824,"qw":0}}`
 
 func TestWindowsAMD(t *testing.T) {
-	t.Setenv("HERMES_ENGINE_HOME", t.TempDir())
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
 	f := &fake{goos: "windows", goarch: "amd64", cpus: 12, cmds: map[string]string{"powershell": "\xef\xbb\xbf" + winJSON}}
 	hw, err := ProbeWith(context.Background(), f)
 	if err != nil {

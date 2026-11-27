@@ -7,8 +7,8 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // HostAdapter is what the host app says about the adapter it renders on.

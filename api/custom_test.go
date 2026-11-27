@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/internal/testkit"
-	"hermesengine/plan"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
-var csrfHdr = map[string]string{"Content-Type": "application/json", "X-Hermes-Engine": "1"}
+var csrfHdr = map[string]string{"Content-Type": "application/json", "X-Easy-Engine": "1"}
 
 func post(t *testing.T, base, route, body string) (int, string) {
 	t.Helper()

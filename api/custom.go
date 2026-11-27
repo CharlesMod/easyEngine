@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // customRoute serves custom/check, custom/use and custom/clear; it reports whether name was one.

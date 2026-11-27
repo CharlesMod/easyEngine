@@ -1,4 +1,4 @@
-// hermes-engine: the one-click local LLM runtime (see docs/ENGINE.md).
+// easy-engine: the one-click local LLM runtime (see docs/ENGINE.md).
 package main
 
 import (
@@ -18,12 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"hermesengine/app"
-	"hermesengine/dirs"
-	"hermesengine/lifecycle"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/app"
+	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/internal/legacy"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // version is set with -ldflags "-X main.version=...".
@@ -43,17 +44,17 @@ func (p *pidList) Set(v string) error {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  hermes-engine serve   --profile F --parent-pid P [--port N] [--linger D]
+  easy-engine serve   --profile F --parent-pid P [--port N] [--linger D]
                         [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                          [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
-  hermes-engine setup   [--profile F]
-  hermes-engine probe
-  hermes-engine plan    [--profile F]
-  hermes-engine gpu     [--profile F] [--host-pid N] [--json]
-  hermes-engine install --model ID [--yes]
-  hermes-engine import  PATH
-  hermes-engine status | stop
-  hermes-engine version
+  easy-engine setup   [--profile F]
+  easy-engine probe
+  easy-engine plan    [--profile F]
+  easy-engine gpu     [--profile F] [--host-pid N] [--json]
+  easy-engine install --model ID [--yes]
+  easy-engine import  PATH
+  easy-engine status | stop
+  easy-engine version
 `)
 }
 
@@ -84,7 +85,7 @@ func main() {
 	case "stop":
 		code = cmdStop()
 	case "version", "--version", "-v":
-		fmt.Println("hermes-engine", version)
+		fmt.Println("easy-engine", version)
 	default:
 		usage()
 		code = 2
@@ -127,6 +128,9 @@ func cmdServe(args []string, setup bool) int {
 		fmt.Fprintln(os.Stderr, "serve needs --parent-pid (use `setup` for a run without a game)")
 		return 2
 	}
+	if note := dirs.Migrate(); note != "" { // once, before anything reads the data dir
+		fmt.Fprintln(os.Stderr, "easy-engine:", note)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var yc *run.YieldConfig
@@ -148,7 +152,7 @@ func cmdServe(args []string, setup bool) int {
 	}
 	res, err := app.Serve(ctx, o)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hermes-engine:", err)
+		fmt.Fprintln(os.Stderr, "easy-engine:", err)
 		return 1
 	}
 	if res.Attached {
@@ -276,7 +280,7 @@ func installVia(port int, model, backend string) int {
 	base := fmt.Sprintf("http://127.0.0.1:%d/engine/v1/", port)
 	body, _ := json.Marshal(map[string]string{"model": model, "backend": backend})
 	req, _ := http.NewRequest("POST", base+"install", bytes.NewReader(body))
-	req.Header.Set("X-Hermes-Engine", "1")
+	legacy.MarkRequest(req.Header, "X-Easy-Engine")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
@@ -371,7 +375,7 @@ func human(b int64) string {
 
 func cmdImport(args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: hermes-engine import PATH")
+		fmt.Fprintln(os.Stderr, "usage: easy-engine import PATH")
 		return 2
 	}
 	s, err := supervisor("", true)
@@ -414,7 +418,7 @@ func cmdStop() int {
 		return 0
 	}
 	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/shutdown", port), nil)
-	req.Header.Set("X-Hermes-Engine", "1")
+	legacy.MarkRequest(req.Header, "X-Easy-Engine")
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -448,7 +452,7 @@ func cmdGPU(args []string) int {
 		if *hostPID > 0 {
 			body := strings.NewReader(fmt.Sprintf(`{"pid": %d}`, *hostPID))
 			req, _ := http.NewRequest("POST", base+"host", body)
-			req.Header.Set("X-Hermes-Engine", "1")
+			legacy.MarkRequest(req.Header, "X-Easy-Engine")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)

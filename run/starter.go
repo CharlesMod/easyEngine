@@ -6,10 +6,10 @@ import (
 	"os"
 	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/fetch"
-	"hermesengine/plan"
-	"hermesengine/probe"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/fetch"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
 )
 
 // First-run staging: when the chosen model (the target) is not on disk, the engine first

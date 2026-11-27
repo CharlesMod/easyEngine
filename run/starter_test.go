@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"hermesengine/catalog"
-	"hermesengine/internal/testkit"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // stage is a first-run fixture: a starter model (small) and a target model (big) on a fake host

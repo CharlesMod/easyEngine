@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"hermesengine/catalog"
-	"hermesengine/lifecycle"
-	"hermesengine/plan"
-	"hermesengine/probe"
-	"hermesengine/run"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 const mib = int64(1) << 20

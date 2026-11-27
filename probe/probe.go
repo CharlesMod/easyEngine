@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"hermesengine/dirs"
+	"github.com/CharlesMod/easyEngine/dirs"
 )
 
 type GPU struct {

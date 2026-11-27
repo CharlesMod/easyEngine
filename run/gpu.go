@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"hermesengine/lifecycle"
-	"hermesengine/plan"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/lifecycle"
+	"github.com/CharlesMod/easyEngine/plan"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 // gpuReportTTL is how long GET /engine/v1/gpu serves a reading before it senses again.

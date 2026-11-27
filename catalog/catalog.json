@@ -1,5 +1,5 @@
 {
-  "version": 8,
+  "version": 9,
   "llamacpp": {
     "tag": "b12651",
     "assets": [
@@ -193,7 +193,7 @@
   "models": [
     {
       "id": "gemma4-rp-maxxed-q3kxl",
-      "name": "Gemma 4 26B RP (HermesVoice build)",
+      "name": "Gemma 4 26B RP",
       "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
       "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
       "sha256": "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29",
@@ -299,7 +299,7 @@
     },
     {
       "id": "gemma4-e4b-rp-q40",
-      "name": "Gemma 4 E4B RP (HermesVoice build)",
+      "name": "Gemma 4 E4B RP",
       "file": "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
       "url": "https://huggingface.co/cmod/gemma4-e4b-rp-GGUF/resolve/main/gemma-4-E4B-it-qat-rp-Q4_0.gguf",
       "sha256": "f272d8be50efb4cedeb6895b8fa1e451dad529b2423d99603f8c247a33b0445d",
@@ -456,7 +456,7 @@
       "peak_bytes": 126652416,
       "keep_bytes": 126652416,
       "measured_on": "2026-11-26 poe (Ubuntu 24.04, ext4): du -sB1 of a fresh runtime dir sampled every 0.2 s, 3 runs identical",
-      "measured_with": "uv 0.13.10, CPython 3.12.16, hermesvoice-agent 0.1.0 wheel (httpx, pydantic); python 109.4 MB, uv cache 16.8 MB, venv 11.3 MB hard-linked to the cache"
+      "measured_with": "uv 0.13.10, CPython 3.12.16, agent 0.1.0 wheel (httpx, pydantic); python 109.4 MB, uv cache 16.8 MB, venv 11.3 MB hard-linked to the cache"
     },
     {
       "os": "windows",
@@ -465,7 +465,7 @@
       "peak_bytes": 106545152,
       "keep_bytes": 106545152,
       "measured_on": "2026-11-26 DESKTOP (Windows 11, NTFS): files of a fresh engine install's runtime dir rounded up to 4 KiB plus a 1 KiB MFT record each; the dir grew monotonically while sampled every second",
-      "measured_with": "uv 0.13.10, CPython 3.12.16 (uv python install --no-bin), hermesvoice-agent 0.1.0 wheel into site/ (no venv); python 73.0 MB, uv cache 17.3 MB, site 11.9 MB, 4284 files"
+      "measured_with": "uv 0.13.10, CPython 3.12.16 (uv python install --no-bin), agent 0.1.0 wheel into site/ (no venv); python 73.0 MB, uv cache 17.3 MB, site 11.9 MB, 4284 files"
     }
   ]
 }

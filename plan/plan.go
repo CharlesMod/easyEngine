@@ -14,9 +14,9 @@ import (
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
 
-	"hermesengine/catalog"
-	"hermesengine/probe"
-	"hermesengine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/probe/gpusense"
 )
 
 const (

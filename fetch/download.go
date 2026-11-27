@@ -197,7 +197,7 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 	if err != nil {
 		return permanentError{err}
 	}
-	req.Header.Set("User-Agent", "hermes-engine")
+	req.Header.Set("User-Agent", "easy-engine")
 	if have > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(have, 10)+"-")
 	}

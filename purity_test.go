@@ -12,6 +12,8 @@ import (
 // The banned words are built from pieces so this file does not trip itself (and is skipped).
 func TestPurity(t *testing.T) {
 	banned := []string{"rim" + "world", "pa" + "wn", "col" + "on"}
+	// The engine's old product name is banned too, except where the old names are kept on purpose.
+	old := "her" + "mes"
 	n := 0
 	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -33,7 +35,11 @@ func TestPurity(t *testing.T) {
 		n++
 		low := strings.ToLower(string(b))
 		lowName := strings.ToLower(p)
-		for _, w := range banned {
+		words := banned
+		if !strings.HasPrefix(filepath.ToSlash(p), "internal/legacy/") { // the one place that keeps the old names
+			words = append(append([]string{}, banned...), old)
+		}
+		for _, w := range words {
 			if strings.Contains(low, w) {
 				t.Errorf("%s contains %q", p, w)
 			}

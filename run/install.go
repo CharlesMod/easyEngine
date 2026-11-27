@@ -622,6 +622,7 @@ func (s *Supervisor) restartServer() {
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	s.keepContexts("a restart after an install", false) // laid back only if model, build and cache type stand
 	s.stopServerLocked()
 	s.startLocked()
 }

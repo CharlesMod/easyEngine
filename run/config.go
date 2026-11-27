@@ -165,6 +165,12 @@ type Config struct {
 	DrainMax    time.Duration // default 2 min: named moment, longest wait for replies before a shrink that cannot wait for idle
 	DrainMinMiB int           // default 256: a held shortfall this large shrinks without waiting for idle
 	OOMHold     time.Duration // default 60s: named moment; out-of-memory lines in two requests this close are a shrink signal
+	// The prompt cache across a reshape (run/context.go). SlotTimeout is the network timeout on
+	// one slot save or restore call (default 2 min: a large file). YieldSaveMaxMiB is the most a
+	// yield saves with keep_context "on" (default 2048, about 2 s at the speed measured on a
+	// P40, docs/ENGINE.md): a program waits for the card while a yield saves.
+	SlotTimeout     time.Duration
+	YieldSaveMaxMiB int
 
 	// Yield, when set, gives the card to other programs that want it (run/yield.go).
 	Yield *YieldConfig
@@ -218,6 +224,10 @@ func (c *Config) defaults() {
 	dur(&c.CrashQuick, 2*time.Minute)
 	dur(&c.DrainMax, 2*time.Minute)
 	dur(&c.OOMHold, 60*time.Second)
+	dur(&c.SlotTimeout, 2*time.Minute)
+	if c.YieldSaveMaxMiB <= 0 {
+		c.YieldSaveMaxMiB = 2048
+	}
 	if c.Yield != nil {
 		c.Yield.defaults()
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -40,6 +41,10 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 // proxy forwards every non-/engine path to llama-server (local) or, in external
 // mode, /v1/* to the player's endpoint with its key.
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
+	if slotFiles(r) {
+		fail(w, http.StatusForbidden, "slot save and restore are the engine's own (keep_context); a client may erase a slot")
+		return
+	}
 	id := requestID(r)
 	w.Header().Set(RequestIDHeader, id)
 	rt, done := a.S.Enter(id)
@@ -139,6 +144,24 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 		forward(w, r, rp, a.fwd(false, id).with(sw).ending(&sum))
 	}
+}
+
+// slotFiles is true for llama-server's slot save and restore (POST /slots/{id}?action=save|restore).
+// They write and read files in the engine's own contexts directory (--slot-save-path,
+// run/context.go) and are the engine's alone: a client that could call them could fill the disk
+// with files the engine does not know of, or lay another slot's saved prompt into its own. A
+// client keeps GET /slots and action=erase. Anything on /slots/ that names an action other than
+// erase is refused, whatever the method, so a spelling the model server would take cannot pass.
+func slotFiles(r *http.Request) bool {
+	if !strings.HasPrefix(path.Clean("/"+r.URL.Path), "/slots/") {
+		return false
+	}
+	for _, act := range r.URL.Query()["action"] {
+		if act != "erase" {
+			return true
+		}
+	}
+	return false
 }
 
 // holdOn are the names whose change can end a hold: the phase, the model and mode (a switch to

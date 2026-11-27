@@ -65,7 +65,7 @@ type Event struct {
   for clients not yet moved. *Built* (ee-stream): the three paths are mounted behind the gate
   (`api/api.go`, `event/door.go`, unchanged: they agreed with this section); the `engine` fact and
   status carry `api: 1`; the `door` fact `{held}` is declared; docs/ENGINE.md §7e is the client's
-  contract. `pairing` and `client` are said since ee-pair (§7). Not yet: `context` (a later slice).
+  contract. `pairing` and `client` are said since ee-pair (§7); `context` is built (ee-cache, §6).
 - The first names: `engine` (version, api, port, build), `phase`, `model`, `mind.shape`,
   `mind.device`, `agent` (keyed by client), `client` (keyed), `install.progress` (reading, said per
   step of bytes, never per time), `upgrade`, `room` (reading: adapters, reserve, free for the model),
@@ -117,16 +117,26 @@ present).
 
 ## 6. The prompt cache across a reshape
 
-Every planned stop of a mind (shrink, grow, yield, a swap to the same model, sleep) saves each slot
-that holds tokens (`POST /slots/{i}?action=save`, into `--slot-save-path` under the data dir), and
-the next start lays each one back (`action=restore`) where its **context key** (model file hash,
-build and patch set, cache type) is the same and its tokens fit the new context per slot; else it is
-let go. Saved files are let go when laid back, when the model changes, and at engine start and end.
-Their size is counted in the disk need; with too little disk nothing is saved. A crash saves nothing.
+Every planned stop of a healthy mind (shrink, grow, yield, sleep, a person's stop, the restart
+after an install) saves each slot that holds tokens (`GET /slots` says which;
+`POST /slots/{i}?action=save`, into `--slot-save-path`, the engine's own `<data>/contexts/`),
+after the drain and before the stop, and the next start lays each one back (`action=restore`)
+once the server is up and before the phase says ready, where its **context key** (model file
+hash, llama build with its patch set, cache type) is the same, its slot exists and its tokens fit
+the new context per slot; else it is let go. Saved files are let go when laid back, when the
+model, build or cache type changes, at engine start and end, and when the disk runs short; the
+engine removes only the files its index (`contexts/index.json`) names. The size is estimated
+from the sizing core and checked against the free disk; with too little nothing is saved. A
+crash, a hang and an out-of-memory restart save nothing; neither does a drain cut short. A yield
+saves only what fits `YieldSaveMaxMiB` unless `keep_context` is `always` (`off` saves nothing).
 With the door holding requests (§3), a reshape is: drain, save, stop, start, lay back, release; a
-client sees a slower reply, not an error and not a cold prompt. Sliding-window models (Gemma) keep
-their checkpoints only on a build with the `slot-checkpoint` patch; on a stock build a laid-back
-context is reused only by a request that continues it.
+client sees a slower reply, not an error and not a cold prompt. Each step is said as the
+happening `context` and status `contexts` lists what is kept. *Built* (ee-cache), with the
+measurements and the yield rule in docs/ENGINE.md §5, "The prompt cache across a restart".
+Sliding-window models (Gemma) keep their context checkpoints across a save and restore on the
+stock build the catalog pins (b12651: upstream "server : preserve context checkpoints across slot
+save/restore", #26004); on poe a laid-back Gemma 4 slot was continued with only the new turn
+processed.
 
 ## 7. Security
 

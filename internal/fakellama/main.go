@@ -6,6 +6,10 @@
 //	                           oom (die with an out-of-memory error), and the outputs
 //	                           starts.log and vram.<pid> (fake VRAM use for fake nvidia-smi)
 //	FAKELLAMA_HEALTH_DELAY     how long /health answers 503 (Go duration, default 0)
+//	FAKELLAMA_READY_LINES      "none": no listening line is ever printed (a build worded
+//	                           otherwise); "early": the ready lines are printed at once and
+//	                           /health turns 200 only after FAKELLAMA_HEALTH_DELAY, with no
+//	                           line after it
 //	FAKELLAMA_OOM_ABOVE        at load, -c above this value prints llama.cpp's allocation
 //	                           failure (with a buffer size) and exits 1
 //	FAKELLAMA_BYTES_PER_TOKEN  buffer bytes per ctx token for that message (default 52428)
@@ -448,13 +452,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	becomeReady := func() {
-		isReady.Store(true)
+	readyLines := os.Getenv("FAKELLAMA_READY_LINES")
+	sayReady := func() {
 		say("srv  llama_server: model loaded",
 			"srv  llama_server: listening on http://"+addr,
 			"srv  update_slots: all slots are idle")
+	}
+	becomeReady := func() {
+		isReady.Store(true)
+		switch readyLines {
+		case "none":
+			say("srv  llama_server: model loaded", "srv  update_slots: all slots are idle")
+		case "early": // printed already, before /health answered
+		default:
+			sayReady()
+		}
 		// named moment: a crashloop server ends 150 ms after it turns ready
 		time.AfterFunc(150*time.Millisecond, func() { looped.Store(true); crashloop() })
+	}
+	if readyLines == "early" {
+		sayReady()
 	}
 	if delay > 0 {
 		time.AfterFunc(delay, becomeReady) // named moment: FAKELLAMA_HEALTH_DELAY, how long the load takes

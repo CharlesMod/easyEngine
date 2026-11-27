@@ -14,6 +14,7 @@ var book = []event.Decl{
 	{Name: "mind.shape", Kind: event.Fact, What: "the running shape (status shape); gone when no model server is up"},
 	{Name: "mind.device", Kind: event.Fact, What: "what the last model server start was given to hold it to its card (status device)"},
 	{Name: "mind.exit", Kind: event.Happening, What: "the model server ended on its own: {pid, why, quick, oom}"},
+	{Name: "mind.hang", Kind: event.Happening, What: "the model server said nothing for HangSilence with requests in flight and was asked /health once: {answered}"},
 	{Name: "mind.oom", Kind: event.Happening, What: "the model server said it ran out of memory and kept running: {line, held}"},
 	{Name: "agent", Kind: event.Fact, Keyed: true, What: "the agent of a client (key: the profile's name): status agent"},
 	{Name: "install.progress", Kind: event.Reading, What: "the download or install step in progress (status progress), said per step of bytes; gone when none"},

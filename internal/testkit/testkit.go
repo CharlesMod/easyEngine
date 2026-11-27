@@ -21,6 +21,7 @@ import (
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/event"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 	"github.com/CharlesMod/easyEngine/run"
@@ -120,8 +121,33 @@ func New(t *testing.T) *Env {
 	e.Llama["FAKELLAMA_VRAM_PER_TOKEN"] = "0.05"
 	e.Prof = run.Profile{Game: "TestGame", Slots: 3, MinSlots: 1, GameReserveMiB: 0}
 	e.Prof.CtxPerSlot.Max, e.Prof.CtxPerSlot.Floor = 65536, 8192
+	e.WatchFile(filepath.Join(e.Ctl, "starts.log")) // WaitFor looks again when the fake starts
 	return e
 }
+
+// WatchFile makes WaitFor look again each time path changes (host.Changes): a condition on a
+// file is woken by the file, never by unrelated chatter on a hub. Let go at the test's end.
+func (e *Env) WatchFile(path string) {
+	filesMu.Lock()
+	files = append(files, path)
+	filesMu.Unlock()
+	e.T.Cleanup(func() {
+		filesMu.Lock()
+		defer filesMu.Unlock()
+		for i, x := range files {
+			if x == path {
+				files = append(files[:i], files[i+1:]...)
+				break
+			}
+		}
+	})
+}
+
+// files are the files WaitFor looks again on (WatchFile).
+var (
+	filesMu sync.Mutex
+	files   []string
+)
 
 // InstallFake puts the fake backend (backends/fake) and model m1 in place and selects them.
 func (e *Env) InstallFake() {
@@ -168,8 +194,10 @@ func (e *Env) Config() run.Config {
 		Seed: func(m catalog.Model, path, kv string) (fit.Footprint, error) {
 			return fit.Footprint{FixedMiB: 5000, PerTokenMiB: 0.05, ScratchMiB: 500}, nil
 		},
-		// the honest timers, shrunk: the room's watchdog, the moments and the silences
-		RoomEvery: 40 * time.Millisecond, GrowIdle: 10 * time.Minute, HangSilence: time.Minute,
+		// the honest timers: the moments and the silences shrunk; the room's watchdog (the one
+		// level read on a period) far off, so no test has it for a clock: a test that needs the
+		// room read again says so (SetHost, React) or sets RoomEvery itself
+		RoomEvery: time.Hour, GrowIdle: 10 * time.Minute, HangSilence: time.Minute,
 		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond,
 		AgentStable: time.Hour,
 		CmdTimeout:  30 * time.Second,
@@ -233,14 +261,17 @@ func Field(line, key string) string {
 }
 
 // WaitFor waits until cond is true. It looks again each time a supervisor StartSup started says
-// anything on its hub, never on a clock; timeout bounds it so a broken engine fails the test
-// instead of hanging it.
+// anything on its hub, and each time a watched file changes (WatchFile: the fake's starts.log),
+// never on a clock; timeout bounds it so a broken engine fails the test instead of hanging it.
 func WaitFor(t testing.TB, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
 	hubsMu.Lock()
 	hs := append([]*event.Hub{}, hubs...)
 	hubsMu.Unlock()
-	if !waitOn(hs, timeout, cond) {
+	filesMu.Lock()
+	fs := append([]string{}, files...)
+	filesMu.Unlock()
+	if !waitOn(hs, timeout, cond, fs...) {
 		t.Fatalf("timed out after %s waiting for: %s", timeout, what)
 	}
 }
@@ -255,10 +286,30 @@ func WaitPhase(t testing.TB, s *run.Supervisor, phase string, timeout time.Durat
 
 // waitOn looks at cond once, then again each time one of hs says anything, until it is true. It
 // answers false when timeout passes first.
-func waitOn(hs []*event.Hub, timeout time.Duration, cond func() bool) bool {
+func waitOn(hs []*event.Hub, timeout time.Duration, cond func() bool, paths ...string) bool {
 	wake := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	defer close(stop)
+	for _, p := range paths {
+		ch, release, err := host.Changes(p)
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer release()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ch:
+					select {
+					case wake <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
 	for _, h := range hs {
 		w, err := h.Wake("")
 		if err != nil {

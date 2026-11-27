@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -54,6 +55,8 @@ func hook(p *atomic.Pointer[func()]) {
 type roomWatch struct {
 	s     *Supervisor
 	level *host.Level[roomRead]
+	// baseline: the level's first report since arm is still to come (it is not a change)
+	baseline atomic.Bool
 
 	mu        sync.Mutex
 	armed     bool
@@ -105,6 +108,9 @@ func (rw *roomWatch) read() (roomRead, bool) {
 
 // changed is a held change of the room: the reactor looks at it.
 func (rw *roomWatch) changed(roomRead) {
+	if rw.baseline.Swap(false) {
+		return // the first reading of an arming is where the room stands, not a move
+	}
 	rw.s.wakeMind(func(c *causes) { c.room = true })
 }
 
@@ -120,6 +126,7 @@ func (rw *roomWatch) arm() {
 		return
 	}
 	rw.armed = true
+	rw.baseline.Store(true)
 	rw.level.Arm()
 	rw.level.Now() // a second read at once, so the baseline holds without waiting a period
 	var paths []string
@@ -229,5 +236,24 @@ func (rw *roomWatch) stop() {
 			stop()
 		}
 		delete(rw.exits, p)
+	}
+}
+
+// ownReads wraps the reads that run nvidia-smi or open the card (Probe, Others, Sense) in
+// host.Own, wherever they are called from (a start, the room's read, a status ask): the engine's
+// own opens of the card are never heard as a stranger's by any Opens watch (calls nest).
+func ownReads(c *Config) {
+	p, o, sn := c.Probe, c.Others, c.Sense
+	c.Probe = func(ctx context.Context) (hw probe.Hardware, err error) {
+		host.Own(func() { hw, err = p(ctx) })
+		return
+	}
+	c.Others = func(ctx context.Context, g probe.GPU, ours []int) (n int, err error) {
+		host.Own(func() { n, err = o(ctx, g, ours) })
+		return
+	}
+	c.Sense = func(ctx context.Context, ours []int, hostPID int) (pic gpusense.Picture) {
+		host.Own(func() { pic = sn(ctx, ours, hostPID) })
+		return
 	}
 }

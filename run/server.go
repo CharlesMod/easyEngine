@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -185,6 +186,15 @@ func (s *Supervisor) fail(err error, retry, slow bool) error {
 	}
 	s.setPhaseLocked("error", msg)
 	s.mu.Unlock()
+	// A start that failed for want of room waits for the room to change: the room watch is armed
+	// while that wait stands (its answer can change what the engine does), and let go when the
+	// start succeeds (mindUp keeps it for the model), the engine is stopped, or a failure of
+	// another kind stands instead.
+	if retry && slow {
+		s.card.arm()
+	} else if s.srv == nil {
+		s.card.disarm()
+	}
 	if retry && now {
 		s.wakeMind(func(c *causes) { c.retry = true })
 	}
@@ -272,15 +282,42 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		return launchResult{err: err}
 	}
 	// Ready is heard in the server's own lines (docs/EVENTS.md section 3): after the line that
-	// says it listens, /health is asked once per following line until it answers. A load that
-	// says nothing for LoadTimeout fails.
+	// says it listens, /health is asked once per following line until it answers. The lines are
+	// the first word, not the only one: when the server has said nothing for ReadyQuiet after a
+	// line, /health is asked once, listening line or not (a build worded otherwise, or one whose
+	// last line came before /health turned 200); one ask per quiet stretch, armed again only by a
+	// new line, never a cadence. A load that says nothing for LoadTimeout is asked once more and
+	// then fails. A build that prints forever and never answers 200 is not bounded: each line is
+	// a sign of life.
 	oomw := &oomWatch{s: s}
 	lines := make(chan struct{}, 1)
+	ask := make(chan struct{}, 1)
 	var listening atomic.Bool
 	silent := make(chan struct{})
 	// watchdog for silence: a load with no line from the server for LoadTimeout has hung
 	quiet := host.NewSilence(s.cfg.LoadTimeout, func() { close(silent) })
 	defer quiet.Stop()
+	var rqMu sync.Mutex
+	var rq *host.Silence // the ReadyQuiet watchdog of the quiet stretch now; nil once it fired
+	armQuiet := func() {
+		// watchdog for silence: ReadyQuiet, a server quiet that long after a line is asked /health once
+		rq = host.NewSilence(s.cfg.ReadyQuiet, func() {
+			rqMu.Lock()
+			rq = nil
+			rqMu.Unlock()
+			select {
+			case ask <- struct{}{}:
+			default:
+			}
+		})
+	}
+	defer func() {
+		rqMu.Lock()
+		if rq != nil {
+			rq.Stop()
+		}
+		rqMu.Unlock()
+	}()
 	sink.OnLine(func(l string) {
 		quiet.Heard()
 		s.Heard()
@@ -288,6 +325,13 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		if !listening.Load() && saysListening(l) {
 			listening.Store(true)
 		}
+		rqMu.Lock()
+		if rq == nil {
+			armQuiet()
+		} else {
+			rq.Heard()
+		}
+		rqMu.Unlock()
 		select {
 		case lines <- struct{}{}:
 		default:
@@ -300,6 +344,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		return launchResult{err: err}
 	}
 	s.launching.set(proc.Pid)
+	rqMu.Lock()
+	if rq == nil { // a server that says nothing at all is asked once a quiet stretch too
+		armQuiet()
+	}
+	rqMu.Unlock()
 	go func() { // the log stays on disk while the server runs, and is closed once it exits
 		<-proc.Done() // Done is closed once every line has reached the sink (lifecycle.Proc)
 		sink.Close()
@@ -312,16 +361,24 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			proc.Stop(s.cfg.StopGrace)
 			return launchResult{err: ctx.Err()}
 		case <-silent:
-			proc.Stop(s.cfg.StopGrace)
-			return launchResult{err: fmt.Errorf("model load timed out: llama-server said nothing for %s", s.cfg.LoadTimeout)}
+			if !s.healthy(url) { // asked once before the load is called failed
+				proc.Stop(s.cfg.StopGrace)
+				return launchResult{err: fmt.Errorf("model load timed out: llama-server said nothing for %s", s.cfg.LoadTimeout)}
+			}
 		case <-proc.Done():
 			tail := proc.Tail()
 			oom, mb := ParseOOM(tail)
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
+		case <-ask:
+			if !s.healthy(url) {
+				continue
+			}
 		case <-lines:
 			if !listening.Load() || !s.healthy(url) {
 				continue
 			}
+		}
+		{
 			oomw.take() // what loading printed is not a run-time signal
 			srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(),
 				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw}

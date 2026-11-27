@@ -8,6 +8,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/event"
+	"github.com/CharlesMod/easyEngine/fetch"
 	"github.com/CharlesMod/easyEngine/host"
 )
 
@@ -90,15 +91,23 @@ func (s *Supervisor) Begin() func() {
 		d.growStop = nil
 	}
 	if d.hang == nil {
-		// watchdog for silence: a server that says nothing while requests are in flight may be hung
-		d.hang = host.NewSilence(s.cfg.HangSilence, func() { s.wakeMind(func(c *causes) { c.hang = true }) })
+		d.hang = s.newHang()
 	} else {
 		d.hang.Heard()
 	}
 	d.mu.Unlock()
 	s.say("request", "", map[string]any{"what": "begin", "inflight": n})
+	if s.listeners.Load() > 0 { // a request is a word for whatever waits for one (an agent, a download)
+		s.nudge("request")
+	}
 	var once sync.Once
 	return func() { once.Do(s.end) }
+}
+
+// newHang makes the watchdog on the requests in flight.
+func (s *Supervisor) newHang() *host.Silence {
+	// watchdog for silence: a server that says nothing while requests are in flight may be hung
+	return host.NewSilence(s.cfg.HangSilence, func() { s.wakeMind(func(c *causes) { c.hang = true }) })
 }
 
 // end is one request ending.
@@ -215,14 +224,68 @@ func (s *Supervisor) waitFact(ctx context.Context, ok func() bool, prefixes ...s
 	return true
 }
 
+// word is a listener for a word that could change an outcome. While any listens, a request at the
+// door is said as a nudge (Begin); with none listening a request says no nudge.
+type word struct {
+	s       *Supervisor
+	w       *event.Waker
+	mu      sync.Mutex
+	counted bool // among the listeners Begin counts (it waits, or is about to)
+	closed  bool
+}
+
+// C is signalled when a word has been said since the listener was made.
+func (w *word) C() <-chan struct{} { return w.w.C() }
+
+// count puts the listener among those a request is said to (it waits now, or is about to).
+func (w *word) count() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.counted && !w.closed {
+		w.counted = true
+		w.s.listeners.Add(1)
+	}
+}
+
+// Close lets the listener go.
+func (w *word) Close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
+	w.w.Close()
+	if w.counted {
+		w.s.listeners.Add(-1)
+	}
+}
+
 // listenWord starts listening for a word that could change an outcome: a nudge (a request at the
-// door, a client's word) or the network coming back. Listen before saying that you wait, so a
-// word said in between is not lost; then awaitWord.
-func (s *Supervisor) listenWord() (*event.Waker, error) { return s.hub.Wake("nudge", "network") }
+// door, a client's word) or the network coming back, and counts as waiting for one. Listen before
+// saying that you wait, so a word said in between is not lost; then awaitWord.
+func (s *Supervisor) listenWord() (*word, error) {
+	w, err := s.listenQuiet()
+	if err == nil {
+		w.count()
+	}
+	return w, err
+}
+
+// listenQuiet listens without counting as waiting: a download listens before each attempt, so a
+// word said while the attempt still runs is heard, but requests are said as nudges only once it
+// waits (wordAgain counts it then).
+func (s *Supervisor) listenQuiet() (*word, error) {
+	w, err := s.hub.Wake("nudge", "network")
+	if err != nil {
+		return nil, err
+	}
+	return &word{s: s, w: w}, nil
+}
 
 // awaitWord waits for the word w listens for, and lets w go. It answers ctx's error when ctx
 // ends first.
-func (s *Supervisor) awaitWord(ctx context.Context, w *event.Waker) error {
+func (s *Supervisor) awaitWord(ctx context.Context, w *word) error {
 	defer w.Close()
 	select {
 	case <-ctx.Done():
@@ -231,6 +294,50 @@ func (s *Supervisor) awaitWord(ctx context.Context, w *event.Waker) error {
 		return event.ErrClosed
 	case <-w.C():
 		return nil
+	}
+}
+
+// wordAgain is a download's Again that listens before each attempt: the listener for the wait
+// after an attempt is made before the attempt starts, so a network word said while the attempt
+// was still timing out is heard. close lets the last listener go when the download returns.
+type wordAgain struct {
+	s *Supervisor
+	w *word
+}
+
+func (s *Supervisor) newWordAgain() *wordAgain {
+	a := &wordAgain{s: s}
+	a.w, _ = s.listenQuiet()
+	return a
+}
+
+// again is the fetch.Again: waiting says so (onWait), a word ends the wait, and the next
+// attempt's listener is made before it starts (then onResume).
+func (a *wordAgain) again(onWait func(err error), onResume func()) fetch.Again {
+	return func(ctx context.Context, err error) error {
+		w := a.w
+		a.w = nil
+		if w == nil {
+			var lerr error
+			if w, lerr = a.s.listenQuiet(); lerr != nil {
+				return lerr
+			}
+		}
+		w.count() // it waits now: a request is a word for it
+		onWait(err)
+		if werr := a.s.awaitWord(ctx, w); werr != nil {
+			return werr
+		}
+		a.w, _ = a.s.listenQuiet()
+		onResume()
+		return nil
+	}
+}
+
+func (a *wordAgain) close() {
+	if a.w != nil {
+		a.w.Close()
+		a.w = nil
 	}
 }
 
@@ -288,6 +395,9 @@ func (s *Supervisor) mindDown(srv *server) {
 	if srv.drain != nil && srv.drain.cancel != nil {
 		srv.drain.cancel()
 	}
+	if srv.growWait != nil {
+		srv.growWait()
+	}
 	s.card.disarm()
 	s.door.mu.Lock()
 	s.door.growGen++
@@ -325,24 +435,36 @@ func (s *Supervisor) react() {
 	url := s.llamaURL
 	s.mu.Unlock()
 	if !local {
-		return
+		url = "" // requests go elsewhere: no server of ours to read or ask
 	}
 	if c.idle && n == 0 && url != "" {
 		s.readTokS(url)
 	}
 	restart := false
-	if c.hang && url != "" {
-		// the watchdog for silence fired: ask once (a network timeout on the one call)
-		if s.healthy(url) {
-			d.mu.Lock()
-			if d.inflight > 0 && d.hang == nil {
-				// watchdog for silence: put back, the server answered
-				d.hang = host.NewSilence(s.cfg.HangSilence, func() { s.wakeMind(func(c *causes) { c.hang = true }) })
-			}
-			d.mu.Unlock()
-		} else {
-			restart = true
+	if c.hang {
+		// the watchdog for silence fired: ask once (a network timeout on the one call); with no
+		// server there is nobody to ask, and nothing to restart
+		ok := url == "" || s.healthy(url)
+		if url != "" {
+			s.say("mind.hang", "", map[string]bool{"answered": ok})
 		}
+		// The watchdog that fired is dead (Heard does nothing after a fire): it is let go and,
+		// while requests are still in flight, a new one watches them. Whatever stands now (the
+		// fired one, or a live one a Begin made after the count reached zero) is replaced. After a
+		// failed ask the restart ends the requests in flight; the next Begin arms a new one.
+		d.mu.Lock()
+		if d.hang != nil {
+			d.hang.Stop()
+			d.hang = nil
+		}
+		if ok && d.inflight > 0 {
+			d.hang = s.newHang()
+		}
+		d.mu.Unlock()
+		restart = !ok
+	}
+	if !local {
+		return
 	}
 	var fresh *roomRead
 	if idleLong && n == 0 && url != "" { // before a grow, the room is read again
@@ -366,6 +488,9 @@ func (s *Supervisor) react() {
 			s.startLocked()
 		}
 		return
+	}
+	if c.oom { // kept on the server it was said of until it can be acted on (not mid-drain, mid-swap)
+		srv.oomPend, srv.oomLine = true, c.oomLine
 	}
 	// 1. the process died on its own
 	if srv.proc.Exited() {
@@ -413,14 +538,15 @@ func (s *Supervisor) react() {
 	room := rr.room
 	// 3a. the server keeps failing requests for want of memory: it is out of room whatever the
 	// reading says. One step down, recorded; at idle now, else once the replies in flight end.
-	if c.oom {
+	if srv.oomPend {
+		srv.oomPend = false
 		w := s.wantsFor(srv.key)
 		next, err := fit.StepDown(srv.fp, srv.shape, room, w)
 		if err != nil {
-			s.addError("llama-server is out of memory at the smallest shape (%s)", c.oomLine)
+			s.addError("llama-server is out of memory at the smallest shape (%s)", srv.oomLine)
 			return
 		}
-		s.addError("llama-server keeps running out of memory at %d x %d (%s): shrinking", srv.shape.Slots, srv.shape.CtxPerSlot, c.oomLine)
+		s.addError("llama-server keeps running out of memory at %d x %d (%s): shrinking", srv.shape.Slots, srv.shape.CtxPerSlot, srv.oomLine)
 		if lc, room2, _, err := s.loadContext(ctx); err == nil {
 			s.lowerCap(lc, srv.shape, next.Slots*next.CtxPerSlot, room2)
 		}
@@ -478,12 +604,22 @@ func (s *Supervisor) react() {
 		return
 	}
 	if !sameRoom(*fresh, rr) {
-		s.card.level.Now() // the room is moving: the level reports it once it holds
+		// the room is moving: the level reports it once it holds at a new level; if it settles
+		// back at the held one the level says nothing, so idle that long again and look again
+		s.card.level.Now()
+		d.mu.Lock()
+		if d.inflight == 0 {
+			s.armGrowLocked()
+		}
+		d.mu.Unlock()
 		return
 	}
 	if wait := srv.nextGrow.Sub(s.cfg.Now()); wait > 0 {
+		if srv.growWait != nil {
+			srv.growWait()
+		}
 		// named moment: GrowBackoff after a failed grow; look again when it has passed
-		host.Moment(wait, func() { s.wakeMind(func(c *causes) { c.grow = true }) })
+		srv.growWait = host.Moment(wait, func() { s.wakeMind(func(c *causes) { c.grow = true }) })
 		return
 	}
 	w := s.wantsFor(srv.key)

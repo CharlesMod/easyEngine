@@ -145,6 +145,9 @@ type Config struct {
 	GrowIdle    time.Duration // default 60s: named moment, idle this long before a grow
 	GrowBackoff time.Duration // default 10 min: named moment, after a failed grow
 	LoadTimeout time.Duration // default 15 min: watchdog for silence, a load with no line from the server
+	// ReadyQuiet is the watchdog for silence during a load (default 2 s): a server quiet this long
+	// after a line is asked /health once, listening line or not.
+	ReadyQuiet time.Duration
 	// HangSilence is the watchdog for silence on requests in flight (default 2 min): a server
 	// heard from in none of its lines, request ends or response bytes for this long is asked
 	// /health once, and restarted when it does not answer.
@@ -205,6 +208,7 @@ func (c *Config) defaults() {
 	dur(&c.GrowIdle, 60*time.Second)
 	dur(&c.GrowBackoff, 10*time.Minute)
 	dur(&c.LoadTimeout, 15*time.Minute)
+	dur(&c.ReadyQuiet, 2*time.Second)
 	dur(&c.HangSilence, 2*time.Minute)
 	dur(&c.RoomEvery, 5*time.Second)
 	dur(&c.StopGrace, 5*time.Second)

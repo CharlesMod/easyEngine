@@ -302,6 +302,9 @@ func (s *Supervisor) runRemoveDownloads() {
 			break
 		}
 		select {
+		case <-s.root.Done(): // the engine is shutting down (Shutdown waits for this goroutine)
+			w.Close()
+			return
 		case <-s.hub.Done():
 			w.Close()
 			return

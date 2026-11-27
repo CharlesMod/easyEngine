@@ -289,7 +289,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
-			a.S.Nudge("settings")
+			// SetSettings itself says the "settings" nudge, after it has set what the reactor reads
 			writeJSON(w, 200, a.S.Settings())
 		default:
 			fail(w, 405, "use GET or PUT")

@@ -40,23 +40,27 @@ func stepLabel(step string, p fetch.Progress) string {
 // downloadAgain is what a download of the install job does when an attempt moved no bytes: there
 // is no retry cadence, it waits for a word that could change the outcome (the network coming back,
 // a client's install or nudge). Cancel ends the wait through ctx.
-func (s *Supervisor) downloadAgain() fetch.Again {
-	return func(ctx context.Context, err error) error {
-		w, werr := s.listenWord() // before it says it waits, so a word after is heard
-		if werr != nil {
-			return werr
-		}
+//
+// The listener is made before each attempt (wordAgain), so a word said while the attempt was
+// still timing out is heard; the caller closes it when the download returns.
+func (s *Supervisor) downloadAgain() (fetch.Again, func()) {
+	a := s.newWordAgain()
+	var phase, msg string
+	return a.again(func(err error) {
 		s.mu.Lock()
-		phase, msg := s.phase, s.message
+		phase, msg = s.phase, s.message
 		s.mu.Unlock()
 		s.addError("download made no progress: %v (waiting for the network or a word from a client)", err)
 		s.setPhase(phase, "Download made no progress: waiting for the network or a word from a client")
-		if err := s.awaitWord(ctx, w); err != nil {
-			return err
-		}
-		s.setPhase(phase, msg)
-		return nil
-	}
+	}, func() { s.setPhase(phase, msg) }), a.close
+}
+
+// download is fetch.Download with the install job's Again (downloadAgain), its listener let go
+// when the download returns.
+func (s *Supervisor) download(ctx context.Context, url, dest, sha256hex string, size int64, onProgress func(fetch.Progress)) error {
+	again, done := s.downloadAgain()
+	defer done()
+	return fetch.Download(ctx, url, dest, sha256hex, size, onProgress, again)
 }
 
 // Install starts the install job: backend, then model, then uv and the agent.
@@ -189,7 +193,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			defer s.dropQueued()
 			if !s.modelInstalled(serve) {
 				s.setPhase("downloading", "Downloading "+serve.Name+" first")
-				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID), s.downloadAgain()); err != nil {
+				if err := s.download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID)); err != nil {
 					return err
 				}
 				s.mu.Lock()
@@ -201,7 +205,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 				return err
 			}
 			s.setPhase("downloading", "Downloading "+m.Name)
-			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID), s.downloadAgain()); err != nil {
+			if err := s.download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID)); err != nil {
 				return err
 			}
 		}
@@ -266,7 +270,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 	if _, err := os.Stat(marker); err != nil || findServer(dir) == "" {
 		os.RemoveAll(dir) // only a path we build under our own data dir
 		arch := filepath.Join(s.dir, "downloads", a.ID+archiveExt(a.URL))
-		if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID), s.downloadAgain()); err != nil {
+		if err := s.download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID)); err != nil {
 			return err
 		}
 		s.setPhase("installing", "Unpacking "+a.ID)
@@ -280,7 +284,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 				return fmt.Errorf("catalog has no asset %q", x)
 			}
 			earch := filepath.Join(s.dir, "downloads", ea.ID+archiveExt(ea.URL))
-			if err := fetch.Download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID), s.downloadAgain()); err != nil {
+			if err := s.download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID)); err != nil {
 				return err
 			}
 			tmp := filepath.Join(s.dir, "downloads", ea.ID+"-unpacked")
@@ -432,7 +436,7 @@ func (s *Supervisor) ensureUV(ctx context.Context, cat *catalog.Catalog) (string
 		return "", errors.New("no uv build in the catalog for this machine")
 	}
 	arch := filepath.Join(s.dir, "downloads", "uv"+archiveExt(a.URL))
-	if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv"), s.downloadAgain()); err != nil {
+	if err := s.download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv")); err != nil {
 		return "", err
 	}
 	s.setPhase("installing", "Installing uv")

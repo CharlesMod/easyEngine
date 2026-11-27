@@ -255,28 +255,24 @@ func (s *Supervisor) beginUpgrade(target catalog.Model) {
 // with no room, waits for a word that could change the outcome (the network coming back, a
 // client's install or nudge, the engine's next start).
 func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
-	again := func(ctx context.Context, err error) error {
-		w, werr := s.listenWord()
-		if werr != nil {
-			return werr
-		}
-		s.addError("download of %s made no progress: %v (waiting for the network or a word from a client)", target.Name, err)
-		s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
-		if err := s.awaitWord(ctx, w); err != nil {
-			return err
-		}
-		s.setUpgrade(func(u *upgrade) { u.state, u.err, u.attempt = upDownloading, "", u.attempt+1 })
-		return nil
-	}
 	for attempt := 1; ; attempt++ {
 		if s.modelInstalled(target) {
 			break
 		}
 		s.setUpgrade(func(u *upgrade) { u.attempt = attempt })
-		w, err := s.listenWord() // before a failure is said, so a word after it is heard
+		// listened before the attempt, so a word said while it still runs is heard; counted as
+		// waiting (a request is a word for it) only once it waits
+		w, err := s.listenQuiet()
 		if err != nil {
 			return
 		}
+		wa := s.newWordAgain()
+		again := wa.again(func(err error) {
+			s.addError("download of %s made no progress: %v (waiting for the network or a word from a client)", target.Name, err)
+			s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
+		}, func() {
+			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.attempt = upDownloading, "", u.attempt+1 })
+		})
 		if err = s.checkDisk(target); err != nil {
 			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.progress = upNoSpace, err.Error(), nil })
 			s.addError("%v; staying on the smaller model", err)
@@ -287,6 +283,7 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 					u.progress = &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds()), Step: stepLabel("model "+target.ID, p)}
 				})
 			}, again)
+			wa.close()
 			if err == nil {
 				w.Close()
 				break
@@ -300,6 +297,8 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 			s.addError("download of %s failed: %v (waiting for a word from a client)", target.Name, err)
 			s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
 		}
+		wa.close()
+		w.count()
 		if s.awaitWord(ctx, w) != nil {
 			s.setUpgrade(func(u *upgrade) { u.state, u.progress = upCancelled, nil })
 			return

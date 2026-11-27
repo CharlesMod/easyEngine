@@ -151,6 +151,12 @@ type server struct {
 	oom       *oomWatch   // out-of-memory lines in its output, counted by request (run/recover.go)
 	drain     *drain      // a shrink waiting for the replies in flight
 	planned   atomic.Bool // stopped on purpose: its end is not a crash
+	// oomPend: out-of-memory lines in two requests were said of this server and not yet acted on
+	// (they came mid-drain or mid-swap); oomLine is the last. Guarded by opMu.
+	oomPend bool
+	oomLine string
+	// growWait cancels the named moment GrowBackoff's look-again (one at a time; mindDown cancels).
+	growWait func() bool
 	// stableCancel cancels the named moment CrashQuick after the start that clears the crash
 	// record (run/recover.go).
 	stableCancel func() bool
@@ -193,9 +199,11 @@ type Supervisor struct {
 	// reserve as sensed when needed (run/room.go).
 	hub  *event.Hub
 	poke chan struct{}
-	door door
-	card *roomWatch
-	sf   settingsFile // settings.json as the engine follows it (run/settings.go)
+	// listeners counts the listeners for a word (listenWord): a request is said as a nudge only while one listens
+	listeners atomic.Int32
+	door      door
+	card      *roomWatch
+	sf        settingsFile // settings.json as the engine follows it (run/settings.go)
 	// deferred: started asleep (Config.StartSleeping); the agent and an unfinished upgrade wait
 	// for the first Start.
 	deferred atomic.Bool
@@ -222,6 +230,7 @@ type Supervisor struct {
 // New builds a supervisor. Call Run to start the watchdog.
 func New(cfg Config) (*Supervisor, error) {
 	cfg.defaults()
+	ownReads(&cfg)
 	if cfg.DataDir == "" {
 		return nil, errors.New("no data dir")
 	}
@@ -282,6 +291,12 @@ func (s *Supervisor) setPhaseLocked(phase, msg string) {
 	s.phase, s.message = phase, msg
 	s.say("phase", "", map[string]string{"phase": phase, "message": msg})
 	s.refreshLocked()
+	if phase == "ready" { // the reactor looks once: what waited for ready (an out-of-memory) is acted on
+		select {
+		case s.poke <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // refreshLocked says the facts that status computes from several fields: the shape, the device,
@@ -828,6 +843,7 @@ func (s *Supervisor) stopServerLocked() {
 	s.ours.set(0)
 	s.launching.set(0)
 	if srv == nil {
+		s.card.disarm() // a start that waited for the room to change waits no more
 		return
 	}
 	s.mindDown(srv)
@@ -928,6 +944,7 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.reshape = true
 		s.mu.Unlock()
 	}
+	s.nudge("settings") // after reshape is set: the reactor sees it when it wakes
 	return nil
 }
 

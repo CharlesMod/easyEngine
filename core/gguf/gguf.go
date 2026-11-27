@@ -138,8 +138,9 @@ const (
 //     and at most MaxInt64; the element count and the byte size (elements / block elements * bytes
 //     per block, rounded up) must not pass MaxInt64, and nor may the sums of tensor bytes (dense,
 //     expert) or, for ParamCount, of element counts; a tensor offset must not pass MaxInt64;
-//   - <arch>.block_count, where present: 0 to 65536 layers, 0 read as not said (no real model has more than a few
-//     hundred); where absent the count is taken from the tensor names under the same bound;
+//   - <arch>.block_count, where present: 0 to 65536 layers (no real model has more than a few
+//     hundred); where absent, or 0 (read as not said, as before), the count is taken from the
+//     tensor names under the same bound;
 //   - the block index in a tensor name (blk.N.): at most 65535; the digits are read with the
 //     overflow checked, never wrapped. An index at or past a stated block_count is kept (a file may
 //     carry extra blocks, as nextn/MTP layers): nothing is sized from it then;

@@ -268,8 +268,30 @@ loop lives in `run`.
   predicted); `Seed`, `SeedFromBytes` and `plan.FromMeasured` say predicted. Every shape the
   planner makes is predicted; `Book.Mark(key, shape)` makes it measured, with `vram_mib` the
   reading, only where the book holds a reading of that very shape (`Calib.Readings`, one per
-  shape that came up, kept whether or not the reading was taken). `RAMMiB` is always predicted.
-  A reading passed over never marks the footprint or any other shape. The engine's `/status`
+  shape that came up, kept whether or not the reading was taken). A card shape's `RAMMiB` (its
+  expert layers in RAM) is always predicted; a CPU-only shape's is measured where the book holds
+  its host reading (`Calib.HostReadings`).
+  A reading passed over never marks the footprint or any other shape.
+- **The machine's memory of a start (since core v0.1.4).** Every shape says the host memory its
+  start holds in all, as the process's resident memory: `Shape.HostMiB` (`host_mib`) with
+  `Shape.HostBasis` (`host_basis`). For a card shape it is predicted as the footprint's
+  `HostBaseMiB` (`host_base_mib`: the runtime, the input embedding and the host compute buffers,
+  from the set's constant `host_base_mib`, 1,536 MiB in `DefaultConsts`: a card start's resident
+  memory less its host-resident weights was read as 974 to 1,520 MiB over the four Gemma E-series
+  sweeps, every row) plus the weights the header keeps in RAM (`HostMiB`, Gemma E-series
+  `per_layer_token_embd`) plus the expert layers moved (`RAMMiB`); it does not grow with ctx. For a
+  CPU-only shape it is `RAMMiB`. Where the footprint cannot tell it (`HostBaseMiB` 0: a footprint
+  built by hand, from measured numbers or by an older build, `SeedFromBytes`, which reads no
+  header, or a set lacking the constant) the shape says `host_basis` `unknown` and `host_mib` 0,
+  never a figure; `Footprint.HostNeed(shape)` answers the same figure, or `ErrNoHostFigure`.
+  `Book.CalibrateCard(key, seed, shape, vramMiB, hostMiB, now)` is `Calibrate` with the process's
+  resident memory read beside the card memory: the card memory is held to the seed exactly as
+  before and the host memory is kept in the same reading (`Reading.HostMiB`, `host_mib`), and
+  `Book.Mark` then gives that shape's `HostMiB` as measured (a CPU-only shape's host reading marks
+  it too). A card reading without it leaves the prediction. `host_base_mib` has no part in the
+  card's fixed part, so the book neither keeps it beside the fixed part nor keys on it: a book an
+  older build wrote still overlays its fixed part, and an older build reads a newer book's set as
+  the set it knows. The engine's `/status`
   `shape.vram_basis` says whether `vram_mib` was read from the running server.
 - **A calibration says what it did.** `Book.Calibrate` answers a `fit.Calibration`: its
   `Verdict` (`taken`; `outside_gate`, more than ±15 % off the seed's `fixed`; `no_seed`;
@@ -309,6 +331,9 @@ loop lives in `run`.
   reads a newer book with all four fields it knew (Go's decoder skips the rest) and drops the new
   ones when it writes; a newer build reads an older book as a book with no lifts and no
   readings: its caps stand as before until the first `LetGo` records what lifts them. `TestBookJSONBothWays` holds both.
+  The fields of core v0.1.4 (`Shape.host_mib`, `host_basis`, `Room.card_host_free`,
+  `Reading.host_mib`, `Footprint.host_base_mib`) are left out when zero, an older build skips
+  them, and a newer build reads their absence as the behaviour of before (`TestHostMemJSONBothWays`).
 - **Room:** `budget = VRAM total - others - game_reserve - margin`, with `others` and
   `game_reserve` (the host's share) measured from the sensed adapters (§4a): the game's own use
   once it is measured, its estimate (the profile's `game_reserve_mib`; HermesVoice sends 1500)
@@ -329,6 +354,7 @@ behaviour exactly, so `plan`, `run` and the game profile set none of them.
 | `Room.Margin` (`margin`) | The VRAM left free; negative is none. | 0 is `DefaultMargin(VRAMTotal)` (the engine's callers fill that value already). |
 | `Room.LargestBlock` (`largest_block`) | The largest single allocation the card can still give. A shape's largest allocation (`Footprint.Largest`) must fit inside it: the greatest of the weights left on the card (`Footprint.WeightsMiB` less the moved expert layers), the cache (full-attention, sliding-window and recurrent state counted as one) and the compute buffers (the fixed load beyond the weights plus the scratch that grows with ctx), each taken as one allocation. A footprint with no `WeightsMiB` (measured numbers) gets `ErrNoWeights` where the block is positive. Negative: the card was read and has no free block left, so no shape on it is held and the answer is `ErrTooBig`, weights known or not. Not read for a CPU-only room. | Not bounded. |
 | `Room.NoGPU` with `RAMAvail` | A pool that is one node of a processor's memory: no card, whatever the VRAM fields say; CPU-only shapes sized against `RAMAvail`, that node's free memory, less the reserve, and nothing else. | (as before) |
+| `Room.CardHostFree` (`card_host_free`, since core v0.1.4) | The machine's free memory a start on the card is held to: the start's host memory (`Shape.HostMiB`, which does not grow with ctx) must fit in it less the reserve (`Reserve`). Where no card start of the model fits (the least, with no expert layer moved), `Choose`, `MissRetry`, `StepDown` and `Grow` answer `*fit.HostShortError` with `NeedMiB` (that least start's host memory), `FreeMiB` (the free figure less the reserve) and `Basis` (predicted); it is `ErrTooBig` to `errors.Is`, so a caller that only tells too big from the rest reads it as before, and `errors.As` gives the figures. Expert layers move to RAM only as far as it holds them, in `Choose` and in the walk down. Negative: read, and none free. A footprint that cannot tell the host memory of a card start (`HostBaseMiB` 0) is `ErrNoHostFigure`, never planned as zero. Not read for a CPU-only room (`RAMAvail` is the pool there). | Not read: a card start is held to nothing but `RAMAvail` for its expert layers, as before. |
 | `Room.Unread` (`unread`) | The json names of fields the caller could not read. None is taken as zero: every entry that reads a room (`Choose`, `MissRetry`, `StepDown`, `Grow`, `Book.LowerCap`, `Book.LetGo`, `Room.Budget`) answers `*UnreadError` naming the first; no cap is let go or lowered and no room is recorded. | Every field was read. |
 
 ### Decode speed floor, and CPU-only
@@ -868,7 +894,9 @@ taking the engine's downloads, processes or server:
   with the trained context, and the chat template).
 - **Constants by engine build and kind of card.** The constants a footprint is built from that were
   measured, not derived (the base overhead, the vocabulary's buffers, the runtime, the mask, the
-  f16 expansion, the offload buffers, the host RAM per expert layer), are one set, `fit.Consts`,
+  f16 expansion, the offload buffers, the host RAM per expert layer, and since core v0.1.4 the host
+  base of a card start, `host_base_mib`, which a set may lack: the host memory of a card start is
+  then unknown, §5), are one set, `fit.Consts`,
   keyed by the backend (the engine build) and the kind of card it was read on, each constant with
   a word of where its reading came from. `DefaultConsts` is the set read on the RTX 5080 at b12680
   (docs/FOOTPRINTS.md) and is used wherever a caller gives none, so `Seed` and `SeedFromBytes` are
@@ -895,13 +923,22 @@ taking the engine's downloads, processes or server:
   (`*VersionError`), a string, array or count past the size given or past `MaxString` (256 MiB)
   (`ErrPastSize`), or a type the format does not have (`ErrMalformed`) is refused; a template is
   read whole or not at all, and a long string is read as it arrives, so a header never makes the
-  reader allocate what it only claims.
+  reader allocate what it only claims. Since core v0.1.4 a header whose counts could size an
+  allocation or wrap a sum is refused too (`ErrMalformed`), never a panic, an out-of-memory or a
+  negative size: `<arch>.block_count` above 65,536 or below 0 (0 is read as not said, and the
+  tensor names tell, as before); a block index in a tensor name (`blk.N.`) of 65,536 or more, its
+  digits read with the overflow checked (an index at or past a stated `block_count` is kept: a file
+  may carry extra blocks, as nextn/MTP layers, and nothing is sized from it); a tensor dimension of
+  0 or past the int64 range, or an element count, byte size, offset, or sum of tensor bytes past
+  it (`File.ParamCount` answers 0, not known, there).
 - **What another program may ask beyond a game.** Whole (no layer or expert off the card), the
   cache's types best first, the model's own trained context as the most, and the room as given
-  (the host's reserve, the margin, the largest free block, a processor node as the pool, and a
-  field marked unread): §5, "Wants and room another program may state". Unset, each is the
-  engine's own behaviour; each refusal is a typed error (`ErrTooBig`, `ErrNoCtxTrain`, `ErrCtxTrainUnder`,
-  `ErrNoKVType`, `ErrNoWeights`, `*UnreadError`, `*KVTypeError`).
+  (the host's reserve, the margin, the largest free block, a processor node as the pool, the
+  machine's free memory a card start is held to, and a field marked unread): §5, "Wants and room
+  another program may state". Unset, each is the engine's own behaviour; each refusal is a typed
+  error (`ErrTooBig`, `ErrNoCtxTrain`, `ErrCtxTrainUnder`, `ErrNoKVType`, `ErrNoWeights`,
+  `ErrNoHostFigure`, `*HostShortError`, which is `ErrTooBig` to `errors.Is`, `*UnreadError`,
+  `*KVTypeError`).
 - **One checked place.** Every exported entry of `core/fit` that prices memory or reads a room
   hands its footprint, shape, room and wants to one unexported function, `settle`, before it
   prices anything, and takes every number from what it answers: the footprint priced at the
@@ -909,11 +946,13 @@ taking the engine's downloads, processes or server:
   `Args` renders and the engine runs; with no shape, the wants' type; a footprint naming no type
   is taken as given), the room's budgets, the wants resolved and never rewritten from a shape.
   It refuses, in this order: a room field marked unread (`*UnreadError`), a largest block the
-  footprint cannot be held to (`ErrNoWeights`, where wants are planned), wants it cannot resolve
+  footprint cannot be held to (`ErrNoWeights`, where wants are planned), a free host memory it
+  cannot be held to (`ErrNoHostFigure`, where wants are planned on a card), wants it cannot resolve
   (`ErrNoCtxTrain`, `ErrCtxTrainUnder`, `*KVTypeError`), a shape's unknown type
   (`*KVTypeError`), a type the footprint cannot be priced at (`ErrNoKVType`). A `Footprint` and a
   `Room` themselves answer no price and no budget; the entries that do are `Choose`, `MissRetry`,
-  `StepDown`, `Grow` (each refuses all five), `Book.Calibrate` and `Footprint.Need` and
+  `StepDown`, `Grow` (each refuses all five), `Book.Calibrate`, `Book.CalibrateCard`,
+  `Footprint.Need`, `Footprint.HostNeed` and
   `Footprint.Largest` (a shape's type, the footprint's), `Book.LowerCap` (the room and the
   shape's type), `Book.LetGo` and `Room.Budget` (the room). `TestEntriesTableIsComplete` reads the
   package's source and fails on an exported function or method with no row in the table that

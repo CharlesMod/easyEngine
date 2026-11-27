@@ -181,8 +181,9 @@ func (o *linuxOS) Adapter(pci string) {
 //
 // An NVIDIA adapter is listened to at /dev/nvidia<minor> alone, not at its DRM nodes: a program
 // that takes memory on the card has the NVIDIA driver's client open the device node (every
-// holder of a dri node of an nvidia-driven adapter also holds /dev/nvidia<minor>), so the dri
-// nodes only add words (a compositor opens them all the time) and no knowledge. Where the minor
+// holder of a dri node of an nvidia-driven adapter seen on a desktop also held
+// /dev/nvidia<minor>, and a model server holds that node with no dri node at all), so the dri
+// nodes add no knowledge. Where the minor
 // cannot be read, every /dev/nvidia<n> node is taken, still no dri node. A card of another
 // driver (amdgpu, i915, xe, ...) has its own dri nodes only.
 func (o *linuxOS) adapterNodes(pci string) map[string]bool {

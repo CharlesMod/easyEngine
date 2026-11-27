@@ -17,6 +17,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/api"
 	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/run"
 )
@@ -73,7 +74,7 @@ func statusOK(port int) bool {
 func PostAttach(port, pid int) error {
 	b, _ := json.Marshal(map[string]int{"pid": pid})
 	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/attach", port), bytes.NewReader(b))
-	req.Header.Set("X-Easy-Engine", "1")
+	legacy.MarkRequest(req.Header, "X-Easy-Engine")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := statusClient.Do(req)
 	if err != nil {
@@ -88,13 +89,7 @@ func PostAttach(port, pid int) error {
 }
 
 func alive(d lifecycle.LockData) bool {
-	if !lifecycle.PidAlive(d.Pid) {
-		return false
-	}
-	if st, err := lifecycle.PidStart(d.Pid); err == nil && d.Start != "" && st != d.Start {
-		return false
-	}
-	return true
+	return d.Alive()
 }
 
 // Running reports the port of a healthy engine in dir, if any.

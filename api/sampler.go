@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/run"
 )
 
@@ -70,11 +71,12 @@ func RewriteSampler(body []byte, mode string, prof catalog.SamplerProfile) ([]by
 // applySampler runs the policy over r (a completion request) and sets the Applied header on w.
 // It must run before the request is forwarded.
 func (a *API) applySampler(w http.ResponseWriter, r *http.Request) {
-	asked := strings.TrimSpace(r.Header.Get(SamplerHeader))
+	asked := strings.TrimSpace(legacy.HeaderOr(r.Header, SamplerHeader, legacy.SamplerHeader))
 	name := strings.ToLower(asked)
-	r.Header.Del(SamplerHeader) // the upstream (possibly the player's own server) does not need it
+	r.Header.Del(SamplerHeader)
+	legacy.StripRequest(r.Header) // the upstream (possibly the player's own server) does not need it
 	info := a.S.Sampler()
-	set := func(v string) { w.Header().Set(AppliedHeader, v) }
+	set := func(v string) { legacy.SetApplied(w.Header(), AppliedHeader, v) }
 	if r.Method != http.MethodPost || !completionPath(r.URL.Path) {
 		set("none;not-a-completion")
 		return

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/web"
 )
@@ -90,7 +91,7 @@ func (a *API) csrfOK(r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return true
 	}
-	if r.Header.Get("X-Easy-Engine") != "1" {
+	if !legacy.CSRFOK(r.Header, "X-Easy-Engine") {
 		return false
 	}
 	if o := r.Header.Get("Origin"); o != "" {

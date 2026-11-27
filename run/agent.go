@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 )
 
@@ -165,11 +166,14 @@ func (s *Supervisor) agentReady() bool {
 	return err == nil
 }
 
-func (s *Supervisor) agentURLEnv() string {
-	if ag := s.cfg.Profile.Agent; ag != nil && ag.LLMURLEnv != "" {
-		return ag.LLMURLEnv
+// agentURLEnv names the variables that carry the LLM URL to the agent: the profile's
+// llm_url_env, else EASY_ENGINE_LLM_URL and its old twin (internal/legacy).
+func (s *Supervisor) agentURLEnv() []string {
+	configured := ""
+	if ag := s.cfg.Profile.Agent; ag != nil {
+		configured = ag.LLMURLEnv
 	}
-	return "EASY_ENGINE_LLM_URL"
+	return legacy.LLMURLNames(configured, "EASY_ENGINE_LLM_URL")
 }
 
 func (s *Supervisor) agentEnv() []string {
@@ -182,17 +186,21 @@ func (s *Supervisor) agentEnv() []string {
 	port, mode, ext := s.port, s.st.Mode, s.st.External
 	s.mu.Unlock()
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	urlEnv := s.agentURLEnv()
-	prefix := strings.TrimSuffix(urlEnv, "_URL")
 	url := base
 	if mode == "external" {
 		url = base + "/v1"
-		env = append(env, prefix+"_MODE=openai")
-		if ext.Model != "" {
-			env = append(env, prefix+"_MODEL="+ext.Model)
-		}
 	}
-	env = append(env, urlEnv+"="+url, "EASY_ENGINE_URL="+base)
+	for _, urlEnv := range s.agentURLEnv() {
+		if mode == "external" {
+			prefix := legacy.LLMPrefix(urlEnv)
+			env = append(env, prefix+"_MODE=openai")
+			if ext.Model != "" {
+				env = append(env, prefix+"_MODEL="+ext.Model)
+			}
+		}
+		env = append(env, urlEnv+"="+url)
+	}
+	env = append(env, legacy.EngineURLVars("EASY_ENGINE_URL", base)...)
 	if agentNoVenv {
 		env = append(env, "PYTHONPATH="+filepath.Join(venvDir(s.dir, ag), "site"), "PYTHONNOUSERSITE=1")
 	}

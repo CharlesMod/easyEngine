@@ -2,7 +2,7 @@
 // (llama.cpp, uv) and the Hugging Face API (stock models). Hashes are never typed by hand:
 // they come from the API's asset digest, the LFS object id, or a download-and-hash.
 //
-//	go run ./tools/gencatalog -out catalog/catalog.json -version 8 -llama-tag b12651 -uv-tag 0.13.10
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -llama-tag b12651 -uv-tag 0.13.10
 //
 // Flags: -llama-tag and -uv-tag pin the llama.cpp build and the uv release (default: newest);
 // -cache DIR (default $HOME/.cache/gencatalog) keeps every downloaded archive as <sha256>.<ext>

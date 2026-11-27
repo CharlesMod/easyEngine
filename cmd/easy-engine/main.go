@@ -20,6 +20,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/dirs"
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
@@ -126,6 +127,9 @@ func cmdServe(args []string, setup bool) int {
 	if !setup && len(parents) == 0 {
 		fmt.Fprintln(os.Stderr, "serve needs --parent-pid (use `setup` for a run without a game)")
 		return 2
+	}
+	if note := dirs.Migrate(); note != "" { // once, before anything reads the data dir
+		fmt.Fprintln(os.Stderr, "easy-engine:", note)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -276,7 +280,7 @@ func installVia(port int, model, backend string) int {
 	base := fmt.Sprintf("http://127.0.0.1:%d/engine/v1/", port)
 	body, _ := json.Marshal(map[string]string{"model": model, "backend": backend})
 	req, _ := http.NewRequest("POST", base+"install", bytes.NewReader(body))
-	req.Header.Set("X-Easy-Engine", "1")
+	legacy.MarkRequest(req.Header, "X-Easy-Engine")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
@@ -414,7 +418,7 @@ func cmdStop() int {
 		return 0
 	}
 	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/engine/v1/shutdown", port), nil)
-	req.Header.Set("X-Easy-Engine", "1")
+	legacy.MarkRequest(req.Header, "X-Easy-Engine")
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -448,7 +452,7 @@ func cmdGPU(args []string) int {
 		if *hostPID > 0 {
 			body := strings.NewReader(fmt.Sprintf(`{"pid": %d}`, *hostPID))
 			req, _ := http.NewRequest("POST", base+"host", body)
-			req.Header.Set("X-Easy-Engine", "1")
+			legacy.MarkRequest(req.Header, "X-Easy-Engine")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)

@@ -5,11 +5,30 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/CharlesMod/easyEngine/internal/legacy"
 )
 
-// Data returns the engine data dir: EASY_ENGINE_HOME when set, else the per-OS default.
+// HomeEnv names the variable that overrides the data dir.
+const HomeEnv = "EASY_ENGINE_HOME"
+
+// Data returns the engine data dir: EASY_ENGINE_HOME when set (the old variable's value when
+// only that is), else the per-OS default; of the defaults the new one if it exists, else the
+// old one (internal/legacy) if it exists, else the new one. It has no side effects: the move
+// of an old dir to the new one is Migrate, called once when the engine starts.
 func Data() string {
-	return dataFor(runtime.GOOS, os.Getenv, homeDir())
+	return dataFor(runtime.GOOS, os.Getenv, homeDir(), legacy.OSFS{}.Exists)
+}
+
+// Migrate moves a data dir left under the old default name to the new default, when that is
+// safe (internal/legacy decides and explains). It is called once, from the serve and setup start
+// path, and returns a note for the log ("" when there is nothing to say).
+func Migrate() string {
+	getenv, home := os.Getenv, homeDir()
+	nd := newDefault(runtime.GOOS, getenv, home)
+	od := legacy.OldDefaultDir(runtime.GOOS, getenv, home)
+	_, note := legacy.Migrate(runtime.GOOS, getenv, HomeEnv, nd, od, legacy.OSFS{})
+	return note
 }
 
 func homeDir() string {
@@ -20,10 +39,7 @@ func homeDir() string {
 	return h
 }
 
-func dataFor(goos string, getenv func(string) string, home string) string {
-	if v := getenv("EASY_ENGINE_HOME"); v != "" {
-		return v
-	}
+func newDefault(goos string, getenv func(string) string, home string) string {
 	switch goos {
 	case "windows":
 		base := getenv("LOCALAPPDATA")
@@ -40,6 +56,20 @@ func dataFor(goos string, getenv func(string) string, home string) string {
 		}
 		return filepath.Join(base, "easy-engine")
 	}
+}
+
+func dataFor(goos string, getenv func(string) string, home string, exists func(string) bool) string {
+	if v := legacy.HomeOverride(getenv, HomeEnv); v != "" {
+		return v
+	}
+	nd := newDefault(goos, getenv, home)
+	if exists(nd) {
+		return nd
+	}
+	if od := legacy.OldDefaultDir(goos, getenv, home); exists(od) {
+		return od
+	}
+	return nd
 }
 
 func Backends() string  { return filepath.Join(Data(), "backends") }

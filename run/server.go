@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"

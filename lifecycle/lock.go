@@ -17,6 +17,18 @@ type LockData struct {
 	Children []ChildRef `json:"children,omitempty"`
 }
 
+// Alive reports whether the engine the lock names is still running: its pid exists and still
+// carries the recorded start time (a reused pid does not count).
+func (d LockData) Alive() bool {
+	if !PidAlive(d.Pid) {
+		return false
+	}
+	if st, err := PidStart(d.Pid); err == nil && d.Start != "" && st != d.Start {
+		return false
+	}
+	return true
+}
+
 // Lock is the single-instance lock file.
 type Lock struct {
 	mu   sync.Mutex

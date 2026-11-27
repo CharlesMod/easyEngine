@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/core/gguf"
-	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
 )

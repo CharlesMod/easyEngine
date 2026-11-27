@@ -110,6 +110,9 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 
 // startLocked chooses a shape and loads it. opMu must be held.
 func (s *Supervisor) startLocked() error {
+	if s.yielded() != nil { // the card is yielded: the yield loop loads again when it is free
+		return nil
+	}
 	if _, ok := s.resolveInstall(); !ok {
 		if s.customMissingPhase() {
 			return nil
@@ -263,6 +266,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		sink.Close()
 		return launchResult{err: err}
 	}
+	s.launching.set(proc.Pid)
 	go func() { // the log stays on disk while the server runs, and is closed once it exits
 		<-proc.Done()
 		time.Sleep(50 * time.Millisecond)

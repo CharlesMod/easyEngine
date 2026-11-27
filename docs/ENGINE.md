@@ -445,6 +445,66 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   call it in the main menu. Not used by default.
 - Stop order: agent first (SIGTERM, 5 s, then kill), then llama-server.
 
+### 6b. Yield the card to other programs (`serve --yield-to-games`)
+
+Off by default. With it, the engine unloads llama-server when another program wants the card
+and loads again once it is free. The engine process, its port and its API stay up.
+
+**Signals, earliest first** (code: `yield/`, `run/yield.go`):
+
+1. **A launcher starts a game.** Linux: a process whose argv is Steam's
+   `reaper SteamLaunch AppId=<n> -- …` (it lives exactly as long as the game), a Lutris
+   `lutris-wrapper: <title>`, or `umu-run` (Heroic and Lutris run Proton games through it;
+   best effort). New pids are looked at every 250 ms, and only new or young pids have their
+   cmdline read. Windows: `HKCU\Software\Valve\Steam\RunningAppID` (0 = none). macOS:
+   `RunningAppID` in `~/Library/Application Support/Steam/registry.vdf`. A launch usually comes
+   before the game opens the GPU at all. gamescope is not a signal: in Steam's game mode it is
+   the compositor and always runs (games inside it still show as `reaper`).
+2. **A process opens the engine's GPU** (Linux only). A program must open `/dev/nvidia<minor>`
+   or a DRM card/render node before it can allocate. inotify `IN_OPEN` on those nodes wakes the
+   watch at once; it then reads `/proc/<pid>/fd` of every process (about 25 ms) and looks again
+   200 ms later. A process that still holds one of the engine adapter's nodes (mapped from
+   `/proc/driver/nvidia/gpus/<pci>/information` and `/sys/class/drm/<node>/device`) and is not
+   in the baseline is a newcomer. `nvidiactl` alone does not count (NVML monitors open it),
+   and neither does a short-lived probe such as `nvidia-smi` that is gone by the second look.
+3. **Memory on the engine's adapter.** Every second (Linux `nvidia-smi -q -d PIDS`, about
+   0.02 s of CPU against 0.11 s for `-q -x`; AMD/Intel fdinfo; Windows the GPU Process Memory
+   counters): a process not in the baseline holding any memory there (`--yield-min-mib`,
+   default 0), or a baseline process grown by more than `--yield-floor-mib` (default 128),
+   each seen in two reads in a row. On an idle desktop (an RTX 5080, 600 one-second reads),
+   baseline processes moved by 0 to 2 MiB.
+
+Memory can be seen only after the allocation has been served, so this signal always lets the
+newcomer's first allocations come out of free memory. Signals 1 and 2 come before any
+allocation. Nothing here can hold the allocation itself. That would take a Vulkan layer or an
+eBPF probe on the driver's allocation ioctl, and neither is built.
+
+**Baseline.** This is what holds the card when the watch starts, when nothing of the engine's
+is loaded, and again after each resume. A process whose pid changes under the same name, at no
+more memory than before, keeps its place in the baseline. Never counted: the engine and its
+children (on Linux, anything descended from the engine's pid; elsewhere llama-server's and
+the agent's pids), the host pid, `--yield-ignore` names, launches whose app id is in
+`--yield-except` or in the profile's `yield_except`, and anything those launches started.
+
+**Yield.** New requests get the 503 below at once. Replies already running finish for up to
+20 s. Then llama-server stops (a load in progress is cancelled), and the phase becomes
+`yielded` with `status.yield = {reason, kind: game|gpu, since, draining}`. While draining,
+the phase is still `ready` and `yield.draining` is true. A yield never touches the model book,
+the caps or the recovery record, and it counts no restart. A yield is not a crash and not a
+shortfall. `start` answers an error while the card is yielded, and `sleep` does nothing.
+`stop` ends the yield and keeps the engine stopped; the watch comes back with the next `start`.
+
+**Coming back.**
+- A game keeps the engine away until 15 s after its launcher process is gone (`--yield-grace`).
+  If the game comes back during that time, the wait starts again.
+- When no newcomer is left, the engine loads again. The shape is chosen afresh, which gives
+  the same shape when the game left nothing behind; if it left something, the usual fit
+  logic applies.
+- A non-game newcomer that still runs lets the engine back once its use has held within the
+  floor for 60 s (`--yield-steady`). The engine then loads only a shape that fits the room the
+  newcomer leaves; if none fits, it stays yielded and checks again after another steady
+  period. A later growth yields again. `--yield-strict` waits until every newcomer has exited.
+
 ## 7. Control API and proxy
 
 Listens on **`127.0.0.1:47480`** (falls back to 47481–47489; the port it took is written in
@@ -478,7 +538,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
 
 `phase` is one of: `not_installed`, `downloading`, `installing`, `starting`, `loading`,
-`ready`, `resizing`, `sleeping`, `external`, `error`. `progress` is `{done_bytes, total_bytes,
+`ready`, `resizing`, `sleeping`, `yielded` (§6b), `external`, `error`. `progress` is `{done_bytes, total_bytes,
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
 n_cpu_moe, kv_type, vram_mib, vram_basis}`; `vram_basis` is `measured` where `vram_mib` was read
 from the running server, else `predicted`.
@@ -615,7 +675,11 @@ Every other path (`/v1/*`, `/completion`, `/slots`, `/props`, `/health`, `/metri
 is forwarded unchanged to llama-server (streaming included). While the model is loading or
 resizing the engine answers **503** with
 `{"error":{"code":503,"type":"unavailable_error","message":"Loading model"}}` (llama-server's
-own shape, so clients that already retry on 503 work). In external mode, `/v1/*` is forwarded
+own shape, so clients that already retry on 503 work). While the card is yielded (§6b) it
+answers **503** with `Retry-After: 10` and
+`{"error":{"code":"yielded","type":"unavailable_error","message":"Paused while <reason> runs"}}`,
+where `<reason>` is, for example, `AppId 123 (game.exe)`. The string code tells "paused for
+another program" apart from "loading". In external mode, `/v1/*` is forwarded
 to the external base URL with its key added, so the agent always talks to the engine.
 
 ### Sampler policy
@@ -733,6 +797,8 @@ the agent's env; the agent already reads that variable. Agent crash → restart 
 
 ```
 hermes-engine serve   --profile F --parent-pid P [--port N] [--linger D]
+                      [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
+                       [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]   §6b
 hermes-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed
 hermes-engine probe                         prints Hardware as JSON
 hermes-engine plan    [--profile F]         prints the plan as JSON

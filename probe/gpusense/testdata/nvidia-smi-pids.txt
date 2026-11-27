@@ -1,0 +1,73 @@
+
+==============NVSMI LOG==============
+
+Timestamp                                              : Fri Nov 27 07:57:35 2026
+Driver Version                                         : 620.73.04 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]
+CUDA Version                                           : 13.5 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]
+KMD Version                                            : 620.73.04
+CUDA UMD Version                                       : 13.5
+
+Attached GPUs                                          : 1
+GPU 00000000:01:00.0
+    Processes
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 3865
+            Type                          : C+G
+            Name                          : /usr/bin/kwin_wayland
+            Used GPU Memory               : 74 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 3912
+            Type                          : G
+            Name                          : /usr/bin/plasmashell
+            Used GPU Memory               : 155 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 4078
+            Type                          : G
+            Name                          : /usr/bin/Xwayland
+            Used GPU Memory               : 7 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 4571
+            Type                          : G
+            Name                          : /home/user/.local/bin/pcmeter
+            Used GPU Memory               : 22 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 4998
+            Type                          : G
+            Name                          : /home/user/.local/share/Steam/steamrt64/steam
+            Used GPU Memory               : 8 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 402543
+            Type                          : C+G
+            Name                          : sunshine
+            Used GPU Memory               : 268 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 619615
+            Type                          : G
+            Name                          : /app/lib/firefox/firefox
+            Used GPU Memory               : 6 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 1093683
+            Type                          : G
+            Name                          : ./steamwebhelper
+            Used GPU Memory               : 30 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 1093718
+            Type                          : G
+            Name                          : /home/user/.local/share/Steam/steamrt64/steamwebhelper
+            Used GPU Memory               : 38 MiB
+        GPU instance ID                   : N/A
+        Compute instance ID               : N/A
+        Process ID                        : 1290082
+            Type                          : C
+            Name                          : /home/user/.local/share/hermes-engine/backends/cuda-linux-x64/llama-b12651/llama-server
+            Used GPU Memory               : 10332 MiB
+

@@ -5,8 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/CharlesMod/easyEngine/internal/testkit"
 	"github.com/CharlesMod/easyEngine/run"
 )
 
@@ -262,5 +266,69 @@ func TestRemoveDownloadsCancelsInstall(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Join(s.e.Data, "models")); len(ents) != 0 {
 		t.Errorf("models left: %v", ents)
+	}
+}
+
+// A remove-downloads while an install job is still running waits for the job's end before it
+// deletes anything. The job is held inside the test's disk reading (the one place the test
+// controls) after Remove has said "removing" and Cancel has run; the seed file must stand when
+// the job's step runs after the hold, and be gone only after the job ended.
+func TestRemoveDownloadsWaitsForTheJobToEnd(t *testing.T) {
+	s := newSite(t)
+	var armed, seedAtHold atomic.Bool
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	seed := filepath.Join(s.e.Data, "models", "seed.gguf.part")
+	cfg := s.e.Config()
+	cfg.DiskFree = func(string) (int, error) {
+		if armed.Load() {
+			once.Do(func() { close(entered) })
+			<-release
+			_, err := os.Stat(seed)
+			seedAtHold.Store(err == nil)
+		}
+		return 1 << 20, nil
+	}
+	sup := s.e.StartSup(cfg)
+	sup.SetPort(4242)
+	if err := os.MkdirAll(filepath.Dir(seed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seed, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	if err := sup.Install("dl", "cpu-test"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered // the job runs and holds the job slot
+	from := testkit.Mark(t, sup, "remove asked")
+	if err := sup.RemoveDownloads(); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitPhase(t, sup, "removing", 30*time.Second)
+	if err := sup.Install("dl", "cpu-test"); !errors.Is(err, run.ErrBusy) {
+		t.Fatalf("an install while a remove waits: %v", err)
+	}
+	close(release)
+	testkit.WaitFor(t, 30*time.Second, "removed", func() bool {
+		st := sup.Status()
+		return st.Phase == "not_installed" && strings.HasPrefix(st.Message, "Removed")
+	})
+	if !seedAtHold.Load() {
+		t.Fatal("remove-downloads deleted while the install job was still running")
+	}
+	if _, err := os.Stat(seed); err == nil {
+		t.Fatal("the seed file was not removed after the job ended")
+	}
+	// the job's end was said while the remove held the slot: the install flag fell
+	var ended bool
+	for _, e := range testkit.Said(t, sup, from, 0, "job") {
+		if strings.Contains(string(e.Body), `"install":false`) {
+			ended = true
+		}
+	}
+	if !ended {
+		t.Fatal("the job's end was not said as a fact")
 	}
 }

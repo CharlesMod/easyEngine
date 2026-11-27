@@ -37,8 +37,31 @@ func stepLabel(step string, p fetch.Progress) string {
 	return step
 }
 
+// downloadAgain is what a download of the install job does when an attempt moved no bytes: there
+// is no retry cadence, it waits for a word that could change the outcome (the network coming back,
+// a client's install or nudge). Cancel ends the wait through ctx.
+func (s *Supervisor) downloadAgain() fetch.Again {
+	return func(ctx context.Context, err error) error {
+		w, werr := s.listenWord() // before it says it waits, so a word after is heard
+		if werr != nil {
+			return werr
+		}
+		s.mu.Lock()
+		phase, msg := s.phase, s.message
+		s.mu.Unlock()
+		s.addError("download made no progress: %v (waiting for the network or a word from a client)", err)
+		s.setPhase(phase, "Download made no progress: waiting for the network or a word from a client")
+		if err := s.awaitWord(ctx, w); err != nil {
+			return err
+		}
+		s.setPhase(phase, msg)
+		return nil
+	}
+}
+
 // Install starts the install job: backend, then model, then uv and the agent.
 func (s *Supervisor) Install(model, backend string) error {
+	s.nudge("install") // a client's install is a word for a download that waits, even if this one is refused
 	if handled, err := s.trySwitch(model, backend); handled {
 		return err
 	}
@@ -51,6 +74,7 @@ func (s *Supervisor) Install(model, backend string) error {
 		return ErrBusy
 	}
 	s.jobRunning = true
+	s.refreshLocked()
 	ctx, cancel := context.WithCancel(s.root)
 	s.jobCancel = cancel
 	s.mu.Unlock()
@@ -65,6 +89,7 @@ func (s *Supervisor) Install(model, backend string) error {
 
 // InstallSync runs the install job and waits (the CLI uses it).
 func (s *Supervisor) InstallSync(ctx context.Context, model, backend string) error {
+	s.nudge("install")
 	if err := s.prepareInstall(model); err != nil {
 		return err
 	}
@@ -74,6 +99,7 @@ func (s *Supervisor) InstallSync(ctx context.Context, model, backend string) err
 		return ErrBusy
 	}
 	s.jobRunning = true
+	s.refreshLocked()
 	jctx, cancel := context.WithCancel(ctx)
 	s.jobCancel = cancel
 	s.mu.Unlock()
@@ -87,6 +113,7 @@ func (s *Supervisor) endJob(ctx context.Context, err error, what string) {
 	s.jobRunning = false
 	s.jobCancel = nil
 	s.progress = nil
+	s.refreshLocked() // the "job" fact: a remove that waits for this job's end hears it
 	s.mu.Unlock()
 	switch {
 	case err == nil:
@@ -162,7 +189,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			defer s.dropQueued()
 			if !s.modelInstalled(serve) {
 				s.setPhase("downloading", "Downloading "+serve.Name+" first")
-				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID), nil); err != nil {
+				if err := fetch.Download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID), s.downloadAgain()); err != nil {
 					return err
 				}
 				s.mu.Lock()
@@ -174,7 +201,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 				return err
 			}
 			s.setPhase("downloading", "Downloading "+m.Name)
-			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID), nil); err != nil {
+			if err := fetch.Download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID), s.downloadAgain()); err != nil {
 				return err
 			}
 		}
@@ -239,7 +266,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 	if _, err := os.Stat(marker); err != nil || findServer(dir) == "" {
 		os.RemoveAll(dir) // only a path we build under our own data dir
 		arch := filepath.Join(s.dir, "downloads", a.ID+archiveExt(a.URL))
-		if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID), nil); err != nil {
+		if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID), s.downloadAgain()); err != nil {
 			return err
 		}
 		s.setPhase("installing", "Unpacking "+a.ID)
@@ -253,7 +280,7 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 				return fmt.Errorf("catalog has no asset %q", x)
 			}
 			earch := filepath.Join(s.dir, "downloads", ea.ID+archiveExt(ea.URL))
-			if err := fetch.Download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID), nil); err != nil {
+			if err := fetch.Download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID), s.downloadAgain()); err != nil {
 				return err
 			}
 			tmp := filepath.Join(s.dir, "downloads", ea.ID+"-unpacked")
@@ -405,7 +432,7 @@ func (s *Supervisor) ensureUV(ctx context.Context, cat *catalog.Catalog) (string
 		return "", errors.New("no uv build in the catalog for this machine")
 	}
 	arch := filepath.Join(s.dir, "downloads", "uv"+archiveExt(a.URL))
-	if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv"), nil); err != nil {
+	if err := fetch.Download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("uv"), s.downloadAgain()); err != nil {
 		return "", err
 	}
 	s.setPhase("installing", "Installing uv")
@@ -516,6 +543,7 @@ func (s *Supervisor) Import(src string) error {
 		return ErrBusy
 	}
 	s.jobRunning = true
+	s.refreshLocked()
 	ctx, cancel := context.WithCancel(s.root)
 	s.jobCancel = cancel
 	s.mu.Unlock()
@@ -535,6 +563,7 @@ func (s *Supervisor) ImportSync(ctx context.Context, src string) error {
 		return ErrBusy
 	}
 	s.jobRunning = true
+	s.refreshLocked()
 	jctx, cancel := context.WithCancel(ctx)
 	s.jobCancel = cancel
 	s.mu.Unlock()

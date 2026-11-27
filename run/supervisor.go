@@ -295,7 +295,7 @@ func (s *Supervisor) refreshLocked() {
 	sayPtr(s, "recovery", "", s.recoveryLocked())
 	switch {
 	case s.removing:
-		s.say("job", "", map[string]any{"kind": "remove", "running": true})
+		s.say("job", "", map[string]any{"kind": "remove", "running": true, "install": s.jobRunning})
 	case s.jobRunning:
 		s.say("job", "", map[string]any{"kind": "install", "running": true})
 	default:

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 // Storage: what the engine keeps on disk, removing it, and deleting one model file
@@ -271,37 +273,42 @@ func (s *Supervisor) RemoveDownloads() error {
 		s.runRemoveDownloads()
 		s.mu.Lock()
 		s.removing = false
+		s.refreshLocked()
 		s.mu.Unlock()
 	}()
 	return nil
 }
 
-func (s *Supervisor) waitUntil(d time.Duration, f func() bool) bool {
-	end := time.Now().Add(d)
-	for {
-		if f() {
-			return true
-		}
-		if time.Now().After(end) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 func (s *Supervisor) runRemoveDownloads() {
 	s.setPhase("removing", "Removing downloaded files")
-	// Cancel the install job and any upgrade, then take the job slot so no install starts.
+	// Cancel the install job and any upgrade, then take the job slot so no install starts. Cancel
+	// is the bound: the job and the upgrade end when their context says so, and nothing is deleted
+	// until the "job" and "upgrade" facts say neither is left.
 	s.Cancel()
-	s.waitUntil(30*time.Second, func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.jobRunning || s.upg != nil && s.upg.activeState() {
-			return false
+	for {
+		w, err := s.hub.Wake("job", "upgrade") // before looking, so an end said in between is heard
+		if err != nil {
+			return
 		}
-		s.jobRunning = true
-		return true
-	})
+		s.mu.Lock()
+		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState())
+		if free {
+			s.jobRunning = true
+			s.refreshLocked()
+		}
+		s.mu.Unlock()
+		if free {
+			w.Close()
+			break
+		}
+		select {
+		case <-s.hub.Done():
+			w.Close()
+			return
+		case <-w.C():
+		}
+		w.Close()
+	}
 	s.mu.Lock()
 	s.userStopped = true
 	lc := s.loadCancel
@@ -328,9 +335,9 @@ func (s *Supervisor) runRemoveDownloads() {
 	s.progress = nil
 	s.tokS = 0
 	s.userStopped = false
-	s.jobRunning = false
-	s.jobCancel = nil
+	s.jobRunning = false // the slot this job took, and only that
 	s.stoCache = nil
+	s.refreshLocked()
 	s.mu.Unlock()
 	s.save()
 	msg := fmt.Sprintf("Removed downloaded files (%.1f GB freed)", float64(freed)/1e9)
@@ -391,14 +398,11 @@ func (s *Supervisor) removeEntry(p string) (freed int64, left []string) {
 	return size, nil
 }
 
-// retry runs f a few times: on Windows a file just released by a stopped process can stay locked briefly.
+// retry runs f until it works or the host's named watchdog gives up: on Windows a file just
+// released by a stopped process can stay locked briefly, and there is no event for its letting go.
 func retry(f func() error) bool {
-	for i := 0; i < 8; i++ {
+	return host.Unheld(func() bool {
 		err := f()
-		if err == nil || os.IsNotExist(err) {
-			return true
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return false
+		return err == nil || os.IsNotExist(err)
+	})
 }

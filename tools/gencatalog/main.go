@@ -3,6 +3,7 @@
 // they come from the API's asset digest, the LFS object id, or a download-and-hash.
 //
 //	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -llama-tag b12651 -uv-tag 0.13.10
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -repo CharlesMod/llama.cpp -llama-tag b12651-easy1
 //
 // Flags: -llama-tag and -uv-tag pin the llama.cpp build and the uv release (default: newest);
 // -cache DIR (default $HOME/.cache/gencatalog) keeps every downloaded archive as <sha256>.<ext>
@@ -116,6 +117,7 @@ type client struct {
 	http  *http.Client
 	token string
 	log   func(string, ...any)
+	api   string // GitHub API base; "" = https://api.github.com (tests point it at a fake server)
 	cache string // archive and unpacked-size cache dir; "" = no unpacked sizes (offline tests)
 }
 
@@ -252,6 +254,13 @@ func (c *client) unpackedSize(u, sum string, size int64) (int64, error) {
 	return n, os.WriteFile(szFile, []byte(strconv.FormatInt(n, 10)+"\n"), 0o644)
 }
 
+func (c *client) apiBase() string {
+	if c.api != "" {
+		return c.api
+	}
+	return defaultAPI
+}
+
 func (c *client) get(u string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
@@ -259,7 +268,7 @@ func (c *client) get(u string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", "easy-engine-gencatalog")
 	req.Header.Set("Accept", "application/json")
-	if c.token != "" && strings.HasPrefix(u, "https://api.github.com/") {
+	if c.token != "" && strings.HasPrefix(u, c.apiBase()+"/") {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(req)
@@ -351,7 +360,44 @@ func pat(p, tag string) string {
 	return p
 }
 
-var tagRe = regexp.MustCompile(`^b\d+$`)
+// tagRe accepts an upstream build tag (b12651) and a patched fork tag (b12651-easy1); nothing else.
+var tagRe = regexp.MustCompile(`^b(\d+)(?:-easy(\d+))?$`)
+
+// parseTag returns the llama.cpp build number and the patch revision of a tag: b12651 is (12651, 0),
+// b12651-easy1 is (12651, 1). The full tag stays the identity wherever it is written out.
+func parseTag(tag string) (build, patch int, err error) {
+	m := tagRe.FindStringSubmatch(tag)
+	if m == nil {
+		return 0, 0, fmt.Errorf("tag %q is neither bNNNN nor bNNNN-easyN", tag)
+	}
+	if build, err = strconv.Atoi(m[1]); err != nil {
+		return 0, 0, fmt.Errorf("tag %q: %w", tag, err)
+	}
+	if m[2] != "" {
+		if patch, err = strconv.Atoi(m[2]); err != nil {
+			return 0, 0, fmt.Errorf("tag %q: %w", tag, err)
+		}
+	}
+	return build, patch, nil
+}
+
+// repoRe is a GitHub owner/name: plain name characters only, so it is safe inside a URL path.
+var repoRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+const defaultRepo = "ggml-org/llama.cpp"
+const defaultAPI = "https://api.github.com"
+
+func validRepo(r string) error {
+	if !repoRe.MatchString(r) || strings.Contains(r, "..") {
+		return fmt.Errorf("repo %q is not owner/name", r)
+	}
+	return nil
+}
+
+// releasesURL is the API call that lists a repo's newest releases.
+func releasesURL(api, repo string) string {
+	return api + "/repos/" + repo + "/releases?per_page=100"
+}
 
 // verOf turns "12.8" into a comparable number.
 func verOf(s string) float64 {
@@ -585,7 +631,8 @@ var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", repo: "cmod/gemma4-rp
 
 func main() {
 	out := flag.String("out", "catalog/catalog.json", "output file")
-	pin := flag.String("llama-tag", "", "pin a llama.cpp build tag instead of picking the newest")
+	pin := flag.String("llama-tag", "", "pin a llama.cpp build tag (bNNNN or bNNNN-easyN) instead of picking the newest")
+	repo := flag.String("repo", defaultRepo, "GitHub owner/name whose releases carry the llama.cpp builds")
 	// A week, not a day: Windows Smart App Control refuses unsigned DLLs with no reputation yet. In the first
 	// Windows test it blocked b12680's llama.dll at about a day old, while b12651 (3 days) and older ran.
 	minAge := flag.Duration("min-age", 7*24*time.Hour, "when every release is a prerelease, skip builds newer than this (Windows Smart App Control needs a build to have a reputation)")
@@ -604,23 +651,38 @@ func main() {
 		}
 		return
 	}
-	c := &client{http: &http.Client{Timeout: 30 * time.Minute}, token: os.Getenv("GITHUB_TOKEN"), log: logf, cache: *cacheDir}
-	if err := run(c, *out, *pin, *uvTag, *minAge, *ref, *version); err != nil {
+	if err := validRepo(*repo); err != nil {
+		fmt.Fprintln(os.Stderr, "gencatalog:", err)
+		os.Exit(2)
+	}
+	if *pin != "" {
+		if _, _, err := parseTag(*pin); err != nil {
+			fmt.Fprintln(os.Stderr, "gencatalog: -llama-tag:", err)
+			os.Exit(2)
+		}
+	}
+	hc := &http.Client{Timeout: 30 * time.Minute} // network timeout
+	c := &client{http: hc, token: os.Getenv("GITHUB_TOKEN"), log: logf, cache: *cacheDir}
+	if err := run(c, *repo, *out, *pin, *uvTag, *minAge, *ref, *version); err != nil {
 		fmt.Fprintln(os.Stderr, "gencatalog:", err)
 		os.Exit(1)
 	}
 }
 
-func run(c *client, out, pin, uvTag string, minAge time.Duration, refPath string, version int) error {
+func run(c *client, repo, out, pin, uvTag string, minAge time.Duration, refPath string, version int) error {
+	if err := validRepo(repo); err != nil {
+		return err
+	}
 	var rs []ghRelease
-	if err := c.getJSON("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100", &rs); err != nil {
+	if err := c.getJSON(releasesURL(c.apiBase(), repo), &rs); err != nil {
 		return err
 	}
 	rel, why, err := selectRelease(rs, time.Now(), minAge, pin)
 	if err != nil {
 		return err
 	}
-	c.log("llama.cpp %s (%s)", rel.TagName, why)
+	build, patch, _ := parseTag(rel.TagName)
+	c.log("llama.cpp %s from %s: build %d, patch revision %d (%s)", rel.TagName, repo, build, patch, why)
 	la, err := c.llamaAssets(rel)
 	if err != nil {
 		return err

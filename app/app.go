@@ -435,7 +435,11 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			log.Printf("easy-engine: cannot follow %s (%v): a revoked client's fact stands until the next start", tk.Path(), err)
 		}
 	}
-	an := &announcer{eligible: Discoverable(host) && eid != "", opts: o.Discovery}
+	dopts := o.Discovery
+	if dopts.Listen == nil {
+		dopts.Listen = ListenSet(host) // announce only what the listener listens on
+	}
+	an := &announcer{eligible: Discoverable(host) && eid != "", opts: dopts}
 	info := func() discover.Info {
 		return discover.Info{ID: eid, Name: engineName(sup), API: run.APIVersion, Port: port}
 	}

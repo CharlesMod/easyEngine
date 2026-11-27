@@ -27,6 +27,7 @@ func (m *memNet) Multicast(b []byte, _ int) error {
 }
 func (m *memNet) Unicast(b []byte, _ *net.UDPAddr) error { return m.Multicast(b, 0) }
 func (m *memNet) Addrs(int) []net.IP                     { return []net.IP{net.IPv4(192, 0, 2, 9)} }
+func (m *memNet) Reach(net.IP) []net.IP                  { return []net.IP{net.IPv4(192, 0, 2, 9)} }
 func (m *memNet) Refresh() error                         { return nil }
 func (m *memNet) Close() error {
 	m.once.Do(func() { close(m.done) })

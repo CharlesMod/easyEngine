@@ -36,6 +36,7 @@ func (c *countingNet) Multicast([]byte, int) error {
 }
 func (c *countingNet) Unicast([]byte, *net.UDPAddr) error { return c.Multicast(nil, 0) }
 func (c *countingNet) Addrs(int) []net.IP                 { return nil }
+func (c *countingNet) Reach(net.IP) []net.IP              { return nil }
 func (c *countingNet) Refresh() error                     { return nil }
 func (c *countingNet) Close() error                       { c.once.Do(func() { close(c.done) }); return nil }
 func (c *countingNet) count() int                         { c.mu.Lock(); defer c.mu.Unlock(); return c.sends }

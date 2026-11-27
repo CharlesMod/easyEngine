@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -34,10 +35,13 @@ type Hello struct {
 
 // The codes the pairing paths answer with beside their message.
 const (
-	CodePairingOff = "pairing_off" // POST pair where pairing is not offered
-	CodePairDenied = "pair_denied" // 403: the person pressed Deny
-	CodePairGone   = "pair_gone"   // 410: withdrawn, pushed out, collected, or another life
-	CodeNotAllowed = "not_allowed" // 403: answering needs loopback or the master token
+	CodePairingOff  = "pairing_off"  // POST pair where pairing is not offered
+	CodePairDenied  = "pair_denied"  // 403: the person pressed Deny
+	CodePairGone    = "pair_gone"    // 410: withdrawn, pushed out, collected, or another life
+	CodeNotAllowed  = "not_allowed"  // 403: answering needs loopback or the master token
+	CodeBadRequest  = "bad_request"  // 400 on a keyless path: the body was not {name} JSON
+	CodePairFailed  = "pair_failed"  // 500: the engine could not open the request (detail in its log)
+	CodeIssueFailed = "issue_failed" // 500: the engine could not issue the token (detail in its log); the Allow stands
 )
 
 func failCode(w http.ResponseWriter, status int, code, msg string) {
@@ -135,7 +139,8 @@ func (a *API) pairAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	if err := decode(r, &in); err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
+		// a keyless path says no error text of its own: only what was wrong with the call
+		failCode(w, http.StatusBadRequest, CodeBadRequest, `send {"name": "<your name>"} as JSON, at most 4 KiB`)
 		return
 	}
 	from := r.RemoteAddr
@@ -144,7 +149,12 @@ func (a *API) pairAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	req, id, err := a.Pair.Ask(in.Name, from)
 	if err != nil {
-		failCode(w, http.StatusGone, CodePairGone, err.Error())
+		if errors.Is(err, pair.ErrClosed) {
+			failCode(w, http.StatusGone, CodePairGone, "the engine is ending")
+			return
+		}
+		log.Printf("easy-engine: pairing request: %v", err) // the detail stays on the engine's side
+		failCode(w, http.StatusInternalServerError, CodePairFailed, "the pairing request could not be opened")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -163,7 +173,10 @@ func (a *API) pairCollect(w http.ResponseWriter, r *http.Request, id string) {
 		if r.Context().Err() != nil {
 			return // the client went away
 		}
-		fail(w, http.StatusInternalServerError, "could not issue the token: "+err.Error())
+		// The detail (a token file error names the data dir, and with it the user) stays in the
+		// engine's log; the client on the network hears only that it failed. The Allow stands.
+		log.Printf("easy-engine: pairing: could not issue the token: %v", err)
+		failCode(w, http.StatusInternalServerError, CodeIssueFailed, "the token could not be issued; ask again")
 		return
 	}
 	switch res.Outcome {

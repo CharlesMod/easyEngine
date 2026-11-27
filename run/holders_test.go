@@ -7,8 +7,8 @@ import "testing"
 func TestHolderScanOneScanServesTwoWords(t *testing.T) {
 	n := 0
 	f := func() map[int]string { n++; return map[int]string{n: "x"} }
-	holderScanHook.Store(&f)
-	t.Cleanup(func() { holderScanHook.Store(nil) })
+	old := holderScanHook.Swap(&f)
+	t.Cleanup(func() { holderScanHook.Store(old) })
 	h := &holderScan{}
 	a, b := h.word(), h.word()
 	ra := h.look(a, "")

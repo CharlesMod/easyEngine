@@ -2,8 +2,11 @@
 // (llama.cpp, uv) and the Hugging Face API (stock models). Hashes are never typed by hand:
 // they come from the API's asset digest, the LFS object id, or a download-and-hash.
 //
-//	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -llama-tag b12651 -uv-tag 0.13.10
-//	go run ./tools/gencatalog -out catalog/catalog.json -version 9 -repo CharlesMod/llama.cpp -llama-tag b12651-easy1
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 10 -llama-tag b12651 -uv-tag 0.13.10
+//	go run ./tools/gencatalog -out catalog/catalog.json -version 10 -repo CharlesMod/llama.cpp -llama-tag b12651-easy1
+//
+// A patched pin (b<N>-easy<M>) writes two rungs: the pin, then stock upstream (-stock-repo,
+// -stock-tag, default b<N>) holding only builds for platforms the pin has none for.
 //
 // Flags: -llama-tag and -uv-tag pin the llama.cpp build and the uv release (default: newest);
 // -cache DIR (default $HOME/.cache/gencatalog) keeps every downloaded archive as <sha256>.<ext>
@@ -342,14 +345,21 @@ var llamaSpecs = []llamaSpec{
 		extraID: "cudart-linux-x64", extraRe: `^cudart-llama-%s-bin-ubuntu-cuda-(12\.\d+)-x64\.tar\.gz$`},
 	{id: "vulkan-linux-x64", os: "linux", arch: "amd64", accel: "vulkan", re: `^llama-%s-bin-ubuntu-vulkan-x64\.tar\.gz$`},
 	{id: "cpu-linux-x64", os: "linux", arch: "amd64", accel: "cpu", re: `^llama-%s-bin-ubuntu-x64\.tar\.gz$`},
-	{id: "cuda-win-x64", os: "windows", arch: "amd64", accel: "cuda", re: `^llama-%s-bin-win-cuda-(12\.\d+)-x64\.zip$`,
+	{id: "cuda-win-x64", os: "windows", arch: "amd64", accel: "cuda", re: `^llama-(?:%s-)?bin-win-cuda-(12\.\d+)-x64\.zip$`,
 		extraID: "cudart-win-x64", extraRe: `^cudart-llama-bin-win-cuda-(12\.\d+)-x64\.zip$`},
-	{id: "cuda13-win-x64", os: "windows", arch: "amd64", accel: "cuda", re: `^llama-%s-bin-win-cuda-(1[3-9]\.\d+)-x64\.zip$`,
+	{id: "cuda13-win-x64", os: "windows", arch: "amd64", accel: "cuda", re: `^llama-(?:%s-)?bin-win-cuda-(1[3-9]\.\d+)-x64\.zip$`,
 		extraID: "cudart13-win-x64", extraRe: `^cudart-llama-bin-win-cuda-(1[3-9]\.\d+)-x64\.zip$`, optional: true},
-	{id: "vulkan-win-x64", os: "windows", arch: "amd64", accel: "vulkan", re: `^llama-%s-bin-win-vulkan-x64\.zip$`},
-	{id: "cpu-win-x64", os: "windows", arch: "amd64", accel: "cpu", re: `^llama-%s-bin-win-cpu-x64\.zip$`},
+	{id: "vulkan-win-x64", os: "windows", arch: "amd64", accel: "vulkan", re: `^llama-(?:%s-)?bin-win-vulkan-x64\.zip$`},
+	{id: "cpu-win-x64", os: "windows", arch: "amd64", accel: "cpu", re: `^llama-(?:%s-)?bin-win-cpu-x64\.zip$`},
 	{id: "metal-mac-arm64", os: "darwin", arch: "arm64", accel: "metal", re: `^llama-%s-bin-macos-arm64\.tar\.gz$`},
 	{id: "cpu-mac-x64", os: "darwin", arch: "amd64", accel: "cpu", re: `^llama-%s-bin-macos-x64\.tar\.gz$`},
+	// arm64 builds: the fork builds none, so these come from the stock rung (all optional).
+	{id: "cpu-linux-arm64", os: "linux", arch: "arm64", accel: "cpu", re: `^llama-%s-bin-ubuntu-arm64\.tar\.gz$`, optional: true},
+	{id: "vulkan-linux-arm64", os: "linux", arch: "arm64", accel: "vulkan", re: `^llama-%s-bin-ubuntu-vulkan-arm64\.tar\.gz$`, optional: true},
+	{id: "cuda13-linux-arm64", os: "linux", arch: "arm64", accel: "cuda", re: `^llama-%s-bin-ubuntu-cuda-(1[3-9]\.\d+)-arm64\.tar\.gz$`,
+		extraID: "cudart13-linux-arm64", extraRe: `^cudart-llama-%s-bin-ubuntu-cuda-(1[3-9]\.\d+)-arm64\.tar\.gz$`, optional: true},
+	{id: "cpu-win-arm64", os: "windows", arch: "arm64", accel: "cpu", re: `^llama-(?:%s-)?bin-win-cpu-arm64\.zip$`, optional: true},
+	{id: "vulkan-win-arm64", os: "windows", arch: "arm64", accel: "vulkan", re: `^llama-(?:%s-)?bin-win-vulkan-arm64\.zip$`, optional: true},
 }
 
 // pat fills the tag into a pattern that has a %s slot; the Windows cudart names carry no tag.
@@ -482,11 +492,28 @@ func selectRelease(rs []ghRelease, now time.Time, minAge time.Duration, pin stri
 }
 
 func (c *client) llamaAssets(r ghRelease) ([]catalog.Asset, error) {
+	return c.llamaAssetsFor(r, nil)
+}
+
+// platKey is a platform and accelerator: what catalog.offered compares between rungs.
+type platKey struct{ os, arch, accel string }
+
+// llamaAssetsFor builds the assets of release r. With skip non-nil it is the stock rung's call:
+// specs whose platform and accelerator are in skip (the patched rung has them) are left out, and
+// a missing asset is logged and skipped, never an error. With skip nil every required spec must
+// be found.
+func (c *client) llamaAssetsFor(r ghRelease, skip map[platKey]bool) ([]catalog.Asset, error) {
 	var out []catalog.Asset
 	for _, sp := range llamaSpecs {
+		if skip != nil && skip[platKey{sp.os, sp.arch, sp.accel}] {
+			continue
+		}
 		a, ok := findAsset(r.Assets, pat(sp.re, r.TagName))
 		if !ok {
-			if sp.optional {
+			if sp.optional || skip != nil {
+				if skip != nil {
+					c.log("stock %s has no build for %s", r.TagName, sp.id)
+				}
 				continue
 			}
 			return nil, fmt.Errorf("missing asset for %s", sp.id)
@@ -511,7 +538,7 @@ func (c *client) llamaAssets(r ghRelease) ([]catalog.Asset, error) {
 					return nil, err
 				}
 				as.Extra = []string{sp.extraID}
-			} else if !sp.optional {
+			} else if !sp.optional && skip == nil {
 				return nil, fmt.Errorf("missing extra asset for %s", sp.id)
 			} else {
 				continue
@@ -633,6 +660,8 @@ func main() {
 	out := flag.String("out", "catalog/catalog.json", "output file")
 	pin := flag.String("llama-tag", "", "pin a llama.cpp build tag (bNNNN or bNNNN-easyN) instead of picking the newest")
 	repo := flag.String("repo", defaultRepo, "GitHub owner/name whose releases carry the llama.cpp builds")
+	stockRepo := flag.String("stock-repo", defaultRepo, "GitHub owner/name of the stock upstream release that fills the platforms the pin has no build for")
+	stockTag := flag.String("stock-tag", "", "the stock release tag (bNNNN); default: the build number of a patched -llama-tag")
 	// A week, not a day: Windows Smart App Control refuses unsigned DLLs with no reputation yet. In the first
 	// Windows test it blocked b12680's llama.dll at about a day old, while b12651 (3 days) and older ran.
 	minAge := flag.Duration("min-age", 7*24*time.Hour, "when every release is a prerelease, skip builds newer than this (Windows Smart App Control needs a build to have a reputation)")
@@ -655,21 +684,31 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gencatalog:", err)
 		os.Exit(2)
 	}
+	if err := validRepo(*stockRepo); err != nil {
+		fmt.Fprintln(os.Stderr, "gencatalog: -stock-repo:", err)
+		os.Exit(2)
+	}
 	if *pin != "" {
 		if _, _, err := parseTag(*pin); err != nil {
 			fmt.Fprintln(os.Stderr, "gencatalog: -llama-tag:", err)
 			os.Exit(2)
 		}
 	}
+	if *stockTag != "" {
+		if _, p, err := parseTag(*stockTag); err != nil || p != 0 {
+			fmt.Fprintf(os.Stderr, "gencatalog: -stock-tag %q is not a stock build tag (bNNNN)\n", *stockTag)
+			os.Exit(2)
+		}
+	}
 	hc := &http.Client{Timeout: 30 * time.Minute} // network timeout
 	c := &client{http: hc, token: os.Getenv("GITHUB_TOKEN"), log: logf, cache: *cacheDir}
-	if err := run(c, *repo, *out, *pin, *uvTag, *minAge, *ref, *version); err != nil {
+	if err := run(c, *repo, *stockRepo, *out, *pin, *stockTag, *uvTag, *minAge, *ref, *version); err != nil {
 		fmt.Fprintln(os.Stderr, "gencatalog:", err)
 		os.Exit(1)
 	}
 }
 
-func run(c *client, repo, out, pin, uvTag string, minAge time.Duration, refPath string, version int) error {
+func run(c *client, repo, stockRepo, out, pin, stockTag, uvTag string, minAge time.Duration, refPath string, version int) error {
 	if err := validRepo(repo); err != nil {
 		return err
 	}
@@ -683,7 +722,7 @@ func run(c *client, repo, out, pin, uvTag string, minAge time.Duration, refPath 
 	}
 	build, patch, _ := parseTag(rel.TagName)
 	c.log("llama.cpp %s from %s: build %d, patch revision %d (%s)", rel.TagName, repo, build, patch, why)
-	la, err := c.llamaAssets(rel)
+	rungs, err := c.llamaRungs(repo, stockRepo, stockTag, rel, patch > 0, build, rs, minAge)
 	if err != nil {
 		return err
 	}
@@ -714,10 +753,10 @@ func run(c *client, repo, out, pin, uvTag string, minAge time.Duration, refPath 
 		return fmt.Errorf("reference model on Hugging Face has sha256 %s, expected %s", refModel.SHA256, refSHA256)
 	}
 	cat := catalog.Catalog{
-		Version:  version,
-		LlamaCpp: catalog.LlamaCpp{Tag: rel.TagName, Assets: la},
-		UV:       ua,
-		Models:   []catalog.Model{refModel},
+		Version: version,
+		Llama:   rungs,
+		UV:      ua,
+		Models:  []catalog.Model{refModel},
 	}
 	for _, sp := range modelSpecs {
 		m, err := c.hfModel(sp)
@@ -745,6 +784,61 @@ func run(c *client, repo, out, pin, uvTag string, minAge time.Duration, refPath 
 	}
 	c.log("wrote %s", out)
 	return nil
+}
+
+// llamaRungs builds the ladder: rung 0 is the pin (rel, from repo); when the pin is patched, rung 1
+// is the stock release (stockTag, default b<build>) from stockRepo, holding only the builds for a
+// platform and accelerator the pin has none for. An empty stock rung is not written.
+func (c *client) llamaRungs(repo, stockRepo, stockTag string, rel ghRelease, patched bool, build int, rs []ghRelease, minAge time.Duration) ([]catalog.LlamaCpp, error) {
+	la, err := c.llamaAssets(rel)
+	if err != nil {
+		return nil, err
+	}
+	rungs := []catalog.LlamaCpp{{Tag: rel.TagName, Repo: repo, Patched: patched, Assets: la}}
+	for _, a := range la {
+		c.log("build %s from rung 0 (%s, %s)", a.ID, rel.TagName, repo)
+	}
+	if !patched {
+		return rungs, nil
+	}
+	if err := validRepo(stockRepo); err != nil {
+		return nil, err
+	}
+	if stockTag == "" {
+		stockTag = fmt.Sprintf("b%d", build)
+	}
+	if _, p, err := parseTag(stockTag); err != nil || p != 0 {
+		return nil, fmt.Errorf("stock tag %q is not a stock build tag (bNNNN)", stockTag)
+	}
+	srs := rs
+	if stockRepo != repo {
+		srs = nil
+		if err := c.getJSON(releasesURL(c.apiBase(), stockRepo), &srs); err != nil {
+			return nil, err
+		}
+	}
+	srel, _, err := selectRelease(srs, time.Now(), minAge, stockTag)
+	if err != nil {
+		return nil, fmt.Errorf("stock rung: %w", err)
+	}
+	covered := map[platKey]bool{}
+	for _, a := range la {
+		if a.Accel != "cudart" {
+			covered[platKey{a.OS, a.Arch, a.Accel}] = true
+		}
+	}
+	sa, err := c.llamaAssetsFor(srel, covered)
+	if err != nil {
+		return nil, err
+	}
+	if len(sa) == 0 {
+		c.log("stock %s adds no build; writing one rung", stockTag)
+		return rungs, nil
+	}
+	for _, a := range sa {
+		c.log("build %s from rung 1 (%s, %s)", a.ID, srel.TagName, stockRepo)
+	}
+	return append(rungs, catalog.LlamaCpp{Tag: srel.TagName, Repo: stockRepo, Assets: sa}), nil
 }
 
 func writeCatalog(out string, cat *catalog.Catalog) error {

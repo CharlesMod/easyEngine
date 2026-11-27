@@ -1,10 +1,6 @@
 package yield
 
-import (
-	"context"
-	"strings"
-	"time"
-)
+import "strings"
 
 // OS is the platform's view of other programs; tests replace it.
 type OS interface {
@@ -18,22 +14,37 @@ type OS interface {
 	Adapter(pci string)
 	// Under says whether pid descends from anc (false where the platform cannot tell).
 	Under(pid, anc int) bool
-	// Wait returns after d, or early (true) when some process opened a GPU device.
-	Wait(ctx context.Context, d time.Duration) bool
-	// Drain forgets device opens seen so far (the engine's own probes open the device too).
-	Drain()
 	Close()
 }
 
-// waitOnly is an OS piece for platforms with no open signal.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
+// Words are what the system itself says about other programs, where it says anything
+// (docs/EVENTS.md section 3). A nil channel is a word the system does not give: the caller
+// reads that thing on the host watchdog instead.
+type Words struct {
+	Launches <-chan struct{} // a launcher's game may have started or ended (Steam's RunningAppID)
+	Opens    <-chan struct{} // some process opened a GPU device node of the engine's adapter
+	Stop     func()          // lets the watches go; nil-safe through Release
+	Set      string          // what Opens watches (the nodes), to compare with Noder.NodeSet
+}
+
+// Release lets the watches go.
+func (w Words) Release() {
+	if w.Stop != nil {
+		w.Stop()
 	}
-	return false
+}
+
+// Watcher is the optional OS piece that gives Words. An OS without it gives none: its launchers
+// are read on the host watchdog with everything else.
+type Watcher interface {
+	Watch() Words
+}
+
+// Noder is the optional OS piece that names the set of nodes its Watch would watch now. The set
+// is known only once Adapter has found the engine's nodes, which may be after a first Watch: the
+// caller watches again when it differs from the Set of the Words it holds.
+type Noder interface {
+	NodeSet() string
 }
 
 // ParseRegistryVDF finds Steam's RunningAppID in a registry.vdf (macOS and Linux Steam keep

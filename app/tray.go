@@ -222,17 +222,28 @@ func ChatURL(host string, port int) string {
 	if !IsLoopbackHost(host) {
 		return ""
 	}
+	return "http://" + listenAddr(host, port) + "/chat/?mini=1"
+}
+
+// listenAddr is host:port as a client on this machine reaches the engine (an empty host is loopback).
+func listenAddr(host string, port int) string {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	return "http://" + net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)) + "/chat/?mini=1"
+	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 }
 
-// watch redraws the menu and tooltip when a phase change moves them (Chat turns on when a model
-// is ready), until ctx ends. It is driven by the supervisor's phase-change event, not a clock.
+// watch redraws the menu and tooltip when the supervisor's "phase" fact changes (Chat turns on
+// when a model is ready), until ctx ends. It is driven by the engine's own event hub (Wake, then
+// read the state), not a clock.
 func (c *controller) watch(ctx context.Context) {
+	w, err := c.sup.Hub().Wake("phase") // made before the first read, so no change slips between
+	if err != nil {
+		log.Printf("easy-engine: tray cannot follow the phase: %v", err)
+		return
+	}
+	defer w.Close()
 	for {
-		changed := c.sup.Changed() // asked before the state is read, so no change slips between
 		c.mu.Lock()
 		c.v.chat = c.chatReady()
 		stale := c.tooltip() != c.last || !reflect.DeepEqual(menu(c.v), c.drawn)
@@ -243,7 +254,9 @@ func (c *controller) watch(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-changed:
+		case <-c.sup.Hub().Done():
+			return
+		case <-w.C():
 		}
 	}
 }

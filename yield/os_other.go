@@ -3,10 +3,10 @@
 package yield
 
 import (
-	"context"
 	"os"
 	"path/filepath"
-	"time"
+
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 type otherOS struct{ vdf string }
@@ -30,9 +30,16 @@ func (o *otherOS) Launches() []Launch {
 	return nil
 }
 
-func (o *otherOS) Openers(func(int) bool) map[int]string          { return nil }
-func (o *otherOS) Under(int, int) bool                            { return false }
-func (o *otherOS) Wait(ctx context.Context, d time.Duration) bool { return sleepCtx(ctx, d) }
-func (o *otherOS) Adapter(string)                                 {}
-func (o *otherOS) Drain()                                         {}
-func (o *otherOS) Close()                                         {}
+func (o *otherOS) Openers(func(int) bool) map[int]string { return nil }
+func (o *otherOS) Under(int, int) bool                   { return false }
+func (o *otherOS) Adapter(string)                        {}
+func (o *otherOS) Close()                                {}
+
+// Watch is the change of registry.vdf, where Steam keeps RunningAppID.
+func (o *otherOS) Watch() Words {
+	ch, stop, err := host.Changes(o.vdf)
+	if err != nil {
+		return Words{}
+	}
+	return Words{Launches: ch, Stop: stop}
+}

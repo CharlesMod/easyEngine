@@ -96,6 +96,8 @@ func newSite(t *testing.T) *site {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := &site{e: e, uvLog: filepath.Join(e.Ctl, "uv.log"), agent: filepath.Join(e.Ctl, "agent.log")}
+	e.WatchFile(s.uvLog) // waits on these files are woken by their changes
+	e.WatchFile(s.agent)
 	t.Setenv("FAKE_UV_LOG", s.uvLog)
 	t.Setenv("FAKE_AGENT_LOG", s.agent)
 	t.Setenv("FAKE_AGENT_DIE", filepath.Join(e.Ctl, "die"))
@@ -129,7 +131,6 @@ func newSite(t *testing.T) *site {
 			}
 			w.Write(s.model[i:end])
 			w.(http.Flusher).Flush()
-			time.Sleep(30 * time.Millisecond)
 		}
 	})
 	s.srv = httptest.NewServer(mux)
@@ -152,8 +153,14 @@ func newSite(t *testing.T) *site {
 	return s
 }
 
-func (s *site) sup(t *testing.T) *run.Supervisor {
+func (s *site) sup(t *testing.T) *run.Supervisor { return s.supWith(t, nil) }
+
+// supWith is sup with the config changed first (mod may be nil).
+func (s *site) supWith(t *testing.T, mod func(*run.Config)) *run.Supervisor {
 	cfg := s.e.Config()
+	if mod != nil {
+		mod(&cfg)
+	}
 	sup := s.e.StartSup(cfg)
 	sup.SetPort(4242)
 	return sup
@@ -240,7 +247,11 @@ func TestInstallJob(t *testing.T) {
 	if err := sup.Install("dl", ""); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	// the job's end is a fact: the "job" fact stands from the install call (it said it) until the job ended
+	testkit.WaitFor(t, 20*time.Second, "the job to end", func() bool {
+		_, running := sup.Hub().Fact("job", "")
+		return !running
+	})
 	testkit.WaitPhase(t, sup, "ready", 20*time.Second)
 	if got := len(lines(s.uvLog)); got != n {
 		t.Fatalf("uv was called again without a wheel change: %v", lines(s.uvLog))
@@ -319,44 +330,49 @@ func TestImportOnlyModel(t *testing.T) {
 	}
 }
 
-func TestAgentRestartWithBackoff(t *testing.T) {
+// An agent that exits at once is restarted once at once; a second quick failure in a row waits for a
+// word (no clock); a run of AgentStable resets the count.
+func TestAgentRestartOnceThenWaitForWord(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	wheelP := filepath.Join(e.Ctl, "a-0.1-py3-none-any.whl")
 	os.WriteFile(wheelP, []byte("wheel"), 0o644)
 	e.Prof.Agent = &run.AgentSpec{ID: "bo", Wheel: wheelP, Module: "m", Args: []string{"run"}}
-	// a ready venv by hand: the agent exits at once every time
+	// a ready venv by hand: every start adds a line to the log; the third start stays up long
+	// enough to count as stable, every other one exits at once
 	venv := filepath.Join(e.Data, "runtime", "venvs", "bo")
 	os.MkdirAll(filepath.Join(venv, "bin"), 0o755)
 	logf := filepath.Join(e.Ctl, "agent.log")
-	os.WriteFile(filepath.Join(venv, "bin", "python"), []byte("#!/bin/sh\necho \"$(date +%s%N)\" >> "+logf+"\nexit 3\n"), 0o755)
+	script := "#!/bin/sh\necho start >> " + logf + "\nn=$(wc -l < " + logf + ")\nif [ \"$n\" -eq 3 ]; then sleep 1; fi\nexit 3\n"
+	os.WriteFile(filepath.Join(venv, "bin", "python"), []byte(script), 0o755)
 	os.WriteFile(filepath.Join(venv, ".wheel-sha"), []byte(sum([]byte("wheel"))), 0o644)
 	cfg := e.Config()
-	cfg.AgentBackoffBase = 60 * time.Millisecond
-	cfg.AgentBackoffMax = 250 * time.Millisecond
+	cfg.AgentStable = 300 * time.Millisecond
 	sup := e.StartSup(cfg)
-	testkit.WaitFor(t, 10*time.Second, "5 agent starts", func() bool { return len(lines(logf)) >= 6 })
-	ts := lines(logf)
-	var gaps []time.Duration
-	for i := 1; i < len(ts); i++ {
-		var a, b int64
-		for _, c := range ts[i-1] {
-			a = a*10 + int64(c-'0')
+	waiting := func(restarts int) func() bool {
+		return func() bool {
+			st := sup.Status().Agent
+			return st.Phase == "error" && st.Restarts == restarts && strings.Contains(st.Message, "waiting for a request or a word from a client")
 		}
-		for _, c := range ts[i] {
-			b = b*10 + int64(c-'0')
-		}
-		gaps = append(gaps, time.Duration(b-a))
 	}
-	// 60, 120, 240, 250 (capped), 250: each gap at least about the backoff, growing then flat
-	if !(gaps[1] > gaps[0]+30*time.Millisecond && gaps[2] > gaps[1]+60*time.Millisecond) {
-		t.Fatalf("backoff did not grow: %v", gaps)
+	// start 1 fails: restarted at once (start 2); start 2 fails soon after: waits
+	testkit.WaitFor(t, 10*time.Second, "agent waiting after two quick exits", waiting(2))
+	if n := len(lines(logf)); n != 2 {
+		t.Fatalf("%d agent starts before a word, want 2", n)
 	}
-	if gaps[4] > 700*time.Millisecond {
-		t.Fatalf("backoff not capped: %v", gaps)
+	// a word gives exactly one more start (the third, which runs stable); a stable run resets the
+	// count, so its exit is restarted at once (the fourth), whose quick exit waits again
+	sup.Nudge("x")
+	testkit.WaitFor(t, 10*time.Second, "agent waiting after the stable run", waiting(4))
+	if n := len(lines(logf)); n != 4 {
+		t.Fatalf("%d agent starts after the stable run, want 4", n)
 	}
-	if st := sup.Status().Agent; st.Restarts < 3 {
-		t.Fatalf("agent status %+v", st)
+	// and a request at the door is a word too (the model is ready, the agent waits): exactly one
+	// start and no more
+	sup.Begin()()
+	testkit.WaitFor(t, 10*time.Second, "agent waiting after one more start", waiting(5))
+	if n := len(lines(logf)); n != 5 {
+		t.Fatalf("%d agent starts after a word, want 5", n)
 	}
 }
 

@@ -28,9 +28,33 @@ type senseFake struct {
 	mu     sync.Mutex
 	host   int
 	ours   []int
+	seen   chan struct{} // one per read
+}
+
+func newSenseFake() *senseFake { return &senseFake{seen: make(chan struct{}, 1024)} }
+
+// waitReads waits for n reads of the card after the call.
+func (f *senseFake) waitReads(t *testing.T, n int) {
+	t.Helper()
+	for len(f.seen) > 0 {
+		<-f.seen
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-f.seen:
+		case <-time.After(10 * time.Second): // watchdog for silence: the room's watchdog reads every 40 ms
+			t.Fatalf("only %d of %d reads of the card", i, n)
+		}
+	}
 }
 
 func (f *senseFake) sense(ctx context.Context, ours []int, host int) gpusense.Picture {
+	defer func() {
+		select {
+		case f.seen <- struct{}{}:
+		default:
+		}
+	}()
 	f.calls.Add(1)
 	f.mu.Lock()
 	f.host, f.ours = host, ours
@@ -73,10 +97,11 @@ func sensedSup(t *testing.T, e *testkit.Env, f *senseFake, mod func(*run.Config)
 func TestWatchdogDoesNotShrinkOnItsOwnUse(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
-	f := &senseFake{}
+	f := newSenseFake()
 	s := sensedSup(t, e, f, nil)
 	e.SetUsed(16300) // the card reads full: our own llama-server holds almost all of it
-	time.Sleep(700 * time.Millisecond)
+	f.waitReads(t, 3)
+	s.React() // the engine has looked at the room as it reads now
 	if n := len(e.Starts()); n != 1 {
 		t.Fatalf("shrank with no other app on the card: %v", e.Starts())
 	}
@@ -89,10 +114,11 @@ func TestWatchdogDoesNotShrinkOnItsOwnUse(t *testing.T) {
 func TestHeldChangeReshapes(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
-	f := &senseFake{}
+	f := newSenseFake()
 	s := sensedSup(t, e, f, nil)
 	f.spike.Store(9000) // one read of a game loading, then it is gone
-	time.Sleep(600 * time.Millisecond)
+	f.waitReads(t, 3)
+	s.React() // the engine has looked at the room after the single read
 	if n := len(e.Starts()); n != 1 {
 		t.Fatalf("reshaped on a single read: %v", e.Starts())
 	}
@@ -116,7 +142,7 @@ func TestHeldChangeReshapes(t *testing.T) {
 func TestHostPIDOrder(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
-	f := &senseFake{}
+	f := newSenseFake()
 	e.Prof.HostPID = 0
 	s := sensedSup(t, e, f, func(c *run.Config) { c.Parents = func() []int { return []int{777, 888} } })
 	ctx := context.Background()
@@ -160,7 +186,7 @@ func TestProfileHostFields(t *testing.T) {
 	}
 	// the profile's adapter reaches the reserve: the host renders on the integrated adapter
 	e := testkit.New(t)
-	f := &senseFake{}
+	f := newSenseFake()
 	e.Prof = pr
 	e.Prof.Slots, e.Prof.MinSlots = 3, 1
 	e.Prof.CtxPerSlot.Max, e.Prof.CtxPerSlot.Floor = 65536, 8192
@@ -180,8 +206,9 @@ func TestProfileHostFields(t *testing.T) {
 func TestGPUReportCached(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
-	f := &senseFake{}
-	s := sensedSup(t, e, f, func(c *run.Config) { c.WatchEvery = time.Hour })
+	f := newSenseFake()
+	s := sensedSup(t, e, f, func(c *run.Config) { c.RoomEvery = time.Hour })
+	f.waitReads(t, 2) // the room's baseline at ready: two reads, then none for an hour
 	ctx := context.Background()
 	if _, err := s.GPUReport(ctx, true); err != nil {
 		t.Fatal(err)

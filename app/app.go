@@ -145,7 +145,10 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		if try > 4 {
 			return Result{}, errors.New("could not take engine.lock")
 		}
-		if d, err := lifecycle.ReadLock(lockPath); err == nil {
+		if d, raw, err := readLockRaw(lockPath); errors.Is(err, os.ErrNotExist) {
+			// No lock: go and take it. (Not the corrupt case below: a lock another serve
+			// creates after this read must never be taken for a corrupt one.)
+		} else if err == nil {
 			if alive(d) {
 				// A live engine holds the lock: attach to it.
 				tg := targetFor(dir, d)
@@ -191,11 +194,20 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			}
 			lifecycle.KillStale(d) // the engine crashed: its children may still run
 			lifecycle.RemoveStale(lockPath, d)
-		} else if _, serr := os.Stat(lockPath); serr == nil && !lifecycle.LockInWrite(lockPath) {
-			// An unreadable lock is stale, unless it is empty and brand new: then its creator is
-			// between create and write (the O_EXCL fallback), so it is held. CreateLock then
-			// reports ErrLockHeld and the retry below goes round again.
-			os.Remove(lockPath)
+		} else if isParseErr(err) {
+			// The file is corrupt: stale, unless it is empty and brand new (its creator is between
+			// create and write, the O_EXCL fallback), so then it is held; CreateLock reports
+			// ErrLockHeld and the retry below goes round again. A corrupt file goes only if its
+			// bytes are still the bytes read here, so a lock another serve wrote since is safe.
+			if !lifecycle.LockInWrite(lockPath) {
+				removeCorruptLock(lockPath, raw)
+			}
+		} else {
+			// Unreadable for another reason (permission, a sharing violation while the live engine
+			// rewrites its lock): not proof of anything, so remove nothing; look again. The try
+			// budget bounds it.
+			time.Sleep(100 * time.Millisecond) // not converted yet (laws/unconverted.txt): a pause before looking again, like the two around it
+			continue
 		}
 		l, p, err := api.Listen(host, base)
 		if err != nil {
@@ -251,7 +263,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		prof = p
 	}
 	w := lifecycle.NewWatcher()
-	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs}
+	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident} // the app waits for a connection
 	if o.Yield != nil {
 		y := *o.Yield
 		y.Except = append(append([]string{}, y.Except...), prof.YieldExcept...)
@@ -314,7 +326,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			return nil
 		}
 	}
-	a := &api.API{S: sup, Attach: attach, AnyHost: !loopback, Open: o.Open,
+	a := &api.API{S: sup, ChatAddr: listenAddr(host, port), Attach: attach, AnyHost: !loopback, Open: o.Open,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:
@@ -338,6 +350,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	if o.Resident {
 		if len(o.ParentPIDs) > 0 { // parents given on the command line count as the first connection
 			attached <- struct{}{}
+			wakeForClient(sup) // and load the model for them, as an attach does
 		}
 		go residentLoop(wctx, w, sup, attached, func() time.Duration {
 			if o.LingerSet {
@@ -405,4 +418,33 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	}
 	scancel()
 	return Result{Port: port, Host: host}, nil
+}
+
+// readLockRaw reads the lock file once and parses what it read: the raw bytes go back with the
+// parse so a corrupt file can be removed only while it is still these bytes.
+func readLockRaw(path string) (lifecycle.LockData, []byte, error) {
+	var d lifecycle.LockData
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return d, nil, err
+	}
+	return d, raw, json.Unmarshal(raw, &d)
+}
+
+// isParseErr is true for an error from parsing the lock's bytes (the file was read, and is corrupt),
+// false for an error from reading it.
+func isParseErr(err error) bool {
+	var se *json.SyntaxError
+	var te *json.UnmarshalTypeError
+	return errors.As(err, &se) || errors.As(err, &te)
+}
+
+// removeCorruptLock removes the lock file only if it still holds exactly raw, the corrupt bytes
+// the caller read. Anything else (gone, changed, unreadable) is left alone.
+func removeCorruptLock(path string, raw []byte) bool {
+	cur, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(cur, raw) {
+		return false
+	}
+	return os.Remove(path) == nil
 }

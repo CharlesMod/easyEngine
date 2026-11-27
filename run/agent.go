@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
@@ -51,10 +50,16 @@ func (a *agentMgr) status() AgentStatus {
 	return AgentStatus{Phase: p, Pid: a.pid, Restarts: a.restarts, Message: a.msg}
 }
 
+// set records the status and says the agent fact (key: the profile's game name, else "agent").
 func (a *agentMgr) set(phase, msg string, pid int) {
 	a.mu.Lock()
 	a.phase, a.msg, a.pid = phase, msg, pid
 	a.mu.Unlock()
+	key := a.s.cfg.Profile.Game
+	if key == "" {
+		key = "agent"
+	}
+	a.s.say("agent", key, a.status())
 }
 
 func venvDir(dataDir string, ag *AgentSpec) string {
@@ -267,19 +272,21 @@ func (s *Supervisor) agentWanted() bool {
 // need is the agent's alone. A failure is said in the status errors and in the agent's own
 // status and blocks nothing: the phase settles as if no job had run. It does nothing when there
 // is no agent to install, when it is installed, or when another job runs (that job installs it).
-// It returns when the install has ended; the caller starts the agent.
-func (s *Supervisor) installAgent() {
+// It returns when the attempt has ended: whether to try again (a failure that was not a cancel),
+// for installAgentThen, which waits for a word before it does.
+func (s *Supervisor) installAgent() (again bool) {
 	if !s.agentWanted() || s.agentReady() {
-		return
+		return false
 	}
 	s.mu.Lock()
 	if s.jobRunning {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	s.jobRunning = true
 	ctx, cancel := context.WithCancel(s.root)
 	s.jobCancel = cancel
+	s.refreshLocked() // the job fact
 	s.mu.Unlock()
 	defer cancel()
 	err := func() error {
@@ -296,6 +303,8 @@ func (s *Supervisor) installAgent() {
 	s.jobRunning = false
 	s.jobCancel = nil
 	s.progress = nil
+	sayPtr(s, "install.progress", "", s.progress)
+	s.refreshLocked()               // the job fact
 	mine := s.phase == "installing" // ensureAgent's own phase: nothing else took the phase since
 	s.mu.Unlock()
 	switch {
@@ -305,11 +314,48 @@ func (s *Supervisor) installAgent() {
 		s.agent.set("", "", 0)
 		s.addError("Agent install cancelled")
 	default:
-		s.agent.set("error", "install failed: "+err.Error(), 0)
+		s.agent.set("error", "install failed: "+err.Error()+" (waiting for a request, the network or a word from a client)", 0)
 		s.addError("Agent install failed: %v", err)
+		again = true
 	}
 	if mine {
 		s.settle()
+	}
+	return again
+}
+
+// installAgentThen installs a missing agent (installAgent), then calls then (start it, start the
+// model); a failed install does not hold then back. It tries again with no cadence: after a
+// failure it waits for a word that could change the outcome (a request at the door, a client's
+// settings, install or nudge, the network coming back), then runs again, until it is installed,
+// is cancelled, or the engine ends. Run it in a goroutine counted in s.wg.
+func (s *Supervisor) installAgentThen(then func()) {
+	for {
+		w, err := s.listenQuiet() // before the attempt, so a word said while it runs is heard
+		if err != nil {
+			if then != nil {
+				then()
+			}
+			return
+		}
+		again := s.installAgent()
+		if then != nil {
+			then()
+			then = nil
+		}
+		if !again {
+			w.Close()
+			return
+		}
+		w.count() // it waits now: a request is a word for it
+		if s.awaitWord(s.root, w) != nil {
+			return
+		}
+		if s.agentReady() || !s.agentWanted() {
+			return
+		}
+		s.agent.set("", "", 0) // trying again: the install's own status takes over
+		then = s.startAgent    // an install that works starts the agent, as the first would have
 	}
 }
 
@@ -328,8 +374,7 @@ func (s *Supervisor) restartAgentInstalled() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.installAgent()
-		s.startAgent()
+		s.installAgentThen(s.startAgent)
 	}()
 }
 
@@ -344,15 +389,19 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			module = strings.ReplaceAll(ag.ID, "-", "_")
 		}
 	}
-	backoff := s.cfg.AgentBackoffBase
+	// quick counts failures in a row: a run shorter than AgentStable (a launch that failed is a
+	// run of no length). The first is restarted at once; from the second on the loop waits for a
+	// word that could change the outcome (docs/EVENTS.md section 3).
+	quick := 0
 	for ctx.Err() == nil {
 		sink, _ := lifecycle.OpenLog(filepath.Join(s.dir, "logs", "agent.log"))
 		args := append([]string{"-m", module}, ag.Args...)
 		started := s.cfg.Now()
+		var why string // what ended the run, in plain words
 		proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "agent", Path: agentPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
 		if err != nil {
+			why = fmt.Sprintf("could not start: %v", err)
 			s.addError("agent start: %v", err)
-			a.set("error", err.Error(), 0)
 		} else {
 			a.mu.Lock()
 			a.proc = proc
@@ -366,8 +415,9 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			a.mu.Lock()
 			a.proc = nil
 			a.mu.Unlock()
+			why = fmt.Sprintf("exited (%v)", proc.Err())
 			if ctx.Err() == nil {
-				s.addError("agent exited (%v): restarting in %s", proc.Err(), backoff)
+				s.addError("agent %s", why)
 			}
 		}
 		if sink != nil {
@@ -377,20 +427,23 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			return
 		}
 		if s.cfg.Now().Sub(started) >= s.cfg.AgentStable {
-			backoff = s.cfg.AgentBackoffBase
+			quick = 0
 		}
+		quick++
 		a.mu.Lock()
 		a.restarts++
 		a.mu.Unlock()
-		a.set("restarting", "restarting in "+backoff.String(), 0)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
+		if quick < 2 {
+			a.set("restarting", "agent "+why+": restarting at once", 0)
+			continue
 		}
-		backoff *= 2
-		if backoff > s.cfg.AgentBackoffMax {
-			backoff = s.cfg.AgentBackoffMax
+		w, err := s.listenWord() // listen before saying that we wait
+		if err != nil {
+			return
+		}
+		a.set("error", "agent "+why+" twice soon after starting: waiting for a request or a word from a client", 0)
+		if s.awaitWord(ctx, w) != nil {
+			return
 		}
 	}
 }

@@ -101,7 +101,11 @@ func (a *API) chatOpen(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad hash")
 		return
 	}
-	u := (&url.URL{Scheme: "http", Host: r.Host, Path: chatPath}).String() + in.Hash
+	if a.ChatAddr == "" {
+		fail(w, http.StatusServiceUnavailable, "the engine does not know its own address")
+		return
+	}
+	u := (&url.URL{Scheme: "http", Host: a.ChatAddr, Path: chatPath}).String() + in.Hash
 	open := a.OpenURL
 	if open == nil {
 		open = openfile.OpenURL

@@ -2,12 +2,11 @@ package run
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"time"
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/fetch"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
 )
@@ -40,7 +39,6 @@ type upgrade struct {
 	progress *Progress
 	err      string
 	attempt  int
-	retryAt  time.Time
 	// switching: the user chose another model while this one serves; it is not a first-run starter.
 	switching bool
 }
@@ -61,7 +59,7 @@ type UpgradeInfo struct {
 	Progress   *Progress `json:"progress"`
 	Error      string    `json:"error,omitempty"`
 	Attempt    int       `json:"attempt"`
-	RetryInS   int       `json:"retry_in_s,omitempty"`
+	RetryInS   int       `json:"retry_in_s,omitempty"` // always 0 (omitted): there is no retry cadence
 	// Switch is true when the user switched models (the current one is not a starter).
 	Switch bool `json:"switch,omitempty"`
 }
@@ -82,11 +80,6 @@ func (s *Supervisor) stagingLocked(st *Status) {
 	if u.progress != nil {
 		p := *u.progress
 		info.Progress = &p
-	}
-	if !u.retryAt.IsZero() && (u.state == upRetrying || u.state == upNoSpace) {
-		if d := u.retryAt.Sub(s.cfg.Now()); d > 0 {
-			info.RetryInS = int(d.Seconds()) + 1
-		}
 	}
 	st.Upgrade = info
 	switch u.state {
@@ -165,6 +158,7 @@ func (s *Supervisor) checkDisk(m catalog.Model) error { return s.checkNeed(s.dis
 func (s *Supervisor) beginQueued(target catalog.Model) {
 	s.mu.Lock()
 	s.upg = &upgrade{target: target, state: upQueued}
+	s.refreshLocked()
 	s.mu.Unlock()
 }
 
@@ -173,6 +167,7 @@ func (s *Supervisor) dropQueued() {
 	s.mu.Lock()
 	if s.upg != nil && s.upg.state == upQueued {
 		s.upg = nil
+		s.refreshLocked()
 	}
 	s.mu.Unlock()
 }
@@ -215,6 +210,7 @@ func (s *Supervisor) setUpgrade(f func(u *upgrade)) {
 	if s.upg != nil {
 		f(s.upg)
 	}
+	s.refreshLocked()
 	s.mu.Unlock()
 }
 
@@ -244,6 +240,7 @@ func (s *Supervisor) beginUpgrade(target catalog.Model) {
 	}
 	s.upgCancel = cancel
 	s.upg = &upgrade{target: target, state: upDownloading}
+	s.refreshLocked()
 	s.mu.Unlock()
 	s.wg.Add(1)
 	go func() {
@@ -253,77 +250,85 @@ func (s *Supervisor) beginUpgrade(target catalog.Model) {
 	}()
 }
 
-func (s *Supervisor) sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
-// runUpgrade downloads the target (retrying with backoff; a failure never touches what serves),
-// then swaps.
+// runUpgrade downloads the target (a failure never touches what serves), then swaps. There is no
+// retry cadence: a download that moves bytes resumes at once; one that moves none, or a disk
+// with no room, waits for a word that could change the outcome (the network coming back, a
+// client's install or nudge, the engine's next start).
 func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
-	backoff := s.cfg.UpgradeBackoff
 	for attempt := 1; ; attempt++ {
 		if s.modelInstalled(target) {
 			break
 		}
 		s.setUpgrade(func(u *upgrade) { u.attempt = attempt })
-		var err error
+		// listened before the attempt, so a word said while it still runs is heard; counted as
+		// waiting (a request is a word for it) only once it waits
+		w, err := s.listenQuiet()
+		if err != nil {
+			return
+		}
+		wa := s.newWordAgain()
+		again := wa.again(func(err error) {
+			s.addError("download of %s made no progress: %v (waiting for the network or a word from a client)", target.Name, err)
+			s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
+		}, func() {
+			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.attempt = upDownloading, "", u.attempt+1 })
+		})
 		if err = s.checkDisk(target); err != nil {
 			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.progress = upNoSpace, err.Error(), nil })
 			s.addError("%v; staying on the smaller model", err)
 		} else {
-			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.retryAt = upDownloading, "", time.Time{} })
+			s.setUpgrade(func(u *upgrade) { u.state, u.err = upDownloading, "" })
 			err = fetch.Download(ctx, target.URL, s.modelPath(target), target.SHA256, target.Size, func(p fetch.Progress) {
 				s.setUpgrade(func(u *upgrade) {
 					u.progress = &Progress{DoneBytes: p.Done, TotalBytes: p.Total, RateBps: p.RateBps, ETAS: int(p.ETA.Seconds()), Step: stepLabel("model "+target.ID, p)}
 				})
-			})
+			}, again)
+			wa.close()
 			if err == nil {
+				w.Close()
 				break
 			}
 			if ctx.Err() != nil {
+				w.Close()
 				s.setUpgrade(func(u *upgrade) { u.state, u.progress = upCancelled, nil })
 				s.logf("upgrade to %s cancelled", target.ID)
 				return
 			}
-			s.addError("download of %s failed: %v (retrying)", target.Name, err)
+			s.addError("download of %s failed: %v (waiting for a word from a client)", target.Name, err)
 			s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
 		}
-		s.setUpgrade(func(u *upgrade) { u.retryAt = s.cfg.Now().Add(backoff) })
-		if !s.sleepCtx(ctx, backoff) {
+		wa.close()
+		w.count()
+		if s.awaitWord(ctx, w) != nil {
 			s.setUpgrade(func(u *upgrade) { u.state, u.progress = upCancelled, nil })
 			return
-		}
-		if backoff *= 2; backoff > s.cfg.UpgradeBackoffMax {
-			backoff = s.cfg.UpgradeBackoffMax
 		}
 	}
 	s.setUpgrade(func(u *upgrade) { u.progress = nil })
 	s.swapTo(ctx, target)
 }
 
-// swapTo switches the served model to target at a safe moment. It waits until no load or resize
-// is under way, then (holding the operation lock, so the watchdog stays out) answers new
-// requests with 503 and Retry-After, waits for the ones in flight (up to SwapDrain), stops the
-// old server, and starts the target with a fresh fit. If the target does not load, the starter
-// is started again and the upgrade is marked failed.
+// busyPhase is a phase in which a swap waits: a load, a resize or an install under way.
+func busyPhase(p string) bool {
+	switch p {
+	case "starting", "loading", "resizing", "downloading", "installing":
+		return true
+	}
+	return false
+}
+
+// swapTo switches the served model to target at a safe moment. It waits (on the phase fact) until
+// no load or resize is under way and the card is not yielded, then answers new requests with
+// "Switching to the full model", waits for the ones in flight (up to the named moment SwapDrain)
+// without holding the operation lock, takes it once the count is zero, stops the old server and
+// starts the target with a fresh fit. If the card is yielded when the target would load, the
+// target loads when the yield ends. If the target does not load, the starter is started again
+// and the upgrade is marked failed.
 func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
-	for {
-		switch s.Phase() {
-		case "starting", "loading", "resizing", "downloading", "installing":
-			if !s.sleepCtx(ctx, s.cfg.HealthPoll) {
-				s.setUpgrade(func(u *upgrade) { u.state = upCancelled })
-				return
-			}
-			continue
-		}
-		break
+	free := func() bool { return !busyPhase(s.Phase()) && s.yielded() == nil }
+	if !s.waitFact(ctx, free, "phase", "yield") {
+		s.setUpgrade(func(u *upgrade) { u.state = upCancelled })
+		return
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
@@ -335,37 +340,95 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	starterID := s.st.Model
 	stopped := s.userStopped
 	s.mu.Unlock()
-	s.setUpgrade(func(u *upgrade) { u.state = upSwapping })
-	s.logf("swapping %s -> %s", starterID, target.ID)
-	if srv := s.srv; srv != nil {
+	if s.srv != nil { // new requests are refused before the stage says swapping
 		s.mu.Lock()
 		s.swapping = true
 		s.mu.Unlock()
+	}
+	s.setUpgrade(func(u *upgrade) { u.state = upSwapping })
+	s.logf("swapping %s -> %s", starterID, target.ID)
+	if s.srv != nil {
 		s.setPhase("resizing", "Switching to the full model")
-		base := fmt.Sprintf("http://127.0.0.1:%d", srv.port)
-		deadline := time.Now().Add(s.cfg.SwapDrain)
-		for !s.slotsIdle(base) && time.Now().Before(deadline) && !srv.proc.Exited() {
-			time.Sleep(10 * time.Millisecond)
+		// wait for the requests in flight without the operation lock, then take it and look again
+		for s.inflightNow() != 0 {
+			s.opMu.Unlock()
+			dctx, cancel := context.WithCancel(ctx)
+			// named moment: SwapDrain, the longest a swap waits for the requests in flight
+			stop := host.Moment(s.cfg.SwapDrain, cancel)
+			s.waitIdle(dctx)
+			late := dctx.Err() != nil && ctx.Err() == nil
+			stop()
+			cancel()
+			s.opMu.Lock()
+			if ctx.Err() != nil {
+				s.mu.Lock()
+				s.swapping = false
+				s.mu.Unlock()
+				if s.srv != nil && s.Phase() == "resizing" {
+					s.setPhase("ready", "Ready")
+				}
+				s.setUpgrade(func(u *upgrade) { u.state = upCancelled })
+				return
+			}
+			if late {
+				s.addError("requests still running after %s: switching to the full model now", s.cfg.SwapDrain)
+				break
+			}
 		}
-		s.countRestart()
-		s.stopServerLocked()
+		if s.srv != nil {
+			s.countRestart()
+			s.stopServerLocked()
+		}
+		// the old server is gone: from here the phase says what the load does (the ready of the
+		// target must route to it)
+		s.mu.Lock()
+		s.swapping = false
+		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	s.st.Model, s.st.Target = target.ID, ""
 	s.mu.Unlock()
 	s.save()
 	if stopped || s.Phase() == "sleeping" {
-		s.finishSwap(upDone, "")
 		s.dropStarter(starterID, target.ID)
 		s.recordPrevious(starterID, target.ID)
+		s.finishSwap(upDone, "") // last: the done fact means the starter is let go too
 		s.setPhase("sleeping", "Stopped")
 		return
 	}
 	err := s.startLocked()
+	if err == nil && s.yielded() != nil {
+		// the card was yielded before the target could load: the yield's end starts the selected
+		// model (resumeYield), and the swap is judged by how that start ends
+		s.logf("swap to %s waits for the card: it is yielded", target.ID)
+		s.opMu.Unlock()
+		settled := func() bool {
+			if s.yielded() != nil {
+				return false
+			}
+			switch s.Phase() {
+			case "ready", "error", "sleeping", "not_installed":
+				return true
+			}
+			return false
+		}
+		ok := s.waitFact(ctx, settled, "phase", "yield")
+		s.opMu.Lock()
+		if !ok {
+			s.setUpgrade(func(u *upgrade) { u.state = upCancelled })
+			return
+		}
+		if p := s.Phase(); p == "sleeping" {
+			s.dropStarter(starterID, target.ID)
+			s.recordPrevious(starterID, target.ID)
+			s.finishSwap(upDone, "") // last: the done fact means the starter is let go too
+			return
+		}
+	}
 	if err == nil && s.Phase() == "ready" {
-		s.finishSwap(upDone, "")
 		s.dropStarter(starterID, target.ID)
 		s.recordPrevious(starterID, target.ID)
+		s.finishSwap(upDone, "") // last: the done fact means the starter is let go too
 		return
 	}
 	msg := "the full model would not load"
@@ -417,6 +480,7 @@ func (s *Supervisor) finishSwap(state, errMsg string) {
 	if s.upg != nil {
 		s.upg.state, s.upg.err = state, errMsg
 	}
+	s.refreshLocked()
 	s.mu.Unlock()
 }
 

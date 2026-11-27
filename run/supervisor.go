@@ -18,6 +18,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
@@ -144,26 +145,29 @@ type server struct {
 	fp        fit.Footprint
 	seed      fit.Footprint // the header's seed, which every reading is held to (never fp)
 	startedAt time.Time
-	misses    int
-	idleCount int
-	idleSince time.Time
 	nextGrow  time.Time
 	measured  int
-	// prevReserve is the last tick's reserve (others plus the host's share, MiB), -1 before one.
-	prevReserve int
-	reserve0    int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
-	oom         *oomWatch   // out-of-memory lines in its output since the last tick
-	oomTicks    []time.Time // ticks that saw them, within OOMHold
-	drain       *drain      // a shrink waiting for the replies in flight
+	reserve0  int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
+	oom       *oomWatch   // out-of-memory lines in its output, counted by request (run/recover.go)
+	drain     *drain      // a shrink waiting for the replies in flight
+	planned   atomic.Bool // stopped on purpose: its end is not a crash
+	// oomPend: out-of-memory lines in two requests were said of this server and not yet acted on
+	// (they came mid-drain or mid-swap); oomLine is the last. Guarded by opMu.
+	oomPend bool
+	oomLine string
+	// growWait cancels the named moment GrowBackoff's look-again (one at a time; mindDown cancels).
+	growWait func() bool
+	// stableCancel cancels the named moment CrashQuick after the start that clears the crash
+	// record (run/recover.go).
+	stableCancel func() bool
 }
 
 // Supervisor owns the children and the state.
 type Supervisor struct {
-	changed chan struct{} // closed and replaced at each phase change (Changed)
-	cfg     Config
-	dir     string
-	root    context.Context
-	stop    context.CancelFunc
+	cfg  Config
+	dir  string
+	root context.Context
+	stop context.CancelFunc
 
 	log *lifecycle.LogSink
 
@@ -185,14 +189,24 @@ type Supervisor struct {
 	restarts    int
 	hw          *probe.Hardware
 	cat         *catalog.Catalog
-	retryAt     time.Time
 	retryable   bool
 	rec         recovery
 	reshape     bool
 	tokS        float64
 
-	inflight int32
-	sf       settingsFile // settings.json as the engine follows it (run/settings.go)
+	// hub is what the supervisor says (run/book.go); poke wakes the mind's reactor and door is
+	// the count of requests in flight with what it arms (run/mind.go); card is the room, the
+	// reserve as sensed when needed (run/room.go).
+	hub  *event.Hub
+	poke chan struct{}
+	// listeners counts the listeners for a word (listenWord): a request is said as a nudge only while one listens
+	listeners atomic.Int32
+	door      door
+	card      *roomWatch
+	sf        settingsFile // settings.json as the engine follows it (run/settings.go)
+	// deferred: started asleep (Config.StartSleeping); the agent and an unfinished upgrade wait
+	// for the first Start.
+	deferred atomic.Bool
 
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
@@ -216,6 +230,7 @@ type Supervisor struct {
 // New builds a supervisor. Call Run to start the watchdog.
 func New(cfg Config) (*Supervisor, error) {
 	cfg.defaults()
+	ownReads(&cfg)
 	if cfg.DataDir == "" {
 		return nil, errors.New("no data dir")
 	}
@@ -227,9 +242,17 @@ func New(cfg Config) (*Supervisor, error) {
 	lg, _ := lifecycle.OpenLog(filepath.Join(cfg.DataDir, "logs", "engine.log"))
 	ctx, cancel := context.WithCancel(context.Background())
 	st, file, note, serr := loadAll(cfg.DataDir)
-	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st}
+	hub, err := event.New(book, cfg.Now)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1)}
 	s.sf.begin(file, serr)
 	s.agent.s = s
+	s.card = newRoomWatch(s)
+	s.say("engine", "", map[string]any{"version": cfg.Version, "port": 0})
+	s.sayModel()
 	if note != "" {
 		s.addError("%s", note)
 	}
@@ -242,6 +265,7 @@ func (s *Supervisor) SetPort(p int) {
 	s.mu.Lock()
 	s.port = p
 	s.mu.Unlock()
+	s.say("engine", "", map[string]any{"version": s.cfg.Version, "port": p})
 }
 
 func (s *Supervisor) logf(format string, a ...any) {
@@ -260,25 +284,60 @@ func (s *Supervisor) addError(format string, a ...any) {
 		s.errs = s.errs[len(s.errs)-10:]
 	}
 	s.mu.Unlock()
+	s.say("error", "", map[string]string{"message": msg})
 }
 
 func (s *Supervisor) setPhaseLocked(phase, msg string) {
 	s.phase, s.message = phase, msg
-	if s.changed != nil {
-		close(s.changed) // wakes everyone waiting on Changed
+	s.say("phase", "", map[string]string{"phase": phase, "message": msg})
+	s.refreshLocked()
+	if phase == "ready" { // the reactor looks once: what waited for ready (an out-of-memory) is acted on
+		select {
+		case s.poke <- struct{}{}:
+		default:
+		}
 	}
-	s.changed = make(chan struct{})
 }
 
-// Changed returns a channel that is closed at the next phase change. A caller that wants every
-// change asks again after each wake, and reads the state after asking, so none slips between.
-func (s *Supervisor) Changed() <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.changed == nil {
-		s.changed = make(chan struct{})
+// refreshLocked says the facts that status computes from several fields: the shape, the device,
+// the yield, the upgrade, the recovery record and the job. The hub says only what changed (an
+// identical body is said already). Caller holds s.mu.
+func (s *Supervisor) refreshLocked() {
+	if s.hub == nil {
+		return
 	}
-	return s.changed
+	sayPtr(s, "mind.shape", "", s.shape)
+	sayPtr(s, "mind.device", "", s.device)
+	sayPtr(s, "yield", "", s.yieldInfo)
+	var st Status
+	s.stagingLocked(&st)
+	sayPtr(s, "upgrade", "", st.Upgrade)
+	sayPtr(s, "recovery", "", s.recoveryLocked())
+	switch {
+	case s.removing:
+		s.say("job", "", map[string]any{"kind": "remove", "running": true, "install": s.jobRunning})
+	case s.jobRunning:
+		s.say("job", "", map[string]any{"kind": "install", "running": true})
+	default:
+		s.sayGone("job", "")
+	}
+}
+
+// refresh is refreshLocked for a caller that does not hold s.mu.
+func (s *Supervisor) refresh() {
+	s.mu.Lock()
+	s.refreshLocked()
+	s.mu.Unlock()
+}
+
+// sayModel says the selected model and how it runs.
+func (s *Supervisor) sayModel() {
+	s.mu.Lock()
+	b := map[string]any{"mode": s.st.Mode, "model": s.st.Model, "backend": s.st.Backend, "kv_type": s.st.KVType,
+		"target": s.st.Target, "previous": s.st.Previous, "starter_owned": s.st.StarterOwned, "custom": s.st.Custom,
+		"sampler_policy": s.st.SamplerPolicy, "linger_s": s.st.LingerS}
+	s.mu.Unlock()
+	s.say("model", "", b)
 }
 
 func (s *Supervisor) setPhase(phase, msg string) {
@@ -375,6 +434,8 @@ func (s *Supervisor) save() {
 	st := s.st
 	st.Book.Entries = copyBook(s.st.Book.Entries)
 	s.mu.Unlock()
+	s.sayModel()
+	s.wakeMind(func(*causes) {}) // a settings change (the KV type) is looked at by the reactor
 	if err := writeState(s.dir, st); err != nil {
 		s.logf("write state: %v", err)
 	}
@@ -569,13 +630,6 @@ func (s *Supervisor) resolveInstall() (install, bool) {
 
 // ---- proxy helpers ------------------------------------------------------------------------
 
-// Begin marks a proxied request in flight; call the result when it ends.
-func (s *Supervisor) Begin() func() {
-	atomic.AddInt32(&s.inflight, 1)
-	var once sync.Once
-	return func() { once.Do(func() { atomic.AddInt32(&s.inflight, -1) }) }
-}
-
 // Route says where the proxy should send a request.
 func (s *Supervisor) Route() Route {
 	s.mu.Lock()
@@ -586,8 +640,15 @@ func (s *Supervisor) Route() Route {
 	if y := s.yieldInfo; y != nil {
 		return Route{Kind: "unavailable", Code: "yielded", Message: "Paused while " + y.Reason + " runs"}
 	}
+	if s.phase == "error" {
+		// a request at the door is a word that could change the outcome (run/mind.go)
+		s.nudge("a request at the door")
+	}
 	switch s.phase {
 	case "ready":
+		if s.swapping { // a swap has begun and its phase is still to be said
+			return Route{Kind: "unavailable", Message: "Switching to the full model"}
+		}
 		return Route{Kind: "local", URL: s.llamaURL}
 	case "sleeping":
 		if !s.userStopped && !s.waking {
@@ -613,6 +674,7 @@ func (s *Supervisor) setProgress(step string, p *Progress) {
 		p.Step = step
 	}
 	s.progress = p
+	sayPtr(s, "install.progress", "", p)
 	s.mu.Unlock()
 }
 
@@ -633,31 +695,65 @@ func (s *Supervisor) Run() {
 		if needAgent && local {
 			_, needAgent = s.resolveInstall()
 		}
-		if !needAgent {
-			s.startAgent()
-		}
-		if local || needAgent {
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				if needAgent {
-					s.installAgent()
-					s.startAgent()
-				}
-				if local {
-					s.Start()
-				}
-			}()
-		}
-		if local {
-			s.resumeUpgrade()
+		if s.cfg.StartSleeping {
+			// the app waits for a connection: no model is loaded, and running the agent and an
+			// unfinished upgrade wait for the first start too (Start runs them once); a missing
+			// agent is still installed now
+			s.deferred.Store(true)
+			s.mu.Lock()
+			asleep := s.phase == "starting" // installed, local, not stopped (settle)
+			s.mu.Unlock()
+			if asleep {
+				s.setPhase("sleeping", "Model not loaded")
+			}
+			if needAgent {
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.installAgentThen(func() {
+						if !s.deferred.Load() { // the first start came while it installed: run it now
+							s.startAgent()
+						}
+					})
+				}()
+			}
+		} else {
+			s.startNow(local, needAgent)
 		}
 	}
 	s.wg.Add(1)
-	go func() { defer s.wg.Done(); s.watchdog() }()
+	go func() { defer s.wg.Done(); s.mind() }()
+	s.watchNetwork()
 	if s.cfg.Yield != nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.yieldLoop() }()
+	}
+}
+
+// startNow is Run's start when the engine does not start asleep: the agent (installed first when
+// it is missing), the model in local mode, and an unfinished upgrade.
+func (s *Supervisor) startNow(local, needAgent bool) {
+	if !needAgent {
+		s.startAgent()
+	}
+	if local || needAgent {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			start := func() {
+				if local {
+					s.Start()
+				}
+			}
+			if needAgent { // the first attempt comes first; a failed one does not hold the model back
+				s.installAgentThen(func() { s.startAgent(); start() })
+				return
+			}
+			start()
+		}()
+	}
+	if local {
+		s.resumeUpgrade()
 	}
 }
 
@@ -681,6 +777,10 @@ func (s *Supervisor) settle() {
 		s.setPhase("sleeping", "Stopped")
 		return
 	}
+	if s.deferred.Load() { // started asleep and not yet woken: no model is loaded
+		s.setPhase("sleeping", "Model not loaded")
+		return
+	}
 	s.setPhase("starting", "Starting")
 }
 
@@ -698,8 +798,10 @@ func (s *Supervisor) Shutdown() {
 	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.stop()
+	s.card.stop()
 	s.wg.Wait()
 	s.cfg.Group.KillAll()
+	s.hub.Close()
 	if s.log != nil {
 		s.log.Close()
 	}
@@ -712,6 +814,12 @@ func (s *Supervisor) Start() error {
 	s.userStopped = false
 	local := s.st.Mode == "local"
 	s.mu.Unlock()
+	if s.deferred.Swap(false) { // the first start of an app that started asleep
+		s.startAgent()
+		if local {
+			s.resumeUpgrade()
+		}
+	}
 	if !local {
 		return nil
 	}
@@ -740,6 +848,7 @@ func (s *Supervisor) Stop() error {
 	s.stopServerLocked()
 	s.mu.Lock()
 	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
+	s.refreshLocked()
 	s.mu.Unlock()
 	if s.Status().Mode == "local" {
 		if _, ok := s.resolveInstall(); ok {
@@ -784,12 +893,15 @@ func (s *Supervisor) stopServerLocked() {
 	s.ours.set(0)
 	s.launching.set(0)
 	if srv == nil {
+		s.card.disarm() // a start that waited for the room to change waits no more
 		return
 	}
+	s.mindDown(srv)
 	srv.proc.Stop(s.cfg.StopGrace)
 	s.mu.Lock()
 	s.shape = nil
 	s.llamaURL = ""
+	s.refreshLocked()
 	s.mu.Unlock()
 }
 
@@ -882,6 +994,7 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.reshape = true
 		s.mu.Unlock()
 	}
+	s.nudge("settings") // after reshape is set: the reactor sees it when it wakes
 	return nil
 }
 

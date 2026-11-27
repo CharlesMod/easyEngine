@@ -50,6 +50,19 @@ func TestChatURL(t *testing.T) {
 type quietTray struct {
 	mu    sync.Mutex
 	items []tray.Item
+	drawn chan struct{} // a signal for each SetItems
+}
+
+// until waits for cond, looking again at each redraw; d bounds it.
+func (q *quietTray) until(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	for !cond() {
+		select {
+		case <-q.drawn:
+		case <-time.After(d): // watchdog for silence: a menu that never draws fails the test
+			t.Fatalf("timed out after %s waiting for: %s", d, what)
+		}
+	}
 }
 
 func (q *quietTray) Clicks() <-chan string { return nil }
@@ -57,6 +70,10 @@ func (q *quietTray) SetItems(i []tray.Item) {
 	q.mu.Lock()
 	q.items = append([]tray.Item(nil), i...)
 	q.mu.Unlock()
+	select {
+	case q.drawn <- struct{}{}:
+	default:
+	}
 }
 func (q *quietTray) SetTooltip(string)        {}
 func (q *quietTray) Notify(a, b string) error { return nil }
@@ -83,8 +100,15 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 
 	var mu sync.Mutex
 	var shown []string
-	qt := &quietTray{}
-	c := newController(qt, MenuOptions{Chat: func(u string) error { mu.Lock(); shown = append(shown, u); mu.Unlock(); return nil }},
+	popped := make(chan struct{}, 4)
+	qt := &quietTray{drawn: make(chan struct{}, 1)}
+	c := newController(qt, MenuOptions{Chat: func(u string) error {
+		mu.Lock()
+		shown = append(shown, u)
+		mu.Unlock()
+		popped <- struct{}{}
+		return nil
+	}},
 		s, t.TempDir(), "http://127.0.0.1:1/chat/?mini=1", func() {})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(shown) }
 
@@ -102,9 +126,13 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 	defer cancel()
 	go c.watch(ctx)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	testkit.WaitFor(t, 6*time.Second, "Chat enabled", func() bool { return !qt.chatDisabled() })
+	qt.until(t, 6*time.Second, "Chat enabled", func() bool { return !qt.chatDisabled() })
 	c.click("chat")
-	testkit.WaitFor(t, 3*time.Second, "popup", func() bool { return count() == 1 })
+	select {
+	case <-popped:
+	case <-time.After(3 * time.Second): // watchdog for silence
+		t.Fatal("the popup was not shown")
+	}
 	if shown[0] != "http://127.0.0.1:1/chat/?mini=1" {
 		t.Fatalf("shown %q", shown[0])
 	}
@@ -115,4 +143,13 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 		t.Fatal("Chat on with no page")
 	}
 	c2.click("chat") // a Chat call here fails the test through the t.Error above
+}
+
+func TestListenAddr(t *testing.T) {
+	if got := listenAddr("", 47480); got != "127.0.0.1:47480" {
+		t.Fatal(got)
+	}
+	if got := listenAddr("::1", 47481); got != "[::1]:47481" {
+		t.Fatal(got)
+	}
 }

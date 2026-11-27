@@ -1,11 +1,11 @@
 package yield
 
 import (
-	"context"
 	"strconv"
-	"time"
 
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 // SteamRegistry reads Steam's running app id; tests replace it.
@@ -44,9 +44,20 @@ func registryLaunches(r SteamRegistry) []Launch {
 	return []Launch{{Kind: "steam-registry", AppID: strconv.FormatUint(uint64(id), 10)}}
 }
 
-func (o *windowsOS) Openers(func(int) bool) map[int]string          { return nil }
-func (o *windowsOS) Under(int, int) bool                            { return false }
-func (o *windowsOS) Wait(ctx context.Context, d time.Duration) bool { return sleepCtx(ctx, d) }
-func (o *windowsOS) Adapter(string)                                 {}
-func (o *windowsOS) Drain()                                         {}
-func (o *windowsOS) Close()                                         {}
+func (o *windowsOS) Openers(func(int) bool) map[int]string { return nil }
+func (o *windowsOS) Under(int, int) bool                   { return false }
+func (o *windowsOS) Adapter(string)                        {}
+func (o *windowsOS) Close()                                {}
+
+// Watch is the change of Steam's registry key, where RunningAppID lives. A test registry
+// (newWindowsOS) gives no word.
+func (o *windowsOS) Watch() Words {
+	if _, real := o.reg.(hkcuSteam); !real {
+		return Words{}
+	}
+	ch, stop, err := host.RegistryChanges("HKCU", `Software\Valve\Steam`)
+	if err != nil {
+		return Words{}
+	}
+	return Words{Launches: ch, Stop: stop}
+}

@@ -25,6 +25,7 @@ func chatServer(t *testing.T) (srv *httptest.Server, opened func() []string) {
 	var got []string
 	a := &api.API{S: s, OpenURL: func(u string) error { mu.Lock(); got = append(got, u); mu.Unlock(); return nil }}
 	srv = httptest.NewServer(a.Handler())
+	a.ChatAddr = strings.TrimPrefix(srv.URL, "http://") // as app.Serve sets it from its own listener
 	t.Cleanup(srv.Close)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	return srv, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), got...) }
@@ -129,6 +130,26 @@ func TestChatOpenOpensTheFullPage(t *testing.T) {
 	got := opened()
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("opened %v, want %v", got, want)
+	}
+}
+
+// A forged Host header cannot steer the engine's browser to another site: the address opened is
+// the engine's own, not the request's.
+func TestChatOpenIgnoresAForgedHost(t *testing.T) {
+	srv, opened := chatServer(t)
+	hdr := map[string]string{"X-Easy-Engine": "1", "Host": "evil.example"}
+	c, body, _ := do(t, "POST", srv.URL+"/engine/v1/chat/open", `{"hash":"#/chat/abc"}`, hdr)
+	// The gate refuses a non-loopback Host name outright; either way nothing foreign is opened.
+	if c == 200 {
+		t.Fatalf("a forged Host was served: %s", body)
+	}
+	hdr["Host"] = "localhost:1" // a loopback name the gate accepts, but not the engine's own port
+	if c, body, _ = do(t, "POST", srv.URL+"/engine/v1/chat/open", `{"hash":"#/chat/abc"}`, hdr); c != 200 {
+		t.Fatalf("%d %s", c, body)
+	}
+	want := "http://" + strings.TrimPrefix(srv.URL, "http://") + "/chat/#/chat/abc"
+	if got := opened(); len(got) != 1 || got[0] != want {
+		t.Fatalf("opened %v, want [%s]", got, want)
 	}
 }
 

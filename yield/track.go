@@ -22,43 +22,29 @@ type Change struct {
 
 // Tracker compares what runs on the card now with a baseline taken when the engine last
 // loaded or resumed. Processes the caller excludes (the engine's own, the host) never reach it.
+// It is fed only readings that have held (host.Level reports a change once two reads in a row
+// agree), so a newcomer counts on the first reading it is in: a short-lived probe never held.
 type Tracker struct {
-	Floor  int // MiB a baseline process may grow before it counts; held across two reads
+	Floor  int // MiB a baseline process may grow before it counts
 	MinNew int // MiB a newcomer must hold to count by memory alone (0: any)
 
 	base  map[int]Use
-	over  map[int]int // reads in a row a baseline process stood above its floor
-	seen  map[int]int // reads in a row a newcomer was there
 	known bool
 }
 
 // Reset takes cur as the new baseline.
 func (t *Tracker) Reset(cur []Use) {
 	t.base = map[int]Use{}
-	t.over = map[int]int{}
-	t.seen = map[int]int{}
 	for _, u := range cur {
 		t.base[u.PID] = u
 	}
 	t.known = true
 }
 
-// Pending says whether a newcomer has been seen once and waits for its second read.
-func (t *Tracker) Pending() bool {
-	for _, n := range t.seen {
-		if n == 1 {
-			return true
-		}
-	}
-	return false
-}
-
 // Baselined says whether Reset has run.
 func (t *Tracker) Baselined() bool { return t.known }
 
-// Changes lists what differs from the baseline. A newcomer counts once it is there in two
-// reads in a row, so a short-lived probe (nvidia-smi, vulkaninfo) never yields the card; the
-// caller reads again soon after a device open to keep that fast. A newcomer whose name matches a baseline
+// Changes lists what differs from the baseline in a reading that has held. A newcomer whose name matches a baseline
 // process that has gone, at no more memory than it held plus the floor, is a relaunch: it
 // takes that place in the baseline and is not a change.
 func (t *Tracker) Changes(cur []Use) []Change {
@@ -69,44 +55,25 @@ func (t *Tracker) Changes(cur []Use) []Change {
 	for _, u := range cur {
 		live[u.PID] = true
 	}
-	for pid := range t.seen {
-		if !live[pid] {
-			delete(t.seen, pid)
-		}
-	}
 	var out []Change
 	for _, u := range cur {
 		b, ok := t.base[u.PID]
 		if !ok {
 			if old, gone := t.relaunchOf(u, live); gone {
 				delete(t.base, old.PID)
-				delete(t.over, old.PID)
 				u.Opened = u.Opened || old.Opened
 				t.base[u.PID] = u
 				continue
 			}
-			why := ""
 			switch {
 			case u.MiB > 0 && u.MiB >= t.MinNew:
-				why = "new"
+				out = append(out, Change{PID: u.PID, Name: u.Name, MiB: u.MiB, Why: "new"})
 			case u.Opened:
-				why = "opened"
-			}
-			if why == "" {
-				continue
-			}
-			t.seen[u.PID]++
-			if t.seen[u.PID] >= 2 {
-				out = append(out, Change{PID: u.PID, Name: u.Name, MiB: u.MiB, Why: why})
+				out = append(out, Change{PID: u.PID, Name: u.Name, MiB: u.MiB, Why: "opened"})
 			}
 			continue
 		}
 		if u.MiB > b.MiB+t.Floor {
-			t.over[u.PID]++
-		} else {
-			t.over[u.PID] = 0
-		}
-		if t.over[u.PID] >= 2 {
 			out = append(out, Change{PID: u.PID, Name: u.Name, MiB: u.MiB, Why: "grew"})
 		}
 	}

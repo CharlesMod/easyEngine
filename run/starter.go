@@ -274,6 +274,7 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.attempt = upDownloading, "", u.attempt+1 })
 		})
 		if err = s.checkDisk(target); err != nil {
+			w.count() // it waits now: before the status says so, so a request that sees it is heard
 			s.setUpgrade(func(u *upgrade) { u.state, u.err, u.progress = upNoSpace, err.Error(), nil })
 			s.addError("%v; staying on the smaller model", err)
 		} else {
@@ -294,6 +295,7 @@ func (s *Supervisor) runUpgrade(ctx context.Context, target catalog.Model) {
 				s.logf("upgrade to %s cancelled", target.ID)
 				return
 			}
+			w.count() // it waits now: before the status says so, so a request that sees it is heard
 			s.addError("download of %s failed: %v (waiting for a word from a client)", target.Name, err)
 			s.setUpgrade(func(u *upgrade) { u.state, u.err = upRetrying, err.Error() })
 		}

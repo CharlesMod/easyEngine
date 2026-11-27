@@ -43,3 +43,6 @@ func (s *Supervisor) HeldReserve() (int, bool) {
 	r, ok := s.card.held()
 	return r.total, ok
 }
+
+// Listeners is how many listeners a request is said to as a word.
+func (s *Supervisor) Listeners() int { return int(s.listeners.Load()) }

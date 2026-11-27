@@ -69,16 +69,20 @@ func TestStreamCutByARealYield(t *testing.T) {
 	cfg.Yield = y
 	s := e.StartSup(cfg)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	<-baseline // the reactor has taken its first look; a game now is a change
+	// network timeout: a broken engine fails the test instead of hanging it
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	select {
+	case <-baseline: // the reactor has taken its first look; a game now is a change
+	case <-ctx.Done():
+		t.Fatal("the yield reactor never took its first look")
+	}
 
 	a := &API{S: s}
 	a.heard = s.Heard
 	srv := httptest.NewServer(a.Handler())
 	defer srv.Close()
 
-	// network timeout: a broken engine fails the test instead of hanging it
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-Id", "yield-req-1")

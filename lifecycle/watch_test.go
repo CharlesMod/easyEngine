@@ -24,7 +24,7 @@ type child struct {
 	stdin interface{ Close() error }
 }
 
-func spawnParent(t *testing.T) *child {
+func startParent(t *testing.T) *child {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), "EE_WATCH_CHILD=1")
@@ -47,7 +47,7 @@ func (c *child) end() {
 }
 
 func TestWatcherEndOfParent(t *testing.T) {
-	c := spawnParent(t)
+	c := startParent(t)
 	w := NewWatcher()
 	defer w.Close()
 	if err := w.Add(c.cmd.Process.Pid); err != nil {
@@ -73,7 +73,7 @@ func TestWatcherEndOfParent(t *testing.T) {
 }
 
 func TestWatcherWaitsForEveryParent(t *testing.T) {
-	a, b := spawnParent(t), spawnParent(t)
+	a, b := startParent(t), startParent(t)
 	w := NewWatcher()
 	defer w.Close()
 	for _, c := range []*child{a, b} {
@@ -101,7 +101,7 @@ func TestWatcherWaitsForEveryParent(t *testing.T) {
 }
 
 func TestWatcherRefusesDeadPid(t *testing.T) {
-	c := spawnParent(t)
+	c := startParent(t)
 	pid := c.cmd.Process.Pid
 	c.end()
 	w := NewWatcher()
@@ -135,7 +135,7 @@ func TestWatcherNoParentsWaitsForCtx(t *testing.T) {
 }
 
 func TestWatcherCloseLetsWatchesGo(t *testing.T) {
-	c := spawnParent(t)
+	c := startParent(t)
 	w := NewWatcher()
 	if err := w.Add(c.cmd.Process.Pid); err != nil {
 		t.Fatal(err)

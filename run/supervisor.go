@@ -189,12 +189,13 @@ type Supervisor struct {
 	tokS        float64
 
 	// hub is what the supervisor says (run/book.go); poke wakes the mind's reactor and door is
-	// the count of requests in flight with what it arms (run/mind.go); room is the reserve as
-	// sensed when needed (run/room.go): the card.
+	// the count of requests in flight with what it arms (run/mind.go); card is the room, the
+	// reserve as sensed when needed (run/room.go).
 	hub  *event.Hub
 	poke chan struct{}
 	door door
 	card *roomWatch
+	sf   settingsFile // settings.json as the engine follows it (run/settings.go)
 
 	upg       *upgrade // the starter-to-target upgrade, if this run has one (starter.go)
 	upgCancel context.CancelFunc
@@ -228,13 +229,14 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	lg, _ := lifecycle.OpenLog(filepath.Join(cfg.DataDir, "logs", "engine.log"))
 	ctx, cancel := context.WithCancel(context.Background())
-	st, note := loadState(cfg.DataDir)
+	st, file, note, serr := loadAll(cfg.DataDir)
 	hub, err := event.New(book, cfg.Now)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1)}
+	s.sf.begin(file, serr)
 	s.agent.s = s
 	s.card = newRoomWatch(s)
 	s.say("engine", "", map[string]any{"version": cfg.Version, "port": 0})
@@ -340,7 +342,7 @@ func (s *Supervisor) Status() Status {
 	defer s.mu.Unlock()
 	st := Status{
 		Version: s.cfg.Version, Port: s.port, Mode: s.st.Mode, Phase: s.phase, Message: s.message,
-		Model: s.st.Model, Backend: s.st.Backend, Errors: append([]string{}, s.errs...),
+		Model: s.st.Model, Backend: s.st.Backend, Errors: append(append([]string{}, s.errs...), s.sf.notes()...),
 		LingerS: s.st.LingerS, KVType: s.st.KVType, Restarts: s.restarts,
 		External: ExternalInfo{BaseURL: s.st.External.BaseURL, Model: s.st.External.Model, APIKeySet: s.st.External.APIKey != ""},
 		Parents:  []Parent{},
@@ -834,8 +836,12 @@ func (s *Supervisor) LingerS() int {
 	return s.st.LingerS
 }
 
-// SetSettings saves settings; a mode change takes effect at once.
-func (s *Supervisor) SetSettings(in Settings) error {
+// SetSettings saves settings (to settings.json); a mode change takes effect at once.
+func (s *Supervisor) SetSettings(in Settings) error { return s.setSettings(in, true) }
+
+// setSettings is SetSettings; persist says whether settings.json is written (not when the
+// settings came from the file itself, which is then left exactly as the keeper wrote it).
+func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	if in.Mode == "" {
 		in.Mode = s.Settings().Mode
 	}
@@ -877,7 +883,9 @@ func (s *Supervisor) SetSettings(in Settings) error {
 	}
 	kvChanged := s.st.KVType != oldKV
 	s.mu.Unlock()
-	s.save()
+	if persist {
+		s.saveSettings()
+	}
 	switch {
 	case old != in.Mode && in.Mode == "external":
 		s.mu.Lock()
@@ -986,5 +994,5 @@ func (s *Supervisor) FixExternalBase(b string) {
 	s.mu.Lock()
 	s.st.External.BaseURL = b
 	s.mu.Unlock()
-	s.save()
+	s.saveSettings()
 }

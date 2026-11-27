@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/app"
@@ -26,6 +25,7 @@ import (
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/tray"
 )
 
 // version is set with -ldflags "-X main.version=...".
@@ -45,6 +45,8 @@ func (p *pidList) Set(v string) error {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
+  easy-engine [app]   a tray icon, stays open and waits for a connection (settings in <data dir>/settings.json;
+                        the serve flags below override it for one run)
   easy-engine serve   --profile F --parent-pid P [--port N] [--linger D]
                         [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                          [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
@@ -60,22 +62,36 @@ func usage() {
 `)
 }
 
+// main hands the app to tray.Main: macOS runs its UI loop on the main thread and the rest of
+// the program in a goroutine; Linux and Windows just call it. Every other command (serve, the
+// CLI) runs plainly: it shows no icon, so it starts no UI loop (a shell over ssh has none).
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	if len(os.Args) >= 2 && os.Args[1] != "app" {
+		os.Exit(realMain())
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	var code int
+	tray.Main(func() { code = realMain() })
+	os.Exit(code)
+}
+
+func realMain() int {
+	cmd, args := "app", os.Args[1:] // no command: the app
+	implicit := len(os.Args) < 2
+	if !implicit {
+		cmd, args = os.Args[1], os.Args[2:]
+	}
 	switch cmd {
-	case "serve", "setup", "install", "import", "token":
+	case "app", "serve", "setup", "install", "import", "token":
 		// The engine deletes inside its data dir, so a dir it does not own is refused up front.
 		if err := dirs.Check(); err != nil {
 			fmt.Fprintln(os.Stderr, "easy-engine:", err)
-			os.Exit(2)
+			return 2
 		}
 	}
 	var code int
 	switch cmd {
+	case "app":
+		code = cmdApp(args, implicit)
 	case "serve":
 		code = cmdServe(args, false)
 	case "setup":
@@ -102,83 +118,13 @@ func main() {
 		usage()
 		code = 2
 	}
-	os.Exit(code)
+	return code
 }
 
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	return fs
-}
-
-func cmdServe(args []string, setup bool) int {
-	fs := newFlags("serve")
-	profile := fs.String("profile", "", "game profile file")
-	port := fs.Int("port", 0, "control API port (default 47480)")
-	host := fs.String("host", "127.0.0.1", "listen address (beyond loopback every request needs the bearer token: easy-engine token)")
-	open := fs.Bool("open", false, "with a non-loopback --host: no token at all (anyone who can reach the port can use the engine)")
-	linger := fs.Duration("linger", 0, "keep running this long after the last parent exits")
-	var parents pidList
-	fs.Var(&parents, "parent-pid", "game pid to watch (repeatable)")
-	yieldOn := fs.Bool("yield-to-games", false, "unload the model while another program wants the card (a launcher game, a new GPU user), load again after")
-	yieldExcept := fs.String("yield-except", "", "comma-separated launcher app ids that never make the engine yield (the supported host's)")
-	yieldIgnore := fs.String("yield-ignore", "", "comma-separated process names that never make the engine yield")
-	yieldFloor := fs.Int("yield-floor-mib", 128, "MiB an already-running program may grow on the card before the engine yields")
-	yieldMin := fs.Int("yield-min-mib", 0, "MiB a new program must hold to make the engine yield by memory alone (0: any)")
-	yieldGrace := fs.Duration("yield-grace", 15*time.Second, "after a game exits, wait this long before loading again")
-	yieldSteady := fs.Duration("yield-steady", 60*time.Second, "load again beside a non-game program once its use has held this long")
-	yieldStrict := fs.Bool("yield-strict", false, "stay unloaded until every program that made the engine yield has exited")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	lingerSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "linger" {
-			lingerSet = true
-		}
-	})
-	if !setup && len(parents) == 0 {
-		fmt.Fprintln(os.Stderr, "serve needs --parent-pid (use `setup` for a run without a game)")
-		return 2
-	}
-	if note := dirs.Migrate(); note != "" { // once, before anything reads the data dir
-		fmt.Fprintln(os.Stderr, "easy-engine:", note)
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	var yc *run.YieldConfig
-	if *yieldOn {
-		yc = &run.YieldConfig{Except: splitList(*yieldExcept), Ignore: splitList(*yieldIgnore), MinNewMiB: *yieldMin}
-		yc.Policy.Floor, yc.Policy.Grace, yc.Policy.Steady, yc.Policy.Strict = *yieldFloor, *yieldGrace, *yieldSteady, *yieldStrict
-	}
-	o := app.Options{
-		Yield:       yc,
-		ProfilePath: *profile, ParentPIDs: parents, Host: *host, Port: *port,
-		Linger: *linger, LingerSet: lingerSet, Version: version, Open: *open,
-		DetachStdio: !setup,
-		Started: func(p int) {
-			if setup {
-				// The token (if the engine needs one) rides in the opened URL's fragment only; it is not printed.
-				tg := app.EngineTarget(dirs.Data(), *host, p)
-				fmt.Printf("Setup page: %s/\n", tg.Base())
-				openBrowser(app.SetupURL(dirs.Data(), tg))
-			}
-		},
-	}
-	res, err := app.Serve(ctx, o)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "easy-engine:", err)
-		return 1
-	}
-	if res.Attached {
-		if setup {
-			tg := app.EngineTarget(dirs.Data(), res.Host, res.Port)
-			fmt.Println("Engine already running:", tg.Base()+"/")
-			openBrowser(app.SetupURL(dirs.Data(), tg))
-		}
-		return 0
-	}
-	return 0
 }
 
 // splitList splits a comma-separated flag value, dropping empty items.

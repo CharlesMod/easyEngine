@@ -469,10 +469,13 @@ and gives no measured answer):
 ```
 llama-server -m <gguf> -ngl 999 [--n-cpu-moe N] -np <slots> -c <slots*ctx_per_slot>
   --no-kv-unified  (independent slots: each one gets exactly ctx_per_slot)
-  -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --no-webui --metrics --slots
+  -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --metrics --slots
   --temp T --top-k K --top-p P --min-p M --repeat-penalty R --dry-multiplier 0   (the model's `official` sampler profile)
   --host 127.0.0.1 --port <free port> -a <model id>
 ```
+
+The web UI stays on (llama-server's default; `--no-webui` is not passed): the engine serves it at
+`/chat/` (see "The chat window" below), so llama-server's random port never shows.
 
 The sampler flags make the model's official values llama-server's own defaults, so a client that
 sends no sampler fields still samples as the vendor intends (`docs/SAMPLERS.md`). They are

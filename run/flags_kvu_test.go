@@ -45,3 +45,23 @@ func TestBuildArgsSamplerDefaults(t *testing.T) {
 		t.Error("no profile, no sampler flags")
 	}
 }
+
+// The web UI is on: the engine serves it at /chat/ (api/chat.go), so --no-webui is never passed,
+// even when the binary lists it.
+func TestWebUIStaysOn(t *testing.T) {
+	known := map[string]bool{"-m": true, "-ngl": true, "-np": true, "-c": true, "--host": true, "--port": true,
+		"--no-webui": true, "--webui": true, "--no-ui": true, "--ui": true, "--metrics": true, "--slots": true}
+	args, dropped := BuildArgs("m.gguf", fit.Shape{Slots: 1, CtxPerSlot: 4096, KVType: "q4_0"}, "127.0.0.1", 1, "x", known, nil)
+	line := " " + strings.Join(args, " ") + " "
+	for _, bad := range []string{"--no-webui", "--no-ui"} {
+		if strings.Contains(line, bad) || strings.Contains(strings.Join(dropped, " "), bad) {
+			t.Errorf("%s must not be passed or reported: %s / %v", bad, line, dropped)
+		}
+	}
+	// The drop-unknown behaviour is unchanged for the flags that remain.
+	delete(known, "--metrics")
+	_, dropped = BuildArgs("m.gguf", fit.Shape{Slots: 1, CtxPerSlot: 4096, KVType: "q4_0"}, "127.0.0.1", 1, "x", known, nil)
+	if !strings.Contains(strings.Join(dropped, " "), "--metrics") {
+		t.Errorf("--metrics not listed by the binary must still be dropped: %v", dropped)
+	}
+}

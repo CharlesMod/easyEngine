@@ -55,7 +55,7 @@ valid 90 to 100 %); reflection is unchanged.
    release's help and dropped (and logged) if unknown; all exist in b12680.
 2. **Proxy policy** (any client: our agent, a player's tool, another game's agent). On every
    completion request (`/v1/chat/completions`, `/chat/completions`, `/v1/completions`,
-   `/completions`, `/completion`) the proxy reads `X-Hermes-Sampler` (`rp`, `structured`,
+   `/completions`, `/completion`) the proxy reads `X-Easy-Sampler` (`rp`, `structured`,
    `official`, or a game profile's name; missing or unknown means `rp`, unknown is logged) and
    applies `sampler_policy`:
    - `enforce` (default): replaces every sampler field in the request with the profile's values
@@ -72,7 +72,7 @@ valid 90 to 100 %); reflection is unchanged.
    `cache_prompt`, `id_slot`, `n_probs`, `logit_bias`, ...), and untouched fields keep their
    exact bytes. A body that is not a JSON object is forwarded as it came. Streaming is
    unchanged (the body is rewritten before the forward).
-3. **Visibility.** Every proxied response has `X-Hermes-Sampler-Applied: <profile>;<mode>`; when
+3. **Visibility.** Every proxied response has `X-Easy-Sampler-Applied: <profile>;<mode>`; when
    a request passed through the value is `none;<reason>` (`not-a-completion`, `off`,
    `<mode>;unknown-model`). `GET /engine/v1/status` has `sampler: {policy, active, model, basis,
    source, note, profiles}`; the setup page shows the profiles read-only and lets the policy be
@@ -94,7 +94,7 @@ In the game profile (`--profile file.json`, ENGINE.md §8) add `samplers`:
 The values use the catalog's field names (`temperature`, `top_k`, `top_p`, `min_p`, `typical_p`,
 `repeat_penalty`, `repeat_last_n`, `presence_penalty`, `frequency_penalty`, `dry_multiplier`,
 `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`). A request then sends
-`X-Hermes-Sampler: cold`. A name that equals a model profile (`rp`, `structured`) replaces
+`X-Easy-Sampler: cold`. A name that equals a model profile (`rp`, `structured`) replaces
 the model's for that game. Fields a profile omits fall back to the server defaults (official).
 
 ## What could not be confirmed without a GPU

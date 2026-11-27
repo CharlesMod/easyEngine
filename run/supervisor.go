@@ -607,13 +607,33 @@ func (s *Supervisor) setProgress(step string, p *Progress) {
 func (s *Supervisor) Run() {
 	s.settle()
 	if !s.cfg.NoAutoStart {
-		s.startAgent()
 		s.mu.Lock()
 		local := s.st.Mode == "local"
 		s.mu.Unlock()
-		if local {
+		// An agent the profile has and the data dir lacks is installed first, by itself: in
+		// external mode (no model install ever runs there), and beside a model that is installed
+		// (its agent was removed). With no model yet, the model's install job installs it.
+		needAgent := s.agentWanted() && !s.agentReady()
+		if needAgent && local {
+			_, needAgent = s.resolveInstall()
+		}
+		if !needAgent {
+			s.startAgent()
+		}
+		if local || needAgent {
 			s.wg.Add(1)
-			go func() { defer s.wg.Done(); s.Start() }()
+			go func() {
+				defer s.wg.Done()
+				if needAgent {
+					s.installAgent()
+					s.startAgent()
+				}
+				if local {
+					s.Start()
+				}
+			}()
+		}
+		if local {
 			s.resumeUpgrade()
 		}
 	}
@@ -835,12 +855,12 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.stopServerLocked()
 		s.opMu.Unlock()
 		s.setPhase("external", "Using your own endpoint")
-		s.restartAgent()
+		s.restartAgentInstalled()
 	case old != in.Mode:
 		s.restartAgent()
 		go s.Start()
 	case in.Mode == "external":
-		s.restartAgent()
+		s.restartAgentInstalled()
 	case kvChanged:
 		s.mu.Lock()
 		s.reshape = true

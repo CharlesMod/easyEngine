@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -35,6 +37,9 @@ func sameRoom(a, b roomRead) bool {
 	return a.room.NoGPU == b.room.NoGPU && d <= heldTolMiB && -d <= heldTolMiB
 }
 
+// roomDevicesMu guards roomDevices: a read of the room (its own goroutine) hears the globs too.
+var roomDevicesMu sync.RWMutex
+
 // roomDevices are the globs of the device nodes whose opens the room watch hears (a test points
 // them at a temp dir).
 var roomDevices = []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/card*"}
@@ -44,6 +49,7 @@ var roomDevices = []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/c
 var (
 	roomReadDone atomic.Pointer[func()]
 	roomOpensEnd atomic.Pointer[func()]
+	roomWordDone atomic.Pointer[func()] // a word of the nodes has been looked at (read or not)
 )
 
 func hook(p *atomic.Pointer[func()]) {
@@ -63,6 +69,10 @@ type roomWatch struct {
 	opensStop func()
 	exits     map[int]func() // strangers followed to their end, with what lets each go; nil: none
 	stopped   bool
+	listened  string // the nodes listened to, joined
+
+	kmu   sync.Mutex
+	known map[int]bool // the holders at the last look (not nvidia-smi, not ours)
 }
 
 func newRoomWatch(s *Supervisor) *roomWatch {
@@ -122,19 +132,52 @@ func (rw *roomWatch) held() (roomRead, bool) { return rw.level.Last() }
 // the card's device nodes.
 func (rw *roomWatch) arm() {
 	rw.mu.Lock()
-	defer rw.mu.Unlock()
 	if rw.armed || rw.stopped {
+		rw.mu.Unlock()
 		return
 	}
 	rw.armed = true
 	rw.baseline.Store(true)
 	rw.level.Arm()
 	rw.level.Now() // a second read at once, so the baseline holds without waiting a period
+	rw.mu.Unlock()
+	// The nodes come after the reads are on their way, and outside rw.mu: they take the
+	// supervisor's lock, which disarm holds before rw.mu. renew does the same, so a set found
+	// after a disarm is dropped there.
+	paths := rw.roomPaths()
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if rw.armed && !rw.stopped && rw.listened == "" {
+		rw.listenLocked(paths)
+	}
+}
+
+// roomPaths are the device nodes whose opens the room hears: the engine's adapter's (see
+// yield/os_linux.go adapterNodes), every GPU node while the adapter is not known.
+func (rw *roomWatch) roomPaths() []string {
+	if ns, ok := rw.s.holders.nodes(enginePCI(rw.s.yieldState())); ok && len(ns) > 0 {
+		return ns
+	}
 	var paths []string
-	for _, g := range roomDevices {
+	roomDevicesMu.RLock()
+	globs := roomDevices
+	roomDevicesMu.RUnlock()
+	for _, g := range globs {
 		m, _ := filepath.Glob(g)
 		paths = append(paths, m...)
 	}
+	return paths
+}
+
+// listenLocked starts the goroutine that hears the opens of roomPaths; the caller holds rw.mu
+// and has set armed. A listening already on foot is stopped first.
+func (rw *roomWatch) listenLocked(paths []string) {
+	if rw.opensStop != nil {
+		rw.opensStop()
+		rw.opensStop = nil
+	}
+	sort.Strings(paths)
+	rw.listened = strings.Join(paths, ",")
 	if len(paths) == 0 {
 		return
 	}
@@ -147,6 +190,7 @@ func (rw *roomWatch) arm() {
 	rw.opensStop = func() { stop(); once.Do(func() { close(done) }) }
 	go func() {
 		defer hook(&roomOpensEnd)
+		rw.opened(true) // who holds the nodes now: what the next word is compared with
 		for {
 			select {
 			case <-done:
@@ -157,10 +201,27 @@ func (rw *roomWatch) arm() {
 				if !ok {
 					return
 				}
-				rw.event()
+				rw.opened(false)
 			}
 		}
 	}()
+}
+
+// renew listens again when the nodes of the engine's adapter are not those listened to: the
+// event that says so is the room's own new reading (the engine's adapter, and so its pci, is
+// known or has changed: measure), never a clock.
+func (rw *roomWatch) renew() {
+	paths := rw.roomPaths() // before rw.mu, as in arm
+	sort.Strings(paths)
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if !rw.armed || rw.stopped {
+		return
+	}
+	if strings.Join(paths, ",") == rw.listened {
+		return
+	}
+	rw.listenLocked(paths)
 }
 
 // disarm lets the reading go when no model is loaded.
@@ -168,12 +229,60 @@ func (rw *roomWatch) disarm() {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	rw.armed = false
+	rw.listened = ""
 	rw.level.Disarm()
 	rw.s.sayGone("room.held", "")
 	if rw.opensStop != nil {
 		rw.opensStop()
 		rw.opensStop = nil
 	}
+}
+
+// opened is a word from the card's device nodes: somebody opened one. That says a program touched
+// the card, not that the room moved (a monitor that opens it, queries and exits leaves it as it
+// was), so the holders of the nodes are looked at, once for every watch (run/holders.go), and the
+// card is read only when a holder not ours has appeared or gone since the last look. A holder
+// that grows without opening anything is the level's to find. baseline only takes the holders.
+func (rw *roomWatch) opened(baseline bool) {
+	h := rw.s.holders
+	set := h.look(h.word(), enginePCI(rw.s.yieldState()))
+	moved := rw.holdersMoved(set)
+	if moved && !baseline {
+		rw.event()
+	}
+	hook(&roomWordDone)
+}
+
+// holdersMoved says whether the holders differ from those at the last look, and keeps these.
+// nvidia-smi is no holder (a monitor runs it every second or two: it allocates nothing a game
+// would miss, and a change it makes is never the room's).
+func (rw *roomWatch) holdersMoved(set map[int]string) bool {
+	next := map[int]bool{}
+	for pid, name := range set {
+		if !ignoredHolder(name) {
+			next[pid] = true
+		}
+	}
+	rw.kmu.Lock()
+	defer rw.kmu.Unlock()
+	moved := len(next) != len(rw.known)
+	for pid := range next {
+		if !rw.known[pid] {
+			moved = true
+		}
+	}
+	rw.known = next
+	return moved
+}
+
+func ignoredHolder(name string) bool {
+	n := normName(name)
+	for _, b := range builtinIgnore {
+		if n == b {
+			return true
+		}
+	}
+	return false
 }
 
 // event is a word that the room may have moved (a stranger's open or end, the host's word, an

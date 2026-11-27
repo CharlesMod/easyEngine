@@ -80,3 +80,43 @@ func smiKind(t string) string {
 	}
 	return ""
 }
+
+// smiCSVQuery is the cheap read of the card: the adapters, one line each (~0.004 s against the
+// XML's ~0.09 s and 125 KB). pci.bus_id and uuid ride along so that `-q -d PIDS` can be matched to
+// an adapter as the XML's own gpu elements are.
+var smiCSVQuery = []string{"--query-gpu=index,pci.bus_id,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits"}
+
+// parseNvidiaCSV parses smiCSVQuery's output. Adapters take Index in line order (nvidia-smi's own
+// GPU index, as the XML's document order is). The name may hold commas: the first three fields and
+// the last two are fixed. A size that is not a number ("[N/A]") leaves the adapter's use -1, its
+// size 0, as the XML's does.
+func parseNvidiaCSV(b []byte) ([]Adapter, error) {
+	var as []Adapter
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, ",")
+		if len(f) < 6 {
+			return nil, fmt.Errorf("nvidia-smi csv: short line %q", line)
+		}
+		for i := range f {
+			f[i] = strings.TrimSpace(f[i])
+		}
+		n := len(f)
+		a := Adapter{Index: len(as), Vendor: "nvidia", VendorID: 0x10de, UsedMiB: -1,
+			PCI: normPCI(f[1]), UUID: f[2], Name: strings.Join(f[3:n-2], ", "), Source: "nvidia-smi"}
+		if v, err := strconv.Atoi(f[n-2]); err == nil {
+			a.DedicatedMiB = v
+		}
+		if v, err := strconv.Atoi(f[n-1]); err == nil {
+			a.UsedMiB = v
+		}
+		as = append(as, a)
+	}
+	if len(as) == 0 {
+		return nil, fmt.Errorf("nvidia-smi csv: no gpu lines")
+	}
+	return as, nil
+}

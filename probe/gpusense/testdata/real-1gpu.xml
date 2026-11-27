@@ -1,0 +1,97 @@
+<?xml version="1.0" ?>
+<!DOCTYPE nvidia_smi_log SYSTEM "nvsmi_device_v12.dtd">
+<nvidia_smi_log>
+	<attached_gpus>1</attached_gpus>
+	<gpu id="00000000:01:00.0">
+		<product_name>NVIDIA GeForce RTX 5080</product_name>
+		<uuid>GPU-00000000-0000-0000-0000-000000000000</uuid>
+		<fb_memory_usage>
+			<total>16303 MiB</total>
+			<reserved>404 MiB</reserved>
+			<used>11325 MiB</used>
+			<free>4575 MiB</free>
+		</fb_memory_usage>
+		<processes>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2001</pid>
+				<type>C+G</type>
+				<process_name>/usr/bin/app1</process_name>
+				<used_memory>74 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2002</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app2</process_name>
+				<used_memory>155 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2003</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app3</process_name>
+				<used_memory>6 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2004</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app4</process_name>
+				<used_memory>22 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2005</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app5</process_name>
+				<used_memory>8 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2006</pid>
+				<type>C</type>
+				<process_name>/opt/engine/backends/llama-server</process_name>
+				<used_memory>10338 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2007</pid>
+				<type>C+G</type>
+				<process_name>/usr/bin/app7</process_name>
+				<used_memory>268 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2008</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app8</process_name>
+				<used_memory>6 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2009</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app9</process_name>
+				<used_memory>30 MiB</used_memory>
+			</process_info>
+			<process_info>
+				<gpu_instance_id>N/A</gpu_instance_id>
+				<compute_instance_id>N/A</compute_instance_id>
+				<pid>2010</pid>
+				<type>G</type>
+				<process_name>/usr/bin/app10</process_name>
+				<used_memory>36 MiB</used_memory>
+			</process_info>
+		</processes>
+	</gpu>
+</nvidia_smi_log>

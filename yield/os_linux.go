@@ -177,16 +177,27 @@ func (o *linuxOS) Adapter(pci string) {
 	o.mu.Unlock()
 }
 
-// adapterNodes reads the nodes of the adapter at pci (nil: none found).
+// adapterNodes reads the nodes of the adapter at pci (nil: none found), as paths under o.dev.
+//
+// An NVIDIA adapter is listened to at /dev/nvidia<minor> alone, not at its DRM nodes: a program
+// that takes memory on the card has the NVIDIA driver's client open the device node (every
+// holder of a dri node of an nvidia-driven adapter seen on a desktop also held
+// /dev/nvidia<minor>, and a model server holds that node with no dri node at all), so the dri
+// nodes add no knowledge. Where the minor
+// cannot be read, every /dev/nvidia<n> node is taken, still no dri node. A card of another
+// driver (amdgpu, i915, xe, ...) has its own dri nodes only.
 func (o *linuxOS) adapterNodes(pci string) map[string]bool {
-	nodes := map[string]bool{}
+	at := func(rel string) string { return filepath.Join(o.dev, rel) }
+	minors := map[string]bool{}
 	if b, err := os.ReadFile(filepath.Join(o.drv, pci, "information")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			if v, ok := strings.CutPrefix(line, "Device Minor:"); ok {
-				nodes["/dev/nvidia"+strings.TrimSpace(v)] = true
+				minors[at("nvidia"+strings.TrimSpace(v))] = true
 			}
 		}
 	}
+	dri := map[string]bool{}
+	nvidiaDriven := false
 	ents, _ := os.ReadDir(o.sys)
 	for _, e := range ents {
 		n := e.Name()
@@ -194,8 +205,35 @@ func (o *linuxOS) adapterNodes(pci string) map[string]bool {
 			continue
 		}
 		if dev, err := filepath.EvalSymlinks(filepath.Join(o.sys, n, "device")); err == nil && strings.EqualFold(filepath.Base(dev), pci) {
-			nodes["/dev/dri/"+n] = true
+			dri[at("dri/"+n)] = true
+			if d, err := os.Readlink(filepath.Join(o.sys, n, "device", "driver")); err == nil && filepath.Base(d) == "nvidia" {
+				nvidiaDriven = true
+			}
 		}
+	}
+	if nvidiaDriven {
+		have := map[string]bool{}
+		for m := range minors {
+			if _, err := os.Stat(m); err == nil {
+				have[m] = true
+			}
+		}
+		if len(have) > 0 {
+			return have
+		}
+		if len(minors) == 0 { // the minor cannot be read: every NVIDIA node, no dri node
+			ms, _ := filepath.Glob(at("nvidia[0-9]*"))
+			for _, m := range ms {
+				have[m] = true
+			}
+			if len(have) > 0 {
+				return have
+			}
+		}
+	}
+	nodes := minors
+	for n := range dri {
+		nodes[n] = true
 	}
 	if len(nodes) > 0 {
 		return nodes
@@ -209,15 +247,12 @@ func (o *linuxOS) wanted(link string) bool {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.nodes == nil || o.nodes[link]
+	return o.nodes == nil || o.nodes[filepath.Join(o.dev, strings.TrimPrefix(link, "/dev"))]
 }
 
 func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 	out := map[int]string{}
 	for _, pid := range o.pids() {
-		if skip != nil && skip(pid) {
-			continue
-		}
 		dir := filepath.Join(o.root, strconv.Itoa(pid), "fd")
 		ents, err := os.ReadDir(dir)
 		if err != nil {
@@ -225,7 +260,11 @@ func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 		}
 		for _, e := range ents {
 			if l, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && o.wanted(l) {
-				out[pid] = o.name(pid)
+				// skip is asked only of a holder: it may walk the process tree (Under), which
+				// costs more than the one readdir that rules out nearly every process
+				if skip == nil || !skip(pid) {
+					out[pid] = o.name(pid)
+				}
 				break
 			}
 		}

@@ -9,9 +9,15 @@ func (s *Supervisor) RoomEvent()  { s.card.event() }
 
 // SetRoomDevices points the room's device-open watch at these globs; it returns the undo.
 func SetRoomDevices(globs []string) func() {
+	roomDevicesMu.Lock()
 	old := roomDevices
 	roomDevices = globs
-	return func() { roomDevices = old }
+	roomDevicesMu.Unlock()
+	return func() {
+		roomDevicesMu.Lock()
+		roomDevices = old
+		roomDevicesMu.Unlock()
+	}
 }
 
 // SetRoomReadDone sets what is called when a read of the room has ended (nil: nothing); SetRoomOpensEnd
@@ -24,4 +30,24 @@ func SetRoomReadDone(f func()) func() {
 func SetRoomOpensEnd(f func()) func() {
 	roomOpensEnd.Store(&f)
 	return func() { roomOpensEnd.Store(nil) }
+}
+
+// SetRoomWordDone sets what is called when a word of the device nodes has been looked at, whether
+// a read followed or not; SetHolderScan replaces the scan of who holds the nodes (pid -> name).
+// Each returns the undo.
+func SetRoomWordDone(f func()) func() {
+	roomWordDone.Store(&f)
+	return func() { roomWordDone.Store(nil) }
+}
+
+func SetHolderScan(f func() map[int]string) func() {
+	old := holderScanHook.Swap(&f)
+	return func() { holderScanHook.Store(old) }
+}
+
+// RoomListened is the nodes the room listens to now, joined by commas.
+func (s *Supervisor) RoomListened() string {
+	s.card.mu.Lock()
+	defer s.card.mu.Unlock()
+	return s.card.listened
 }

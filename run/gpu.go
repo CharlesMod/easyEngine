@@ -143,6 +143,7 @@ func (s *Supervisor) measure(ctx context.Context, hw probe.Hardware, ours []int)
 	s.gpu.sum = &cp
 	s.say("room", "", cp) // a reading: said only when it changed
 	s.mu.Unlock()
+	s.card.renew() // the engine's adapter may be known or changed: its nodes are what is listened to
 	return sensed{pic: pic, sum: sum, gpu: gi}
 }
 

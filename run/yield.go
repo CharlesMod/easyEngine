@@ -124,20 +124,7 @@ func (s *Supervisor) yieldState() yieldView {
 func (s *Supervisor) yieldExcluded(o yield.OS, except []yield.Launch) func(pid int, name string) bool {
 	y := s.cfg.Yield
 	self := os.Getpid()
-	host, _ := s.hostInfo()
-	fixed := map[int]bool{self: true}
-	for _, p := range s.ours.pids() {
-		fixed[p] = true
-	}
-	if p := int(s.launching.v.Load()); p > 0 {
-		fixed[p] = true
-	}
-	if p := s.agent.status().Pid; p > 0 {
-		fixed[p] = true
-	}
-	if host.PID > 0 {
-		fixed[host.PID] = true
-	}
+	fixed := s.fixedPids()
 	ignore := map[string]bool{}
 	for _, n := range append(append([]string{}, builtinIgnore...), y.Ignore...) {
 		ignore[normName(n)] = true
@@ -153,6 +140,26 @@ func (s *Supervisor) yieldExcluded(o yield.OS, except []yield.Launch) func(pid i
 		}
 		return false
 	}
+}
+
+// fixedPids are the pids that are the engine's or the host's own: the engine, its model server,
+// the one being launched, its agent, and the host program.
+func (s *Supervisor) fixedPids() map[int]bool {
+	host, _ := s.hostInfo()
+	fixed := map[int]bool{os.Getpid(): true}
+	for _, p := range s.ours.pids() {
+		fixed[p] = true
+	}
+	if p := int(s.launching.v.Load()); p > 0 {
+		fixed[p] = true
+	}
+	if p := s.agent.status().Pid; p > 0 {
+		fixed[p] = true
+	}
+	if host.PID > 0 {
+		fixed[host.PID] = true
+	}
+	return fixed
 }
 
 // builtinIgnore is never a reason to yield: nvidia-smi opens the card to read it (the engine,
@@ -259,7 +266,7 @@ func (r *yieldReactor) wake() {
 func (s *Supervisor) yieldLoop() {
 	r := newYieldReactor(s)
 	defer r.close()
-	w, err := s.hub.Wake("phase", "yield", "model")
+	w, err := s.hub.Wake("phase", "yield", "model", "room") // "room": the engine's adapter may be known or changed, and so its nodes
 	if err != nil {
 		s.logf("yield: %v", err)
 		return
@@ -315,6 +322,20 @@ func (r *yieldReactor) lookLocked(v yieldView) (launches []yield.Launch, skip fu
 	skip = r.s.yieldExcluded(r.o, except)
 	openers = r.o.Openers(func(pid int) bool { return skip(pid, "") })
 	return
+}
+
+// wordLocked is lookLocked for an open word, which needs the filter and not the holders: the
+// scan of who holds the device is the supervisor's, shared with the room's word. The caller holds
+// osMu.
+func (r *yieldReactor) wordLocked(v yieldView) (skip func(int, string) bool) {
+	if pci := enginePCI(v); pci != "" {
+		r.o.Adapter(pci)
+	}
+	if r.armed.Load() && r.nodesMoved() {
+		r.wake()
+	}
+	_, except := r.split(r.o.Launches())
+	return r.s.yieldExcluded(r.o, except)
 }
 
 // read is the level's reading: memory on the engine's adapter (the one thing that has no word on
@@ -390,9 +411,11 @@ func (r *yieldReactor) opened() {
 		return
 	}
 	v := r.s.yieldState()
+	ticket := r.s.holders.word()
 	r.osMu.Lock()
-	_, skip, openers := r.lookLocked(v)
+	skip := r.wordLocked(v)
 	r.osMu.Unlock()
+	openers := r.s.holders.look(ticket, enginePCI(v)) // one scan serves this and the room's word
 	fresh := false
 	next := map[int]bool{}
 	r.mu.Lock()

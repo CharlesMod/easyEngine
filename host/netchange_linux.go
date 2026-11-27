@@ -12,8 +12,8 @@ import (
 )
 
 // NetworkChanges is a channel of one coalesced signal for each time the
-// system says a network link or address changed (the way "the network came
-// back" is heard), and a func that lets the watch go. The channel is not
+// network's links and addresses are not what they were at the last signal (the way "the network
+// came back" is heard; an address's lifetime refreshed or announced again is no change), and a func that lets the watch go. The channel is not
 // closed. On linux it is a netlink route socket.
 func NetworkChanges() (<-chan struct{}, func(), error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, unix.NETLINK_ROUTE)
@@ -30,12 +30,16 @@ func NetworkChanges() (<-chan struct{}, func(), error) {
 	}
 	f := os.NewFile(uintptr(fd), "netlink")
 	c := make(chan struct{}, 1)
+	var tr netTracker
+	tr.changed(readNetSet) // what stands now: the first message is compared with it
 	go func() {
 		buf := make([]byte, 64<<10)
 		for {
 			_, err := f.Read(buf)
 			change, end := readVerdict(err)
-			if change {
+			// A message (or ENOBUFS: some were dropped) says something may have moved: signal
+			// only if the links that are up and their addresses are not what was last signalled.
+			if change && tr.changed(readNetSet) {
 				signal(c)
 			}
 			if end {

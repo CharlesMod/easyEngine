@@ -132,6 +132,8 @@ type Settings struct {
 	SamplerPolicy string `json:"sampler_policy,omitempty"`
 	// Streamer is the token streamer, on | off (docs/STREAMING.md); empty keeps the stored value.
 	Streamer string `json:"streamer,omitempty"`
+	// KeepContext is on | off | always; empty keeps the stored value.
+	KeepContext string `json:"keep_context,omitempty"`
 }
 
 // Route tells the proxy where a request goes.
@@ -949,7 +951,11 @@ func (s *Supervisor) Settings() Settings {
 	if streamer == "" {
 		streamer = "on"
 	}
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer}
+	keepContext := s.sf.keepContext
+	if keepContext == "" {
+		keepContext = "on"
+	}
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext}
 }
 
 // LingerS is the stored linger setting.
@@ -987,7 +993,13 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	if in.Streamer != "" && in.Streamer != "on" && in.Streamer != "off" {
 		return fmt.Errorf("streamer must be on or off")
 	}
+	if in.KeepContext != "" && in.KeepContext != "on" && in.KeepContext != "off" && in.KeepContext != "always" {
+		return fmt.Errorf("keep_context must be on, off or always")
+	}
 	s.mu.Lock()
+	if in.KeepContext != "" {
+		s.sf.keepContext = in.KeepContext
+	}
 	if in.Streamer != "" { // read by the proxy per request: applies to the next one
 		s.sf.streamer = in.Streamer
 	}

@@ -148,6 +148,7 @@ type settingsFile struct {
 	listen, startListen settings.Listen
 	yield, startYield   settings.Yield
 	streamer            string // on | off: read by the proxy per request, so an edit applies at once
+	keepContext         string // on | off | always: "" is on
 	err                 string // settings.json cannot be used: the previous settings stand
 	note                string // a listen or yield edit that waits for a restart
 }
@@ -155,6 +156,7 @@ type settingsFile struct {
 func (f *settingsFile) begin(file settings.File, serr *settings.Error) {
 	f.listen, f.startListen, f.yield, f.startYield = file.Listen, file.Listen, file.Yield, file.Yield
 	f.streamer = file.Streamer
+	f.keepContext = file.KeepContext
 	if serr != nil {
 		f.err = serr.Error() + "; using the defaults"
 	}
@@ -180,7 +182,7 @@ func (s *Supervisor) fileLocked() settings.File {
 	return settings.File{
 		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
 		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
-		Streamer: s.sf.streamer, Listen: s.sf.listen, Yield: s.sf.yield,
+		Streamer: s.sf.streamer, KeepContext: s.sf.keepContext, Listen: s.sf.listen, Yield: s.sf.yield,
 	}.Normalize()
 }
 
@@ -189,6 +191,16 @@ func (s *Supervisor) Streamer() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sf.streamer != "off"
+}
+
+// KeepContext is the keep_context setting: "on", "off" or "always" (settings.json; "" is "on").
+func (s *Supervisor) KeepContext() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sf.keepContext == "" {
+		return "on"
+	}
+	return s.sf.keepContext
 }
 
 // SettingsFile is the settings as the engine holds them (the API key included: for the
@@ -272,6 +284,7 @@ func (s *Supervisor) ReloadSettings() {
 	}
 	s.mu.Lock()
 	s.sf.listen, s.sf.yield, s.sf.streamer = f.Listen, f.Yield, f.Streamer
+	s.sf.keepContext = f.KeepContext
 	var what []string
 	if f.Listen != s.sf.startListen {
 		what = append(what, "listen address")

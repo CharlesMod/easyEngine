@@ -156,22 +156,19 @@ func TestShrinkWhenIdleNeverMidRequest(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := ready(t, e)
-	e.Touch("busy")  // a slot is processing a line
-	e.SetUsed(16000) // the player loaded a heavy save: free 384 MiB < margin 655
+	done := s.Begin() // a request is processing a line
+	e.SetUsed(16000)  // the player loaded a heavy save: free 384 MiB < margin 655
 	e.SetOthers(8000)
-	time.Sleep(600 * time.Millisecond) // many watchdog ticks
-	if n := len(e.Starts()); n != 1 {
-		t.Fatalf("restarted while busy: %v", e.Starts())
-	}
 	// a held shortfall this large does not wait for a pause: new requests wait ("Loading
 	// model") while the line in flight finishes, then the model shrinks
-	if s.Phase() != "resizing" {
-		t.Fatalf("phase %s, want resizing (draining)", s.Phase())
+	testkit.WaitPhase(t, s, "resizing", 10*time.Second)
+	if n := len(e.Starts()); n != 1 {
+		t.Fatalf("restarted while busy: %v", e.Starts())
 	}
 	if r := s.Route(); r.Kind != "unavailable" || r.Message != "Loading model" {
 		t.Fatalf("route while draining = %+v", r)
 	}
-	e.Remove("busy")
+	done()
 	testkit.WaitFor(t, 10*time.Second, "shrink once idle", func() bool { return len(e.Starts()) >= 2 })
 	e.SetUsed(0)
 	testkit.WaitPhase(t, s, "ready", 10*time.Second)
@@ -196,13 +193,15 @@ func TestGrowWhenIdleNeverMidRequest(t *testing.T) {
 	if c0 >= 196608 {
 		t.Fatalf("expected a reduced first shape, got %v", e.Starts())
 	}
-	e.Touch("busy")
+	done := s.Begin()
 	e.SetOthers(0) // room is back, but a line is being served
-	time.Sleep(900 * time.Millisecond)
+	s.RoomMoved()  // the stranger's word
+	testkit.WaitFor(t, 10*time.Second, "the room held", func() bool { r, ok := s.HeldReserve(); return ok && r == 0 })
+	s.React() // the engine has looked at the room that came back
 	if n := len(e.Starts()); n != 1 {
 		t.Fatalf("grew while busy: %v", e.Starts())
 	}
-	e.Remove("busy")
+	done()
 	testkit.WaitFor(t, 10*time.Second, "grow once idle for GrowIdle", func() bool { return len(e.Starts()) >= 2 })
 	testkit.WaitPhase(t, s, "ready", 10*time.Second)
 	c1, _ := strconv.Atoi(testkit.Field(e.Starts()[1], "c"))
@@ -242,23 +241,65 @@ func TestFailedGrowGoesBack(t *testing.T) {
 	}
 }
 
-func TestHealthMissesRestart(t *testing.T) {
+// A server that says nothing while a request is in flight is asked /health once when the
+// watchdog for silence fires; not answering, it is restarted.
+func TestHungServerRestarts(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
 	cfg := e.Config()
 	cfg.HTTP = nil
-	cfg.HealthMisses = 2
+	cfg.HangSilence = 300 * time.Millisecond
 	s := e.StartSup(withShortHTTP(cfg))
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	pid, _ := strconv.Atoi(testkit.Field(e.Starts()[0], "pid"))
+	done := s.Begin() // a request in flight
+	defer done()
 	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil { // alive but not answering
 		t.Fatal(err)
 	}
-	testkit.WaitFor(t, 15*time.Second, "restart after health misses", func() bool { return len(e.Starts()) >= 2 })
+	testkit.WaitFor(t, 15*time.Second, "restart after the silence", func() bool { return len(e.Starts()) >= 2 })
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	if s.Status().Restarts < 1 {
 		t.Fatal("restart not counted")
+	}
+	found := false
+	for _, m := range s.Status().Errors {
+		found = found || strings.Contains(m, "said nothing")
+	}
+	if !found {
+		t.Fatalf("errors = %v", s.Status().Errors)
+	}
+}
+
+// A server that is quiet with nothing in flight is never asked anything: the watchdog for
+// silence is armed only while requests are in flight.
+func TestQuietIdleServerIsLeftAlone(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	e.InstallFake()
+	cfg := e.Config()
+	cfg.HTTP = nil
+	cfg.HangSilence = 50 * time.Millisecond
+	s := e.StartSup(withShortHTTP(cfg))
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	pid, _ := strconv.Atoi(testkit.Field(e.Starts()[0], "pid"))
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(pid, syscall.SIGCONT)
+	from := testkit.Mark(t, s, "before")
+	done := s.Begin() // a request begins and ends at once: the silence is disarmed again
+	done()
+	// named moment: well past HangSilence; a watchdog left armed would have fired by now
+	past := time.NewTimer(10 * cfg.HangSilence)
+	<-past.C
+	s.React()
+	if hs := testkit.Said(t, s, from, 0, "mind.hang"); len(hs) != 0 {
+		t.Fatalf("a quiet idle server was asked /health: %v", hs)
+	}
+	if n := len(e.Starts()); n != 1 || s.Phase() != "ready" {
+		t.Fatalf("a quiet idle server was restarted: %v %s", e.Starts(), s.Phase())
 	}
 }
 
@@ -280,7 +321,7 @@ func TestStopSleepWake(t *testing.T) {
 	if err := s.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	// a stopped server is not woken by a request: Route starts nothing
 	if r := s.Route(); r.Kind != "unavailable" || s.Phase() != "sleeping" {
 		t.Fatalf("stopped server must stay stopped: %+v %s", r, s.Phase())
 	}

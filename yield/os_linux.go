@@ -2,15 +2,15 @@ package yield
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 // gpuNode says whether a /proc/<pid>/fd link names a GPU device a program must open before it
@@ -24,14 +24,17 @@ func gpuNode(link string) bool {
 }
 
 type linuxOS struct {
-	root  string
-	sys   string // /sys and /proc/driver roots, for mapping nodes to an adapter
-	drv   string
+	root string
+	sys  string // /sys and /proc/driver roots, for mapping nodes to an adapter
+	drv  string
+	dev  string
+
+	mu    sync.Mutex      // pci and nodes: Adapter (the level's read) and Watch (the reactor) meet
 	nodes map[string]bool // the engine adapter's nodes; nil: any GPU node
 	pci   string
-	ino   int // inotify fd, -1 when unavailable
-	seen  map[int]seenProc
-	now   func() time.Time
+
+	seen map[int]seenProc
+	now  func() time.Time
 }
 
 // seenProc caches what a pid's argv said, so a scan reads only new pids' cmdline. A pid is
@@ -43,8 +46,8 @@ type seenProc struct {
 
 const youngProc = 2 * time.Second
 
-// NewOS watches the real machine. On Linux, device opens wake Wait through inotify IN_OPEN
-// on /dev/nvidia<N>, /dev/dri/renderD* and /dev/dri/card*.
+// NewOS watches the real machine. On Linux, device opens are heard by Watch (host.Opens) on
+// /dev/nvidia<N>, /dev/dri/renderD* and /dev/dri/card*.
 func NewOS() OS {
 	o := newLinuxOS("/proc", "/dev")
 	o.sys, o.drv = "/sys/class/drm", "/proc/driver/nvidia/gpus"
@@ -52,69 +55,57 @@ func NewOS() OS {
 }
 
 func newLinuxOS(root, dev string) *linuxOS {
-	o := &linuxOS{root: root, ino: -1, seen: map[int]seenProc{}, now: time.Now}
-	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
-	if err != nil {
-		return o
+	return &linuxOS{root: root, dev: dev, seen: map[int]seenProc{}, now: time.Now}
+}
+
+func (o *linuxOS) Close() {}
+
+// Nodes are the device nodes whose opens say another program took the card: the engine's
+// adapter's (once Adapter knew it), else every NVIDIA and DRM node under /dev.
+func (o *linuxOS) Nodes() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.nodesLocked()
+}
+
+func (o *linuxOS) nodesLocked() []string {
+	if len(o.nodes) > 0 {
+		out := make([]string, 0, len(o.nodes))
+		for n := range o.nodes {
+			out = append(out, n)
+		}
+		sort.Strings(out)
+		return out
 	}
-	n := 0
+	var out []string
 	for _, pat := range []string{"nvidia[0-9]*", "dri/renderD*", "dri/card*"} {
-		ms, _ := filepath.Glob(filepath.Join(dev, pat))
+		ms, _ := filepath.Glob(filepath.Join(o.dev, pat))
 		for _, m := range ms {
-			if _, err := unix.InotifyAddWatch(fd, m, unix.IN_OPEN); err == nil {
-				n++
+			if gpuNode(filepath.Join("/dev", strings.TrimPrefix(m, o.dev))) {
+				out = append(out, m)
 			}
 		}
 	}
-	if n == 0 {
-		unix.Close(fd)
-		return o
-	}
-	o.ino = fd
-	return o
+	sort.Strings(out)
+	return out
 }
 
-func (o *linuxOS) Close() {
-	if o.ino >= 0 {
-		unix.Close(o.ino)
-		o.ino = -1
+// Watch is host.Opens on Nodes: no time cap, the kernel says when a program opens one.
+func (o *linuxOS) Watch() Words {
+	paths := o.Nodes()
+	if len(paths) == 0 {
+		return Words{}
 	}
+	ch, stop, err := host.Opens(paths)
+	if err != nil {
+		return Words{}
+	}
+	return Words{Opens: ch, Stop: stop, Set: strings.Join(paths, ",")}
 }
 
-func (o *linuxOS) Drain() {
-	if o.ino < 0 {
-		return
-	}
-	buf := make([]byte, 4096)
-	for {
-		if n, err := unix.Read(o.ino, buf); n <= 0 || err != nil {
-			return
-		}
-	}
-}
-
-func (o *linuxOS) Wait(ctx context.Context, d time.Duration) bool {
-	if o.ino < 0 {
-		return sleepCtx(ctx, d)
-	}
-	end := time.Now().Add(d)
-	for {
-		left := time.Until(end)
-		if left <= 0 || ctx.Err() != nil {
-			return false
-		}
-		ms := int(min(left, 250*time.Millisecond) / time.Millisecond)
-		fds := []unix.PollFd{{Fd: int32(o.ino), Events: unix.POLLIN}}
-		n, err := unix.Poll(fds, max(ms, 1))
-		if err != nil && err != syscall.EINTR {
-			return sleepCtx(ctx, left)
-		}
-		if n > 0 {
-			o.Drain()
-			return true
-		}
-	}
-}
+// NodeSet names the nodes Watch would watch now, in the form Words.Set has: the caller compares
+// the two to know the watch is on other nodes than the adapter's now.
+func (o *linuxOS) NodeSet() string { return strings.Join(o.Nodes(), ",") }
 
 func (o *linuxOS) pids() []int {
 	ents, err := os.ReadDir(o.root)
@@ -130,7 +121,7 @@ func (o *linuxOS) pids() []int {
 	return out
 }
 
-// Launches is cheap enough for every 250 ms: one readdir of /proc, and cmdline reads only
+// Launches is cheap (the host watchdog reads it every period): one readdir of /proc, and cmdline reads only
 // for pids that are new or young.
 func (o *linuxOS) Launches() []Launch {
 	now := o.now()
@@ -171,13 +162,23 @@ func (o *linuxOS) Launches() []Launch {
 // resolves to that address.
 func (o *linuxOS) Adapter(pci string) {
 	pci = strings.ToLower(strings.TrimSpace(pci))
-	if pci == o.pci {
+	o.mu.Lock()
+	same, known := pci == o.pci, o.nodes != nil
+	o.mu.Unlock()
+	if same && known { // an address whose nodes were not found is looked at again: they may appear
 		return
 	}
-	o.pci, o.nodes = pci, nil
-	if pci == "" || o.sys == "" {
-		return
+	var found map[string]bool
+	if pci != "" && o.sys != "" {
+		found = o.adapterNodes(pci)
 	}
+	o.mu.Lock()
+	o.pci, o.nodes = pci, found
+	o.mu.Unlock()
+}
+
+// adapterNodes reads the nodes of the adapter at pci (nil: none found).
+func (o *linuxOS) adapterNodes(pci string) map[string]bool {
 	nodes := map[string]bool{}
 	if b, err := os.ReadFile(filepath.Join(o.drv, pci, "information")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
@@ -197,14 +198,17 @@ func (o *linuxOS) Adapter(pci string) {
 		}
 	}
 	if len(nodes) > 0 {
-		o.nodes = nodes
+		return nodes
 	}
+	return nil
 }
 
 func (o *linuxOS) wanted(link string) bool {
 	if !gpuNode(link) {
 		return false
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.nodes == nil || o.nodes[link]
 }
 

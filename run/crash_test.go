@@ -41,8 +41,8 @@ func writeCtl(t *testing.T, e *testkit.Env, name, body string) {
 	}
 }
 
-// A crash with no memory error in its last words restarts the same shape after the first
-// backoff, and the status says so.
+// A crash with no memory error in its last words restarts the same shape at once, and the
+// status says so.
 func TestNonOOMCrashRestartsSameShape(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
@@ -64,38 +64,39 @@ func TestNonOOMCrashRestartsSameShape(t *testing.T) {
 	}
 }
 
-// A start that keeps failing retries with a growing wait, never in a tight loop, says how many
-// times it failed, and recovers by itself once the cause goes; a stable run clears the record.
-func TestFailedStartRetriesWithBackoff(t *testing.T) {
+// A start that keeps failing is tried again once at once, then waits for a word that could
+// change the outcome (no cadence, never a tight loop), says how many times it failed and what it
+// waits for, and starts on the first word once the cause is gone; a stable run clears the record.
+func TestFailedStartRetriesOnceThenWaitsForAWord(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
 	e.Touch("loadfail")
 	cfg := e.Config()
-	cfg.CrashBackoff = []time.Duration{50 * time.Millisecond, 150 * time.Millisecond, 400 * time.Millisecond}
 	cfg.CrashQuick = 300 * time.Millisecond
 	s := e.StartSup(cfg)
-	testkit.WaitFor(t, 10*time.Second, "three failed starts", func() bool {
+	testkit.WaitFor(t, 10*time.Second, "two failed starts", func() bool {
 		st := s.Status()
-		return st.Phase == "error" && st.Recovery != nil && st.Recovery.Failures >= 3
+		return st.Phase == "error" && st.Recovery != nil && st.Recovery.Failures >= 2
 	})
 	st := s.Status()
-	if st.Recovery == nil || st.Recovery.Failures < 3 || !strings.Contains(st.Message, "in a row") {
+	if st.Recovery.Failures != 2 || st.Recovery.WaitingFor == "" || st.Recovery.RetryInS != 0 || !strings.Contains(st.Message, "waiting for") {
 		t.Fatalf("status = %s %q %+v", st.Phase, st.Message, st.Recovery)
 	}
-	// at the longest wait (400ms) the next second holds at most three more tries
-	n := len(e.Starts())
-	time.Sleep(time.Second)
-	if more := len(e.Starts()) - n; more > 3 || more < 1 {
-		t.Fatalf("%d tries in a second at a 400ms backoff", more)
+	if n := len(e.Starts()); n != 2 {
+		t.Fatalf("%d starts, want the first and one retry at once: %v", n, e.Starts())
 	}
 	e.Remove("loadfail")
+	s.Route() // a request at the door is the word
 	testkit.WaitPhase(t, s, "ready", 10*time.Second)
+	if n := len(e.Starts()); n != 3 {
+		t.Fatalf("%d starts, want exactly one more on the word: %v", n, e.Starts())
+	}
 	testkit.WaitFor(t, 5*time.Second, "the record cleared after a stable run", func() bool { return s.Status().Recovery == nil })
 }
 
-// The model not fitting beside other apps is not given up on: the engine looks again slowly and
-// starts by itself once they let go of the card.
+// The model not fitting beside other apps is not given up on: the engine waits for a word that
+// the room may have changed and starts once they let go of the card.
 func TestNoFitWaitsForTheCard(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
@@ -104,22 +105,28 @@ func TestNoFitWaitsForTheCard(t *testing.T) {
 	s := e.StartSup(e.Config())
 	testkit.WaitPhase(t, s, "error", 10*time.Second)
 	st := s.Status()
-	if !strings.Contains(st.Message, "does not fit") || st.Recovery == nil {
+	if !strings.Contains(st.Message, "does not fit") || st.Recovery == nil || st.Recovery.WaitingFor == "" {
 		t.Fatalf("status = %q %+v", st.Message, st.Recovery)
 	}
 	if len(e.Starts()) != 0 {
 		t.Fatalf("started a server that cannot fit: %v", e.Starts())
 	}
 	e.SetOthers(0)
+	s.Nudge("the game ended") // the word (in a real run: the game's end, by host.Exits)
 	testkit.WaitPhase(t, s, "ready", 10*time.Second)
 }
 
 // The same shape crashing soon after it starts, again and again, is read as a memory problem:
-// one step down after CrashSteps, and the engine stays below the shape that kept dying.
+// one restart at once, one step down after CrashSteps (2), and the engine stays below the shape
+// that kept dying.
 func TestQuickCrashesStepDownOnce(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
-	s := ready(t, e)
+	e.InstallFake()
+	cfg := e.Config()
+	cfg.CrashQuick = 400 * time.Millisecond // a crashloop server dies 150 ms after it is ready
+	s := e.StartSup(cfg)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	c0 := ctxOf(t, e.Starts()[0])
 	writeCtl(t, e, "crashloop", strconv.Itoa(c0-1)) // every start at c0 dies soon after it is up
 	testkit.WaitFor(t, 20*time.Second, "a smaller shape that stays up", func() bool {
@@ -133,14 +140,15 @@ func TestQuickCrashesStepDownOnce(t *testing.T) {
 			atC0++
 		}
 	}
-	if atC0 != 3 { // the first start plus two restarts, then the step down
+	if atC0 != 2 { // the first start plus one restart at once, then the step down
 		t.Fatalf("%d starts at %d before the step down: %v", atC0, c0, lines)
 	}
 	st := s.Status()
 	if st.Recovery == nil || !st.Recovery.SuspectMemory || st.Recovery.CeilingCtx != c0 {
 		t.Fatalf("recovery = %+v", st.Recovery)
 	}
-	time.Sleep(300 * time.Millisecond)
+	// the record clears only after a run of CrashQuick with no crash: the smaller shape held
+	testkit.WaitFor(t, 5*time.Second, "a stable run", func() bool { return s.Status().Recovery == nil })
 	if n := len(e.Starts()); n != len(lines) {
 		t.Fatalf("restarted again after the step down: %v", e.Starts())
 	}
@@ -177,19 +185,45 @@ func TestFailedShrinkStepsDownFromThere(t *testing.T) {
 	testkit.WaitFor(t, 2*time.Second, "the failed shrink recorded", func() bool { return capped(e, c0-1) })
 }
 
-// An out-of-memory the server survives (a failed request) is not a crash the watchdog sees:
-// one burst is let go, a second within OOMHold shrinks the model and records the cap.
+// oomSaid counts the out-of-memory lines the server survived, as the hub said them, and how many
+// of them were held.
+func oomSaid(t *testing.T, s *run.Supervisor) (n, held int) {
+	for _, ev := range testkit.Said(t, s, 0, 0, "mind.oom") {
+		n++
+		if strings.Contains(string(ev.Body), `"held":true`) {
+			held++
+		}
+	}
+	return n, held
+}
+
+// An out-of-memory the server survives (a failed request) is not a crash: the lines of one
+// request are let go, lines in a second request within OOMHold shrink the model (once the
+// request in flight ends) and record the cap.
 func TestSurvivedOOMShrinks(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := ready(t, e)
 	c0 := ctxOf(t, e.Starts()[0])
-	e.Touch("oomlog")
-	time.Sleep(400 * time.Millisecond)
-	if len(e.Starts()) != 1 || s.Phase() != "ready" {
-		t.Fatalf("one survived out-of-memory reshaped: %v %s", e.Starts(), s.Phase())
+	done := s.Begin()
+	e.Touch("oomlog") // two matching lines, in this one request
+	testkit.WaitFor(t, 10*time.Second, "the lines heard", func() bool { n, _ := oomSaid(t, s); return n >= 2 })
+	done()
+	if n, held := oomSaid(t, s); n != 2 || held != 0 {
+		t.Fatalf("%d lines, %d held, want 2 lines of one request and none held", n, held)
 	}
+	m := testkit.Mark(t, s, "after one request's lines")
+	if ph := testkit.Phases(t, s, 0, m); len(e.Starts()) != 1 || ph[len(ph)-1] != "ready" {
+		t.Fatalf("one survived out-of-memory reshaped: %v %v", e.Starts(), ph)
+	}
+	done = s.Begin()
 	e.Touch("oomlog")
+	testkit.WaitFor(t, 10*time.Second, "a held run", func() bool { _, held := oomSaid(t, s); return held == 1 })
+	testkit.WaitPhase(t, s, "resizing", 10*time.Second) // the request in flight finishes first
+	if len(e.Starts()) != 1 {
+		t.Fatalf("restarted under a request: %v", e.Starts())
+	}
+	done()
 	testkit.WaitFor(t, 10*time.Second, "shrink after the second", func() bool {
 		return len(e.Starts()) >= 2 && s.Phase() == "ready"
 	})
@@ -217,9 +251,13 @@ func TestMidReplyGrabFinishesTheReply(t *testing.T) {
 		err    error
 	}
 	got := make(chan result, 1)
+	first := make(chan struct{})
+	end := s.Begin() // the request goes through the door, as every request does
 	go func() {
+		defer end()
 		resp, err := http.Post(url+"/v1/chat/completions", "application/json", strings.NewReader(`{"stream":true,"messages":[]}`))
 		if err != nil {
+			close(first)
 			got <- result{err: err}
 			return
 		}
@@ -231,12 +269,14 @@ func TestMidReplyGrabFinishesTheReply(t *testing.T) {
 			if l == "data: [DONE]" {
 				r.done = true
 			} else if strings.HasPrefix(l, "data: ") {
-				r.chunks++
+				if r.chunks++; r.chunks == 1 {
+					close(first)
+				}
 			}
 		}
 		got <- r
 	}()
-	time.Sleep(100 * time.Millisecond)
+	<-first // the reply has begun
 	e.SetUsed(16000)
 	e.SetOthers(8000)
 	testkit.WaitFor(t, 5*time.Second, "draining", func() bool { return s.Phase() == "resizing" })
@@ -263,14 +303,16 @@ func TestSmallShortfallWaitsForIdle(t *testing.T) {
 	cfg.DrainMinMiB = 100000 // every shortfall counts as small
 	s := e.StartSup(cfg)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	e.Touch("busy")
+	done := s.Begin() // a reply in flight
 	e.SetUsed(16000)
 	e.SetOthers(8000)
-	time.Sleep(500 * time.Millisecond)
+	s.RoomMoved() // the stranger's word
+	testkit.WaitFor(t, 10*time.Second, "the new room held", func() bool { r, ok := s.HeldReserve(); return ok && r >= 8000 })
+	s.React() // the engine has looked at the held room
 	if len(e.Starts()) != 1 || s.Phase() != "ready" {
 		t.Fatalf("acted on a small shortfall mid-reply: %v %s", e.Starts(), s.Phase())
 	}
-	e.Remove("busy")
+	done()
 	testkit.WaitFor(t, 10*time.Second, "shrink once idle", func() bool { return len(e.Starts()) >= 2 })
 }
 
@@ -283,11 +325,11 @@ func TestDrainGivesUpAfterDrainMax(t *testing.T) {
 	cfg.DrainMax = 300 * time.Millisecond
 	s := e.StartSup(cfg)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	e.Touch("busy") // a slot that never finishes
+	done := s.Begin() // a request that never finishes
 	e.SetUsed(16000)
 	e.SetOthers(8000)
 	testkit.WaitFor(t, 10*time.Second, "shrink after DrainMax", func() bool { return len(e.Starts()) >= 2 })
-	e.Remove("busy")
+	done()
 	testkit.WaitPhase(t, s, "ready", 10*time.Second)
 	found := false
 	for _, m := range s.Status().Errors {
@@ -323,15 +365,18 @@ func TestGrowsBackAfterTheAppLetsGo(t *testing.T) {
 }
 
 // Another app leaves less room than any shape needs: the model goes to the smallest shape in one
-// restart, not one step per tick.
+// restart, not one step per reading.
 func TestNoRoomAtAllShrinksOnce(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	s := ready(t, e)
 	e.SetUsed(16300)
 	e.SetOthers(12000) // budget well under the 5000 MiB the model needs at any ctx
+	s.RoomMoved()      // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "shrink", func() bool { return len(e.Starts()) >= 2 && s.Phase() == "ready" })
-	time.Sleep(500 * time.Millisecond)
+	s.RoomMoved() // the stranger's word
+	testkit.WaitFor(t, 10*time.Second, "the room held again", func() bool { r, ok := s.HeldReserve(); return ok && r >= 12000 })
+	s.React() // the engine has looked at the room the smallest shape runs in
 	if n := len(e.Starts()); n != 2 {
 		t.Fatalf("%d starts, want one restart: %v", n, e.Starts())
 	}

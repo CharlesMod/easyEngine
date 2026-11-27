@@ -1,0 +1,10 @@
+main: HTTP server is listening, hostname: 127.0.0.1, port: 8080, http threads: 15
+main: loading model
+srv    load_model: loading model 'model.gguf'
+llama_model_loader: loaded meta data with 30 key-value pairs and 291 tensors from model.gguf (version GGUF V3 (latest))
+load_tensors: offloaded 33/33 layers to GPU
+srv          init: initializing slots, n_slots = 2
+main: model loaded
+main: chat template, chat_template: {{ messages }}, example_format: ''
+main: server is listening on http://127.0.0.1:8080 - starting the main loop
+srv  update_slots: all slots are idle

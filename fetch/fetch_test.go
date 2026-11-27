@@ -21,12 +21,6 @@ import (
 	"time"
 )
 
-func init() {
-	backoffBase = time.Millisecond
-	backoffMax = 5 * time.Millisecond
-	progressEvery = time.Millisecond
-}
-
 func payload(n int) ([]byte, string) {
 	b := make([]byte, n)
 	rand.New(rand.NewSource(1)).Read(b)
@@ -48,7 +42,7 @@ func TestDownloadPlain(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "sub", "f.bin")
 	var last Progress
 	var steps = map[string]bool{}
-	err := Download(context.Background(), url, dest, sum, int64(len(data)), func(p Progress) { last = p; steps[p.Step] = true })
+	err := Download(context.Background(), url, dest, sum, int64(len(data)), func(p Progress) { last = p; steps[p.Step] = true }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +58,7 @@ func TestDownloadPlain(t *testing.T) {
 	}
 	// second call: already there, no request needed
 	url2 := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("unexpected request") }))
-	if err := Download(context.Background(), url2, dest, sum, int64(len(data)), nil); err != nil {
+	if err := Download(context.Background(), url2, dest, sum, int64(len(data)), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -88,15 +82,20 @@ func TestDownloadResumesAfterCut(t *testing.T) {
 		http.ServeContent(w, r, "f", time.Time{}, bytes.NewReader(data))
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
-	if err := Download(context.Background(), url, dest, sum, int64(len(data)), nil); err != nil {
+	// a cut after bytes arrived resumes at once: again must never be asked
+	noAgain := func(ctx context.Context, err error) error {
+		t.Errorf("again asked after progress: %v", err)
+		return err
+	}
+	if err := Download(context.Background(), url, dest, sum, int64(len(data)), nil, noAgain); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(dest)
 	if !bytes.Equal(got, data) {
 		t.Fatal("content differs after resume")
 	}
-	if len(ranges) < 2 || ranges[1] != "bytes=700000-" {
-		t.Errorf("second request ranges: %q", ranges)
+	if len(ranges) != 2 || ranges[1] != "bytes=700000-" {
+		t.Errorf("request ranges: %q", ranges)
 	}
 }
 
@@ -109,7 +108,7 @@ func TestDownloadResumesFromExistingPart(t *testing.T) {
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
 	os.WriteFile(dest+".part", data[:400000], 0o644)
-	if err := Download(context.Background(), url, dest, sum, 0, nil); err != nil {
+	if err := Download(context.Background(), url, dest, sum, 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if gotRange != "bytes=400000-" {
@@ -127,7 +126,7 @@ func TestDownloadWrongHash(t *testing.T) {
 		http.ServeContent(w, r, "f", time.Time{}, bytes.NewReader(data))
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
-	err := Download(context.Background(), url, dest, strings.Repeat("0", 64), int64(len(data)), nil)
+	err := Download(context.Background(), url, dest, strings.Repeat("0", 64), int64(len(data)), nil, nil)
 	if !errors.Is(err, ErrHashMismatch) {
 		t.Fatalf("want hash mismatch, got %v", err)
 	}
@@ -145,7 +144,7 @@ func TestDownload416WhenPartIsComplete(t *testing.T) {
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
 	os.WriteFile(dest+".part", data, 0o644)
-	if err := Download(context.Background(), url, dest, sum, 0, nil); err != nil {
+	if err := Download(context.Background(), url, dest, sum, 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(dest); !bytes.Equal(got, data) {
@@ -160,7 +159,7 @@ func TestDownload416StalePartRestarts(t *testing.T) {
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
 	os.WriteFile(dest+".part", append(append([]byte{}, data...), make([]byte, 999)...), 0o644) // longer than the file
-	if err := Download(context.Background(), url, dest, sum, 0, nil); err != nil {
+	if err := Download(context.Background(), url, dest, sum, 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(dest); !bytes.Equal(got, data) {
@@ -176,7 +175,7 @@ func TestDownloadNoRangeServer(t *testing.T) {
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
 	os.WriteFile(dest+".part", data[:1000], 0o644)
-	if err := Download(context.Background(), url, dest, sum, int64(len(data)), nil); err != nil {
+	if err := Download(context.Background(), url, dest, sum, int64(len(data)), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(dest); !bytes.Equal(got, data) {
@@ -187,15 +186,25 @@ func TestDownloadNoRangeServer(t *testing.T) {
 func TestDownload404IsPermanent(t *testing.T) {
 	var n atomic.Int32
 	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); http.NotFound(w, r) }))
-	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil)
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil, nil)
 	if err == nil || n.Load() != 1 {
 		t.Fatalf("err=%v requests=%d", err, n.Load())
 	}
 }
 
-func TestDownloadRetries5xx(t *testing.T) {
+// again answers nil for the first ok calls, then fail; calls counts how often it was asked.
+func againAnswers(ok int, fail error, calls *atomic.Int32) Again {
+	return func(ctx context.Context, err error) error {
+		if int(calls.Add(1)) > ok {
+			return fail
+		}
+		return nil
+	}
+}
+
+func TestDownloadNoProgressAsksAgain(t *testing.T) {
 	data, sum := payload(10000)
-	var n atomic.Int32
+	var n, calls atomic.Int32
 	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if n.Add(1) < 3 {
 			http.Error(w, "busy", 503)
@@ -203,8 +212,125 @@ func TestDownloadRetries5xx(t *testing.T) {
 		}
 		http.ServeContent(w, r, "f", time.Time{}, bytes.NewReader(data))
 	}))
-	if err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), sum, 0, nil); err != nil || n.Load() != 3 {
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), sum, 0, nil, againAnswers(5, errors.New("no"), &calls))
+	if err != nil || n.Load() != 3 || calls.Load() != 2 {
+		t.Fatalf("err=%v requests=%d again=%d", err, n.Load(), calls.Load())
+	}
+}
+
+// A server that ignores Range and sends only the first k bytes each time is
+// progress once (past the old .part) and then none: Download must ask Again
+// instead of going round at once for ever.
+func TestDownloadRangeIgnoredNoEndlessLoop(t *testing.T) {
+	data, sum := payload(10000)
+	const k = 4000
+	var n, calls atomic.Int32
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		w.WriteHeader(200)
+		w.Write(data[:k])
+		w.(http.Flusher).Flush()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	dest := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(dest+".part", data[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("client said stop")
+	err := Download(context.Background(), url, dest, sum, int64(len(data)), nil, againAnswers(0, stop, &calls))
+	if !errors.Is(err, stop) {
+		t.Fatalf("err=%v", err)
+	}
+	// attempt 1 grew the .part past 1000 (progress); attempt 2 reached no further, so Again was asked once
+	if n.Load() != 2 || calls.Load() != 1 {
+		t.Fatalf("requests=%d again=%d", n.Load(), calls.Load())
+	}
+}
+
+func TestDownloadAgainErrorEnds(t *testing.T) {
+	var n, calls atomic.Int32
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); http.Error(w, "busy", 503) }))
+	stop := errors.New("client said stop")
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil, againAnswers(2, stop, &calls))
+	if !errors.Is(err, stop) || n.Load() != 3 || calls.Load() != 3 {
+		t.Fatalf("err=%v requests=%d again=%d", err, n.Load(), calls.Load())
+	}
+}
+
+func TestDownloadNilAgainEndsAtFirstFailure(t *testing.T) {
+	var n atomic.Int32
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); http.Error(w, "busy", 503) }))
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "503") || n.Load() != 1 {
 		t.Fatalf("err=%v requests=%d", err, n.Load())
+	}
+}
+
+func TestDownloadAgainNotAskedForPermanent(t *testing.T) {
+	var calls atomic.Int32
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil, againAnswers(9, nil, &calls))
+	if err == nil || calls.Load() != 0 {
+		t.Fatalf("err=%v again=%d", err, calls.Load())
+	}
+}
+
+func TestDownloadProgressPerStep(t *testing.T) {
+	data, sum := payload(3 << 20)
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "f", time.Time{}, bytes.NewReader(data))
+	}))
+	total := int64(len(data))
+	var dl []int64
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), sum, total, func(p Progress) {
+		if p.Step == "downloading" {
+			dl = append(dl, p.Done)
+		}
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := stepOf(total)
+	if dl[0] != 0 || dl[len(dl)-1] != total {
+		t.Fatalf("first/last reports %d, %d", dl[0], dl[len(dl)-1])
+	}
+	for i := 1; i < len(dl); i++ {
+		if dl[i] < total && dl[i]-dl[i-1] < step {
+			t.Errorf("report %d (%d) came less than a step (%d) after %d", i, dl[i], step, dl[i-1])
+		}
+	}
+	if len(dl) > 105 {
+		t.Errorf("%d reports for 100 steps", len(dl))
+	}
+}
+
+func TestDownloadProgressUnknownTotal(t *testing.T) {
+	old := unknownStep
+	unknownStep = 100000
+	defer func() { unknownStep = old }()
+	data, _ := payload(1 << 20)
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for off := 0; off < len(data); off += 32768 { // chunked: no length
+			w.Write(data[off:min(off+32768, len(data))])
+			w.(http.Flusher).Flush()
+		}
+	}))
+	var dl []int64
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, func(p Progress) { dl = append(dl, p.Done) }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(dl); i++ {
+		if dl[i] != int64(len(data)) && dl[i]-dl[i-1] < unknownStep {
+			t.Errorf("report %d (%d) less than a step after %d", i, dl[i], dl[i-1])
+		}
+	}
+	if dl[len(dl)-1] != int64(len(data)) || len(dl) > 14 {
+		t.Errorf("reports %v", dl)
 	}
 }
 
@@ -218,16 +344,12 @@ func TestDownloadCancelKeepsPart(t *testing.T) {
 	}))
 	dest := filepath.Join(t.TempDir(), "f.bin")
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { // cancel once the .part holds a good chunk (progress callbacks are throttled)
-		for {
-			if st, err := os.Stat(dest + ".part"); err == nil && st.Size() >= 500000 {
-				cancel()
-				return
-			}
-			time.Sleep(2 * time.Millisecond)
+	defer cancel()
+	err := Download(ctx, url, dest, sum, int64(len(data)), func(p Progress) {
+		if p.Done >= 500000 { // the .part holds the bytes already: they are written before they are reported
+			cancel()
 		}
-	}()
-	err := Download(ctx, url, dest, sum, int64(len(data)), nil)
+	}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err %v", err)
 	}
@@ -240,21 +362,24 @@ func TestDownloadCancelKeepsPart(t *testing.T) {
 	}
 }
 
-func TestDownloadStallGivesUp(t *testing.T) {
+func TestDownloadStallEndsAttempt(t *testing.T) {
 	old := stallTimeout
-	stallTimeout = 100 * time.Millisecond
+	stallTimeout = 100 * time.Millisecond // the watchdog for silence, shrunk
 	defer func() { stallTimeout = old }()
-	oldAttempts := maxAttempts
-	maxAttempts = 2
-	defer func() { maxAttempts = oldAttempts }()
+	var reqs, calls atomic.Int32
 	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
 		w.Header().Set("Content-Length", "1000000")
 		w.Write([]byte("x"))
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	}))
-	if err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil); err == nil {
-		t.Fatal("expected failure from stalled server")
+	stop := errors.New("stop")
+	// attempt 1 moves a byte and resumes at once; attempt 2 (the server ignores Range and
+	// restarts) moves no more than the .part held, so again is asked, and ends it.
+	err := Download(context.Background(), url, filepath.Join(t.TempDir(), "f"), "", 0, nil, againAnswers(0, stop, &calls))
+	if !errors.Is(err, stop) || reqs.Load() != 2 || calls.Load() != 1 {
+		t.Fatalf("err=%v requests=%d again=%d", err, reqs.Load(), calls.Load())
 	}
 }
 

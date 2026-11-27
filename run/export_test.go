@@ -13,9 +13,6 @@ func SetAgentNoVenv(on bool) func() {
 	return func() { agentNoVenv = old }
 }
 
-// YieldTick is how often the yield loop looks for launcher games.
-const YieldTick = yieldTick
-
 // Disk-need seams for the external tests.
 
 func (s *Supervisor) SetupNeed(cat *catalog.Catalog, hw probe.Hardware, backendID string, models ...catalog.Model) plan.DiskNeed {
@@ -24,3 +21,25 @@ func (s *Supervisor) SetupNeed(cat *catalog.Catalog, hw probe.Hardware, backendI
 func (s *Supervisor) LogRoom() int64                               { return s.logRoom() }
 func (s *Supervisor) CheckNeed(n plan.DiskNeed, what string) error { return s.checkNeed(n, what) }
 func LogCeiling() int64                                            { return logCeiling() }
+
+// React runs one pass of the mind's reactor now, in the caller: a test that changed something
+// and wants to know the engine has looked at it calls it once the change holds (HeldReserve).
+func (s *Supervisor) React() { s.react() }
+
+// RoomMoved is what a stranger's open of the card and then its end would say (two words): the
+// room is read twice, so a new level holds without the level's own period.
+func (s *Supervisor) RoomMoved() {
+	s.card.event()
+	s.card.event()
+}
+
+// Network says the network happening, as the system's word that a link or an address changed
+// would (watchNetwork).
+func (s *Supervisor) Network() { s.say("network", "", nil) }
+
+// HeldReserve is the room's last held reserve (others plus the host's share, MiB), while a model
+// is loaded.
+func (s *Supervisor) HeldReserve() (int, bool) {
+	r, ok := s.card.held()
+	return r.total, ok
+}

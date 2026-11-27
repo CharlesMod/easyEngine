@@ -104,9 +104,36 @@ type fwd struct {
 	// yielded reports, at the moment of a cut, whether the engine gave the card to a game, and
 	// the message of the 503 for that state.
 	yielded func() (bool, string)
-	onEvent func() // per upstream event (nil on main)
+	onEvent func() // per upstream event (nil in api/: every proxied write is heard already)
+	// hear wraps the writer the reverse proxy writes to, so the upstream's bytes count as the
+	// model server being heard from (API.hearing). nil: no wrapping (tests).
+	hear func(http.ResponseWriter) http.ResponseWriter
 	// open and quiet replace openAfter and quietEvery when set (tests shorten them).
 	open, quiet time.Duration
+}
+
+// fwd is what the streamer needs of the supervisor for one request.
+func (a *API) fwd(external bool, id string) fwd {
+	return fwd{
+		on: a.S.Streamer(), external: external, id: id, hear: a.hearing,
+		yielded: func() (bool, string) {
+			if a.S.Phase() != "yielded" {
+				return false, ""
+			}
+			// Route is asked only while yielded: then it answers from the yield and wakes nothing.
+			if rt := a.S.Route(); rt.Code == "yielded" {
+				return true, rt.Message
+			}
+			return false, ""
+		},
+	}
+}
+
+func (f fwd) wrap(w http.ResponseWriter) http.ResponseWriter {
+	if f.hear == nil {
+		return w
+	}
+	return f.hear(w)
 }
 
 // cut is the terminal error for a stream the upstream ended early.
@@ -184,7 +211,7 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 	}
 	rp.ModifyResponse = modify
 	if !f.on || r.Method != http.MethodPost || !completionPath(r.URL.Path) {
-		rp.ServeHTTP(w, r)
+		rp.ServeHTTP(f.wrap(w), r)
 		return
 	}
 	want, ok := wantsStream(w, r)
@@ -192,11 +219,17 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 		return
 	}
 	if !want {
-		rp.ServeHTTP(w, r)
+		rp.ServeHTTP(f.wrap(w), r)
 		return
 	}
 	d := dialect(r.URL.Path)
 	ctx := r.Context()
+	// The streamWriter sits nearest the client, inside the hearing wrapper: the upstream's bytes
+	// pass the hearing wrapper and are heard; the engine's own comments and terminal events go
+	// straight to the client and are not (were they heard, a hung model server would look alive
+	// for as long as a client waits).
+	sw := newStreamWriter(w, f)
+	defer sw.finish(ctx.Err)
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if err := modify(resp); err != nil {
 			return err
@@ -210,15 +243,13 @@ func forward(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseProxy, 
 		resp.Body = stream.New(resp.Body, stream.Options{
 			Dialect:   d,
 			OnEvent:   f.onEvent,
-			Cut:       f.cut,
+			Cut:       sw.cut,
 			Gone:      func() bool { return ctx.Err() != nil },
 			RequestID: f.id,
 		})
 		return nil
 	}
-	sw := newStreamWriter(w, f)
-	defer sw.finish(ctx.Err)
-	rp.ServeHTTP(sw, r)
+	rp.ServeHTTP(f.wrap(sw), r)
 }
 
 // streamWriter stands between the reverse proxy and the client for a streamed request. It
@@ -241,6 +272,8 @@ type streamWriter struct {
 	// stream (an error); its body is kept and becomes the terminal event at the end.
 	convert bool
 	status  int
+	term    []byte // the terminal event of a cut stream, written by finish (so it is not heard)
+	cutErr  func() []byte
 	ctype   string
 	errBody []byte
 	tail    []byte // the last bytes written, to tell an event boundary
@@ -252,7 +285,7 @@ type streamWriter struct {
 }
 
 func newStreamWriter(w http.ResponseWriter, f fwd) *streamWriter {
-	sw := &streamWriter{w: w, rc: http.NewResponseController(w), id: f.id, h: w.Header().Clone(), quiet: quietEvery}
+	sw := &streamWriter{w: w, rc: http.NewResponseController(w), id: f.id, h: w.Header().Clone(), quiet: quietEvery, cutErr: f.cut}
 	open := openAfter
 	if f.open > 0 {
 		open = f.open
@@ -404,6 +437,17 @@ func (sw *streamWriter) fire() {
 	}
 }
 
+// cut is the stream reader's Cut: it keeps the terminal event for finish to write and gives the
+// reader nothing to append. The reader has dropped the cut event's tail and ends at a boundary,
+// so the event still comes right after the last whole event, but straight to the client.
+func (sw *streamWriter) cut() []byte {
+	e := sw.cutErr()
+	sw.mu.Lock()
+	sw.term = []byte("data: {\"error\":" + string(e) + "}\n\n")
+	sw.mu.Unlock()
+	return nil
+}
+
 // finish runs as the handler returns: it stops the watchdog and waits until its callback can
 // no longer run (no goroutine outlives the request), then, if the upstream answered an error
 // into a stream the engine had opened, writes that error as the terminal event.
@@ -417,7 +461,15 @@ func (sw *streamWriter) finish(ctxErr func() error) {
 	for sw.armed {
 		sw.gone.Wait()
 	}
-	if !sw.convert || ctxErr() != nil {
+	if ctxErr() != nil {
+		return
+	}
+	if sw.term != nil {
+		sw.w.Write(sw.term)
+		sw.rc.Flush()
+		return
+	}
+	if !sw.convert {
 		return
 	}
 	sw.w.Write(termEvent(termError{

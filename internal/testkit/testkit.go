@@ -20,6 +20,8 @@ import (
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/event"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 	"github.com/CharlesMod/easyEngine/run"
@@ -119,8 +121,33 @@ func New(t *testing.T) *Env {
 	e.Llama["FAKELLAMA_VRAM_PER_TOKEN"] = "0.05"
 	e.Prof = run.Profile{Game: "TestGame", Slots: 3, MinSlots: 1, GameReserveMiB: 0}
 	e.Prof.CtxPerSlot.Max, e.Prof.CtxPerSlot.Floor = 65536, 8192
+	e.WatchFile(filepath.Join(e.Ctl, "starts.log")) // WaitFor looks again when the fake starts
 	return e
 }
+
+// WatchFile makes WaitFor look again each time path changes (host.Changes): a condition on a
+// file is woken by the file, never by unrelated chatter on a hub. Let go at the test's end.
+func (e *Env) WatchFile(path string) {
+	filesMu.Lock()
+	files = append(files, path)
+	filesMu.Unlock()
+	e.T.Cleanup(func() {
+		filesMu.Lock()
+		defer filesMu.Unlock()
+		for i, x := range files {
+			if x == path {
+				files = append(files[:i], files[i+1:]...)
+				break
+			}
+		}
+	})
+}
+
+// files are the files WaitFor looks again on (WatchFile).
+var (
+	filesMu sync.Mutex
+	files   []string
+)
 
 // InstallFake puts the fake backend (backends/fake) and model m1 in place and selects them.
 func (e *Env) InstallFake() {
@@ -167,11 +194,13 @@ func (e *Env) Config() run.Config {
 		Seed: func(m catalog.Model, path, kv string) (fit.Footprint, error) {
 			return fit.Footprint{FixedMiB: 5000, PerTokenMiB: 0.05, ScratchMiB: 500}, nil
 		},
-		CrashBackoff: []time.Duration{40 * time.Millisecond, 80 * time.Millisecond, 120 * time.Millisecond, 160 * time.Millisecond},
-		WatchEvery:   40 * time.Millisecond, GrowIdle: 10 * time.Minute, HealthPoll: 20 * time.Millisecond,
-		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond, HealthMisses: 3, IdleChecks: 2,
-		AgentBackoffBase: 40 * time.Millisecond, AgentBackoffMax: 200 * time.Millisecond, AgentStable: time.Hour,
-		CmdTimeout: 30 * time.Second,
+		// the honest timers: the moments and the silences shrunk; the room's watchdog (the one
+		// level read on a period) far off, so no test has it for a clock: a test that needs the
+		// room read again says so (SetHost, React) or sets RoomEvery itself
+		RoomEvery: time.Hour, GrowIdle: 10 * time.Minute, HangSilence: time.Minute,
+		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond,
+		AgentStable: time.Hour,
+		CmdTimeout:  30 * time.Second,
 	}
 	return cfg
 }
@@ -196,9 +225,30 @@ func (e *Env) StartSup(cfg run.Config) *run.Supervisor {
 		e.T.Fatal(err)
 	}
 	e.T.Cleanup(s.Shutdown)
+	h := s.Hub()
+	hubsMu.Lock()
+	hubs = append(hubs, h)
+	hubsMu.Unlock()
+	e.T.Cleanup(func() {
+		hubsMu.Lock()
+		defer hubsMu.Unlock()
+		for i, x := range hubs {
+			if x == h {
+				hubs = append(hubs[:i], hubs[i+1:]...)
+				break
+			}
+		}
+	})
 	s.Run()
 	return s
 }
+
+// hubs are the hubs of the supervisors StartSup started and not yet cleaned up: WaitFor wakes on
+// any of them.
+var (
+	hubsMu sync.Mutex
+	hubs   []*event.Hub
+)
 
 // Field extracts key=value from a starts.log line.
 func Field(line, key string) string {
@@ -210,30 +260,134 @@ func Field(line, key string) string {
 	return ""
 }
 
-// WaitFor polls until cond is true or the timeout passes.
+// WaitFor waits until cond is true. It looks again each time a supervisor StartSup started says
+// anything on its hub, and each time a watched file changes (WatchFile: the fake's starts.log),
+// never on a clock; timeout bounds it so a broken engine fails the test instead of hanging it.
 func WaitFor(t testing.TB, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
-	end := time.Now().Add(timeout)
-	for time.Now().Before(end) {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	hubsMu.Lock()
+	hs := append([]*event.Hub{}, hubs...)
+	hubsMu.Unlock()
+	filesMu.Lock()
+	fs := append([]string{}, files...)
+	filesMu.Unlock()
+	if !waitOn(hs, timeout, cond, fs...) {
+		t.Fatalf("timed out after %s waiting for: %s", timeout, what)
 	}
-	t.Fatalf("timed out after %s waiting for: %s", timeout, what)
 }
 
-// WaitPhase waits for a phase.
+// WaitPhase waits for a phase, woken by the supervisor's phase fact.
 func WaitPhase(t testing.TB, s *run.Supervisor, phase string, timeout time.Duration) {
 	t.Helper()
-	end := time.Now().Add(timeout)
-	for time.Now().Before(end) {
-		if s.Phase() == phase {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !waitOn([]*event.Hub{s.Hub()}, timeout, func() bool { return s.Phase() == phase }) {
+		t.Fatalf("timed out waiting for phase %q (now %q: %s)", phase, s.Status().Phase, s.Status().Message)
 	}
-	t.Fatalf("timed out waiting for phase %q (now %q: %s)", phase, s.Status().Phase, s.Status().Message)
+}
+
+// waitOn looks at cond once, then again each time one of hs says anything, until it is true. It
+// answers false when timeout passes first.
+func waitOn(hs []*event.Hub, timeout time.Duration, cond func() bool, paths ...string) bool {
+	wake := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	for _, p := range paths {
+		ch, release, err := host.Changes(p)
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer release()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ch:
+					select {
+					case wake <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
+	for _, h := range hs {
+		w, err := h.Wake("")
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer w.Close()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-w.C():
+					select {
+					case wake <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
+	// watchdog for silence: a test whose engine never says what it waits for fails after timeout
+	limit := time.NewTimer(timeout)
+	defer limit.Stop()
+	for !cond() {
+		select {
+		case <-limit.C:
+			// a condition that came true with no word for it is a missed event, not a pass
+			return false
+		case <-wake:
+		}
+	}
+	return true
+}
+
+// Mark says a marker on s's hub and answers its seq: events said before it are history by the
+// time Mark returns. A test of something that must not happen does the thing, causes an event
+// that must come after the engine's answer to it, then reads the history between (Said).
+func Mark(t testing.TB, s *run.Supervisor, what string) uint64 {
+	t.Helper()
+	e, err := s.Hub().Say(event.Event{Name: "mark"}, map[string]string{"what": what})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e.Seq
+}
+
+// Said is what s said with names beginning with prefix after seq from and up to seq to (0: up to
+// now), oldest first.
+func Said(t testing.TB, s *run.Supervisor, from, to uint64, prefix string) []event.Event {
+	t.Helper()
+	evs, gap := s.Hub().Since(from, prefix)
+	if gap {
+		t.Fatalf("the hub's history let go of seq %d", from)
+	}
+	var out []event.Event
+	for _, e := range evs {
+		if to == 0 || e.Seq <= to {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Phases is the phases said after seq from and up to seq to (0: now), in order.
+func Phases(t testing.TB, s *run.Supervisor, from, to uint64) []string {
+	t.Helper()
+	var out []string
+	for _, e := range Said(t, s, from, to, "phase") {
+		if e.Name != "phase" {
+			continue
+		}
+		var b struct {
+			Phase string `json:"phase"`
+		}
+		json.Unmarshal(e.Body, &b)
+		out = append(out, b.Phase)
+	}
+	return out
 }
 
 // CopyFile copies a file.

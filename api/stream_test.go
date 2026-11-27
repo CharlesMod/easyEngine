@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -597,5 +598,40 @@ func TestStreamerSetting(t *testing.T) {
 	resp = post(t, ctx, srv.URL, "/v1/chat/completions", streamBody, nil)
 	if got := readRest(t, resp.Body); !strings.HasPrefix(got, ev1+`data: {"error":{"code":"upstream_ended"`) {
 		t.Fatalf("on after reload: got %q", got)
+	}
+}
+
+// The streamWriter sits inside the hearing wrapper: the engine's own waiting comment and its
+// terminal event are not heard (a hung model server must not look alive while a client waits);
+// the upstream's events are.
+func TestStreamOwnWordsAreNotHeard(t *testing.T) {
+	ctx := testCtx(t)
+	var heard atomic.Int32
+	release := make(chan struct{})
+	up := upstream(t, slow(release, dies(false)))
+	f := local()
+	f.open = time.Millisecond
+	f.hear = (&API{heard: func() { heard.Add(1) }}).hearing
+	resp := post(t, ctx, front(t, up.URL, f).URL, "/v1/chat/completions", streamBody, map[string]string{RequestIDHeader: "rid-7"})
+	br := bufio.NewReader(resp.Body)
+	if got := readEvent(t, br); got != ": easy waiting\n\n" {
+		t.Fatalf("first bytes %q", got)
+	}
+	if n := heard.Load(); n != 0 {
+		t.Fatalf("the waiting comment was heard (%d)", n)
+	}
+	close(release)
+	if got := readEvent(t, br); got != ev1 {
+		t.Fatalf("event %q", got)
+	}
+	if n := heard.Load(); n < 1 {
+		t.Fatal("the upstream's event was not heard")
+	}
+	before := heard.Load()
+	if got := readRest(t, br); !strings.HasPrefix(got, `data: {"error":{"code":"model_server_gone"`) {
+		t.Fatalf("rest %q", got)
+	}
+	if n := heard.Load(); n != before {
+		t.Fatalf("the terminal event was heard (%d -> %d)", before, n)
 	}
 }

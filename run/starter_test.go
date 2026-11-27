@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/CharlesMod/easyEngine/catalog"
+	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
 	"github.com/CharlesMod/easyEngine/run"
 )
@@ -33,6 +34,7 @@ type stage struct {
 	once     sync.Once
 	badFirst int32 // number of target requests to answer with corrupt bytes
 	free     int32 // fake free disk MiB once the starter is on disk
+	sup      atomic.Pointer[run.Supervisor]
 }
 
 func newStage(t *testing.T) *stage {
@@ -74,6 +76,9 @@ func (s *stage) note(what, rng string) {
 		s.ranges = append(s.ranges, rng)
 	}
 	s.mu.Unlock()
+	if sup := s.sup.Load(); sup != nil { // a waiting test looks again
+		sup.Hub().Say(event.Event{Name: "mark"}, map[string]string{"what": "request for " + what})
+	}
 }
 
 func (s *stage) order() string {
@@ -89,7 +94,6 @@ func (s *stage) release() {
 // start builds the supervisor with a fake disk that reports s.free once the starter is on disk.
 func (s *stage) start(t *testing.T) *run.Supervisor {
 	cfg := s.e.Config()
-	cfg.UpgradeBackoff, cfg.UpgradeBackoffMax = 60*time.Millisecond, 120*time.Millisecond
 	cfg.SwapDrain = 5 * time.Second
 	cfg.DiskFree = func(dir string) (int, error) {
 		if _, err := os.Stat(filepath.Join(dir, "models", "starter.gguf")); err == nil {
@@ -98,6 +102,7 @@ func (s *stage) start(t *testing.T) *run.Supervisor {
 		return 1 << 20, nil
 	}
 	sup := s.e.StartSup(cfg)
+	s.sup.Store(sup)
 	sup.SetPort(4242)
 	return sup
 }
@@ -205,7 +210,9 @@ func TestSwapWaitsForRequestsInFlight(t *testing.T) {
 	if r.Kind != "unavailable" || !strings.Contains(r.Message, "full model") {
 		t.Errorf("route during swap = %+v", r)
 	}
-	time.Sleep(400 * time.Millisecond)
+	// the swap waits on the count of requests, not on a clock: a request that begins and ends
+	// beside the one in flight leaves it in flight, and the swap still waits
+	sup.Begin()()
 	if st := sup.Status(); st.ModelStage != "swapping" || st.Model != "starter" {
 		t.Fatalf("swapped with a request in flight: %+v", st)
 	}
@@ -225,20 +232,23 @@ func TestTargetFailureKeepsStarterAndRetries(t *testing.T) {
 	atomic.StoreInt32(&s.badFirst, 2) // two corrupt downloads, then a good one
 	sup := s.start(t)
 	sup.Install("target", "")
-	sawRetry := false
-	testkit.WaitFor(t, 30*time.Second, "retry then swap", func() bool {
-		st := sup.Status()
-		if st.Upgrade != nil && st.Upgrade.State == "retrying" {
-			sawRetry = true
-			if st.Model != "starter" || st.ModelTier != "starter" || st.Upgrade.Error == "" {
-				t.Errorf("while retrying: %+v", st)
-			}
+	// a failed download waits for a word (no cadence): each time it waits, a client says one
+	for i := 0; i < 2; i++ {
+		st := waitStatus(t, sup, "retrying", func(st run.Status) bool { return st.Upgrade != nil && st.Upgrade.State == "retrying" })
+		if st.Model != "starter" || st.ModelTier != "starter" || st.Upgrade.Error == "" || st.Upgrade.RetryInS != 0 {
+			t.Errorf("while retrying: %+v", st)
 		}
-		return st.Phase == "ready" && st.Model == "target"
-	})
-	if !sawRetry {
-		t.Error("never saw the retrying state")
+		if n := strings.Count(s.order(), "target"); n != i+1 {
+			t.Fatalf("target requested %d times before word %d: retried without one", n, i+1)
+		}
+		if i == 0 {
+			sup.Begin()() // a request at the door, the starter serving it, is a word
+		} else {
+			sup.Network() // the network came back
+		}
+		waitStatus(t, sup, "the retry", func(st run.Status) bool { return st.Upgrade == nil || st.Upgrade.State != "retrying" })
 	}
+	waitStatus(t, sup, "swap", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "target" })
 	if n := strings.Count(s.order(), "target"); n != 3 {
 		t.Errorf("target requested %d times, want 3 (2 corrupt + 1 good): %s", n, s.order())
 	}
@@ -279,7 +289,8 @@ func TestTargetNeverFitsStaysOnStarter(t *testing.T) {
 	if strings.Contains(s.order(), "target") {
 		t.Error("the target was requested despite no room")
 	}
-	atomic.StoreInt32(&s.free, 1<<20) // the player frees space: the next check goes ahead
+	atomic.StoreInt32(&s.free, 1<<20) // the player frees space and the client says so
+	sup.Nudge("space freed")
 	waitStatus(t, sup, "swap after space appeared", func(st run.Status) bool { return st.Phase == "ready" && st.Model == "target" })
 }
 

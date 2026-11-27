@@ -6,6 +6,10 @@
 //	                           oom (die with an out-of-memory error), and the outputs
 //	                           starts.log and vram.<pid> (fake VRAM use for fake nvidia-smi)
 //	FAKELLAMA_HEALTH_DELAY     how long /health answers 503 (Go duration, default 0)
+//	FAKELLAMA_READY_LINES      "none": no listening line is ever printed (a build worded
+//	                           otherwise); "early": the ready lines are printed at once and
+//	                           /health turns 200 only after FAKELLAMA_HEALTH_DELAY, with no
+//	                           line after it
 //	FAKELLAMA_OOM_ABOVE        at load, -c above this value prints llama.cpp's allocation
 //	                           failure (with a buffer size) and exits 1
 //	FAKELLAMA_BYTES_PER_TOKEN  buffer bytes per ctx token for that message (default 52428)
@@ -27,19 +31,30 @@
 //	             print the CUDA out-of-memory lines (the server survives)
 //	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
 //	  loadfail   while present, every start fails while loading with a non-memory error
+//
+// It says the lines a real llama-server says, in the same order (run/testdata/ready-*.txt): once
+// the model is loaded and it listens, "llama_server: model loaded", "llama_server: listening on
+// http://..." and "update_slots: all slots are idle"; per request "launch_slot_ ... processing
+// task", then "release: ... stop processing" and, when none is left, "all slots are idle". The
+// engine hears that it is ready from those lines, as it does with the real server. Control files
+// are followed by the kernel's word of their change (host.Changes), never polled.
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/CharlesMod/easyEngine/host"
 )
 
 var withValue = map[string]bool{
@@ -107,7 +122,37 @@ func helpText(hidden map[string]bool) string {
 	return b.String()
 }
 
-var inflight int32
+var (
+	inflight int32
+	tasks    int32
+	outMu    sync.Mutex
+)
+
+// say prints lines together, as one goroutine of the server would.
+func say(lines ...string) {
+	outMu.Lock()
+	defer outMu.Unlock()
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+}
+
+// begin and finish say a request's lines as the real server does.
+func begin() int32 {
+	atomic.AddInt32(&inflight, 1)
+	t := atomic.AddInt32(&tasks, 1) - 1
+	say(fmt.Sprintf("slot launch_slot_: id  0 | task %d | processing task, is_child = 0", t))
+	return t
+}
+
+func finish(t int32) {
+	n := atomic.AddInt32(&inflight, -1)
+	l := []string{fmt.Sprintf("slot      release: id  0 | task %d | stop processing: n_tokens = 8, truncated = 0", t)}
+	if n == 0 {
+		l = append(l, "srv  update_slots: all slots are idle")
+	}
+	say(l...)
+}
 
 // recordBody writes the last completion request body to <ctl>/lastbody.json so tests can see
 // what the engine's proxy forwarded.
@@ -119,9 +164,9 @@ func recordBody(raw []byte) {
 
 // printOOM prints what a CUDA llama-server prints when a compute allocation fails mid-run.
 func printOOM() {
-	fmt.Println("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 512.00 MiB on device 0: cudaMalloc failed: out of memory")
-	fmt.Println("ggml_gallocr_reserve_n: failed to allocate CUDA0 buffer of size 536870912")
-	fmt.Println("decode: failed to decode, ret = -3")
+	say("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 512.00 MiB on device 0: cudaMalloc failed: out of memory",
+		"ggml_gallocr_reserve_n: failed to allocate CUDA0 buffer of size 536870912",
+		"decode: failed to decode, ret = -3")
 }
 
 func main() {
@@ -199,6 +244,7 @@ func main() {
 			f.Close()
 		}
 	}
+	fmt.Println("srv  llama_server: initializing ...")
 	fmt.Println("fakellama: loading model", vals["-m"])
 	if ctl != "" {
 		if _, err := os.Stat(filepath.Join(ctl, "loadfail")); err == nil {
@@ -229,7 +275,7 @@ func main() {
 		os.WriteFile(filepath.Join(ctl, fmt.Sprintf("vram.%d", os.Getpid())), []byte(strconv.Itoa(mib)), 0o644)
 	}
 	delay, _ := time.ParseDuration(os.Getenv("FAKELLAMA_HEALTH_DELAY"))
-	ready := time.Now().Add(delay)
+	var isReady atomic.Bool
 	alias := vals["-a"]
 	if alias == "" {
 		alias = vals["--alias"]
@@ -244,34 +290,58 @@ func main() {
 		_, err := os.Stat(filepath.Join(ctl, name))
 		return err == nil
 	}
-	go func() {
-		for {
-			time.Sleep(20 * time.Millisecond)
-			if exists("oom") {
-				os.Remove(filepath.Join(ctl, "oom")) // one shot: the restarted server must not die again
-				fmt.Println("CUDA error: out of memory")
-				fmt.Println("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024.00 MiB on device 0: cudaMalloc failed: out of memory")
+	var looped atomic.Bool // ready + 150 ms: from then on, a crashloop file ends this server
+	crashloop := func() {
+		if !looped.Load() {
+			return
+		}
+		if b, err := os.ReadFile(filepath.Join(ctl, "crashloop")); err == nil {
+			if lim, _ := strconv.Atoi(strings.TrimSpace(string(b))); lim == 0 || c > lim {
+				say("fakellama: GGML_ASSERT failed: illegal memory access")
 				os.Exit(1)
-			}
-			if exists("crash") {
-				os.Remove(filepath.Join(ctl, "crash"))
-				fmt.Println("fakellama: Segmentation fault (core dumped)")
-				os.Exit(1)
-			}
-			if exists("oomlog") {
-				os.Remove(filepath.Join(ctl, "oomlog"))
-				printOOM()
-			}
-			if b, err := os.ReadFile(filepath.Join(ctl, "crashloop")); err == nil && time.Now().After(ready.Add(150*time.Millisecond)) {
-				if lim, _ := strconv.Atoi(strings.TrimSpace(string(b))); lim == 0 || c > lim {
-					fmt.Println("fakellama: GGML_ASSERT failed: illegal memory access")
-					os.Exit(1)
-				}
 			}
 		}
-	}()
+	}
+	controls := map[string]func(){
+		"oom": func() {
+			if exists("oom") {
+				os.Remove(filepath.Join(ctl, "oom")) // one shot: the restarted server must not die again
+				say("CUDA error: out of memory",
+					"ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1024.00 MiB on device 0: cudaMalloc failed: out of memory")
+				os.Exit(1)
+			}
+		},
+		"crash": func() {
+			if exists("crash") {
+				os.Remove(filepath.Join(ctl, "crash"))
+				say("fakellama: Segmentation fault (core dumped)")
+				os.Exit(1)
+			}
+		},
+		"oomlog": func() {
+			if exists("oomlog") && os.Remove(filepath.Join(ctl, "oomlog")) == nil {
+				printOOM()
+			}
+		},
+		"crashloop": crashloop,
+	}
+	if ctl != "" {
+		for name, f := range controls {
+			ch, _, err := host.Changes(filepath.Join(ctl, name))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "fakellama: cannot follow", name, err)
+				os.Exit(1)
+			}
+			go func() {
+				for range ch {
+					f()
+				}
+			}()
+			f() // a control file already there when the server starts
+		}
+	}
 	loading := func(w http.ResponseWriter) bool {
-		if time.Now().Before(ready) {
+		if !isReady.Load() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(503)
 			fmt.Fprint(w, `{"error":{"code":503,"message":"Loading model","type":"unavailable_error"}}`)
@@ -319,8 +389,8 @@ func main() {
 		if loading(w) {
 			return
 		}
-		atomic.AddInt32(&inflight, 1)
-		defer atomic.AddInt32(&inflight, -1)
+		t := begin()
+		defer finish(t)
 		if exists("oomreq") {
 			printOOM()
 			w.Header().Set("Content-Type", "application/json")
@@ -341,17 +411,38 @@ func main() {
 			if gap == 0 {
 				gap = 100 * time.Millisecond
 			}
+			gated := os.Getenv("FAKELLAMA_STREAM_GATE") != "" && ctl != ""
 			for i := 0; i < 5; i++ {
 				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d \"}}]}\n\n", i)
 				fl.Flush()
-				time.Sleep(gap)
+				if gated && i < 4 {
+					// the next chunk only once the test has read this one: <ctl>/go.<i+1>, by
+					// the kernel's word of its making (a proxy that buffered would never let
+					// the test read, and the test fails on its own watchdog)
+					gate := filepath.Join(ctl, fmt.Sprintf("go.%d", i+1))
+					ch, stop, err := host.Changes(gate)
+					if err != nil {
+						return
+					}
+					for !exists(filepath.Base(gate)) {
+						select {
+						case <-ch:
+						case <-r.Context().Done():
+							stop()
+							return
+						}
+					}
+					stop()
+					continue
+				}
+				time.Sleep(gap) // named moment: FAKELLAMA_STREAM_DELAY, the fake's pace between tokens
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			fl.Flush()
 			return
 		}
 		if d, _ := time.ParseDuration(os.Getenv("FAKELLAMA_CHAT_DELAY")); d > 0 {
-			time.Sleep(d)
+			time.Sleep(d) // named moment: FAKELLAMA_CHAT_DELAY, how long the fake takes to answer
 		}
 		js(w, map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}})
 	}
@@ -360,14 +451,13 @@ func main() {
 		if loading(w) {
 			return
 		}
-		atomic.AddInt32(&inflight, 1)
-		defer atomic.AddInt32(&inflight, -1)
+		t := begin()
+		defer finish(t)
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
 		js(w, map[string]any{"content": "ready", "stop": true})
 	})
 	addr := vals["--host"] + ":" + vals["--port"]
-	fmt.Println("fakellama: listening on", addr)
 	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,
 	// so the engine's proxy tests can check it neither leaks nor lets CORS through.
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +468,38 @@ func main() {
 		w.Header().Set("X-Fake-Saw-Authorization", r.Header.Get("Authorization"))
 		mux.ServeHTTP(w, r)
 	})
-	if err := http.ListenAndServe(addr, wrapped); err != nil {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	readyLines := os.Getenv("FAKELLAMA_READY_LINES")
+	sayReady := func() {
+		say("srv  llama_server: model loaded",
+			"srv  llama_server: listening on http://"+addr,
+			"srv  update_slots: all slots are idle")
+	}
+	becomeReady := func() {
+		isReady.Store(true)
+		switch readyLines {
+		case "none":
+			say("srv  llama_server: model loaded", "srv  update_slots: all slots are idle")
+		case "early": // printed already, before /health answered
+		default:
+			sayReady()
+		}
+		// named moment: a crashloop server ends 150 ms after it turns ready
+		time.AfterFunc(150*time.Millisecond, func() { looped.Store(true); crashloop() })
+	}
+	if readyLines == "early" {
+		sayReady()
+	}
+	if delay > 0 {
+		time.AfterFunc(delay, becomeReady) // named moment: FAKELLAMA_HEALTH_DELAY, how long the load takes
+	} else {
+		becomeReady()
+	}
+	if err := http.Serve(ln, wrapped); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

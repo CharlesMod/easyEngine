@@ -216,9 +216,9 @@ func answer(info Info, query []byte, addrs []net.IP, legacy bool) (reply []byte,
 		put(&add, info.addrRecs(addrs, true, ttlOf(ttlHost), flush)...)
 		put(&add, info.addrRecs(addrs, false, ttlOf(ttlHost), flush)...)
 	}
-	inst, host := strings.ToLower(info.instance()), strings.ToLower(info.host())
+	inst, host := foldName(info.instance()), foldName(info.host())
 	for _, qs := range q.Questions {
-		name := strings.ToLower(qs.Name.String())
+		name := foldName(qs.Name.String())
 		if qs.Class&cacheFlush != 0 {
 			qu = true
 		}
@@ -284,6 +284,18 @@ func answer(info Info, query []byte, addrs []net.IP, legacy bool) (reply []byte,
 	return b, true, qu
 }
 
+// foldName compares DNS names as DNS does: ASCII letters without regard to case, every other
+// byte as it is (RFC 4343). Queriers may send any case, and some randomise it.
+func foldName(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
 // Parse pulls engines out of a response (answers and additionals), joining
 // PTR to SRV to TXT to A/AAAA by name. Entries without an id TXT are skipped.
 // A goodbye (TTL 0) parses like any other response.
@@ -300,7 +312,7 @@ func Parse(msg []byte) []Found {
 	srvs := map[string]srvRec{}
 	txts := map[string][]string{}
 	addrs := map[string][]net.IP{}
-	low := strings.ToLower
+	low := foldName
 	for _, r := range append(append([]dnsmessage.Resource{}, m.Answers...), m.Additionals...) {
 		name := low(r.Header.Name.String())
 		switch b := r.Body.(type) {

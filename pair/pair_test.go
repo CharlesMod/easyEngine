@@ -41,10 +41,10 @@ func TestAllowIssuesAtCollectionOnce(t *testing.T) {
 	if !ok || strings.Contains(string(f.Body), id) || strings.Contains(string(f.Body), "token") || !strings.Contains(string(f.Body), req.Code) {
 		t.Fatalf("fact: %v %s", ok, f.Body)
 	}
-	if _, err := p.Answer(id, true); !errors.Is(err, ErrNoRequest) {
+	if _, err := p.Answer(id, req.Code, true); !errors.Is(err, ErrNoRequest) {
 		t.Fatal("the secret id answered as a key")
 	}
-	if _, err := p.Answer(req.Key, true); err != nil {
+	if _, err := p.Answer(req.Key, req.Code, true); err != nil {
 		t.Fatal(err)
 	}
 	if iss.n != 0 {
@@ -73,7 +73,7 @@ func TestWaitKeepsTheRequestWhenTheClientHangsUp(t *testing.T) {
 	if len(p.Waiting()) != 1 {
 		t.Fatal("the request did not keep waiting")
 	}
-	p.Answer(req.Key, false)
+	p.Answer(req.Key, req.Code, false)
 	if r, _ := p.Wait(context.Background(), id); r.Outcome != Denied {
 		t.Fatalf("deny: %+v", r)
 	}

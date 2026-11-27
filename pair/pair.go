@@ -39,6 +39,7 @@ var (
 	ErrNoRequest = errors.New("no such pairing request")                 // 404 to the answerer, 410 to the client
 	ErrAmbiguous = errors.New("that code matches more than one request") // refused: answer by id
 	ErrClosed    = errors.New("the engine is ending")
+	ErrChanged   = errors.New("the request changed; look again")         // the key now shows another code
 )
 
 // Issuer makes a token for a named client (internal/tokens.Store).
@@ -336,13 +337,20 @@ func (p *Pairer) Withdraw(id string) bool {
 	return true
 }
 
-// Answer is a person's Allow (allow true) or Deny for the waiting request with this public key.
-func (p *Pairer) Answer(key string, allow bool) (Request, error) {
+// Answer is a person's Allow (allow true) or Deny for the waiting request with this public key
+// and the code the person compared. The key outlives a replacement by the same source (a new
+// code under the old key), so the answer binds to the code too: a request under that key that
+// shows another code is ErrChanged, and nothing is ended or issued.
+func (p *Pairer) Answer(key, code string, allow bool) (Request, error) {
+	code = strings.ReplaceAll(code, " ", "")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.byKeyLocked(key)
 	if key == "" || r == nil || r.state != waiting {
 		return Request{}, ErrNoRequest
+	}
+	if r.Code != code {
+		return Request{}, ErrChanged
 	}
 	st := denied
 	if allow {

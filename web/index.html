@@ -149,15 +149,15 @@ function loadPairs(){
       row.appendChild(code);
       row.appendChild(el('span',null,q.name+(q.from?' ('+q.from+')':'')));
       var ok=el('button','pri','Allow'),no=el('button',null,'Deny');
-      ok.addEventListener('click',function(){answerPair(q.key,true)});
-      no.addEventListener('click',function(){answerPair(q.key,false)});
+      ok.addEventListener('click',function(){answerPair(q.key,q.code,true)});
+      no.addEventListener('click',function(){answerPair(q.key,q.code,false)});
       row.appendChild(ok);row.appendChild(no);box.appendChild(row);
     });
     $('pairs').className='card'+(list.length?'':' hide');
   }).catch(function(){$('pairs').className='card hide'});
 }
-function answerPair(key,allow){
-  return call('POST','pairing/answer',{key:key,allow:allow}).catch(function(e){toast=String(e.message||e);render()}).then(loadPairs);
+function answerPair(key,code,allow){
+  return call('POST','pairing/answer',{key:key,code:code,allow:allow}).catch(function(e){toast=String(e.message||e);render()}).then(loadPairs);
 }
 
 function setLight(e,c){e.className='light'+(c?' '+c:'')}

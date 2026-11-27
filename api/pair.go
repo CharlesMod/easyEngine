@@ -42,6 +42,7 @@ const (
 	CodeBadRequest  = "bad_request"  // 400 on a keyless path: the body was not {name} JSON
 	CodePairFailed  = "pair_failed"  // 500: the engine could not open the request (detail in its log)
 	CodeIssueFailed = "issue_failed" // 500: the engine could not issue the token (detail in its log); the Allow stands
+	CodePairChanged = "pair_changed" // 409: the key now shows another code (its source asked again): look again
 )
 
 func failCode(w http.ResponseWriter, status int, code, msg string) {
@@ -211,8 +212,8 @@ func (a *API) pairAnswer(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.Allow == nil || (in.Key == "") == (in.Code == "") {
-		fail(w, http.StatusBadRequest, "send {key or code, allow: true|false}")
+	if in.Allow == nil || in.Code == "" {
+		fail(w, http.StatusBadRequest, "send {code, allow: true|false}, with the request's key beside the code when you have it")
 		return
 	}
 	if a.Pair == nil {
@@ -220,7 +221,7 @@ func (a *API) pairAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := in.Key
-	if in.Code != "" {
+	if key == "" { // by code alone: the code is the thing matched
 		req, err := a.Pair.ByCode(in.Code)
 		switch {
 		case errors.Is(err, pair.ErrAmbiguous):
@@ -232,8 +233,12 @@ func (a *API) pairAnswer(w http.ResponseWriter, r *http.Request) {
 		}
 		key = req.Key
 	}
-	req, err := a.Pair.Answer(key, *in.Allow)
-	if err != nil {
+	req, err := a.Pair.Answer(key, in.Code, *in.Allow)
+	switch {
+	case errors.Is(err, pair.ErrChanged):
+		failCode(w, http.StatusConflict, CodePairChanged, err.Error())
+		return
+	case err != nil:
 		fail(w, http.StatusNotFound, err.Error())
 		return
 	}

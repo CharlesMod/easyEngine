@@ -155,7 +155,8 @@ processed.
   with `POST pair {name}` -> `{id, code}` and a held `GET pair/{id}`; the person compares the
   six-digit code and answers on the setup page, in the tray or with `easy-engine pair`. Answering
   needs loopback or the master token, never a paired client's token. No expiry timer and no rate
-  clock: one waiting request per source address (a new ask replaces it and is not notified again; a
+  clock: one waiting request per source address (a new ask replaces it under the same key and is not notified again, so an answer names the code
+  the person compared and a stale one is refused, `pair_changed`; a
   denied address is listed, never notified), at most 4 across addresses, the oldest pushed out. The token is issued per
   client (hashed, named, listed, revocable) when the client collects an Allow, shown once, and
   is never logged, in a URL or on the stream. The facts `pairing` (keyed by a public key, never

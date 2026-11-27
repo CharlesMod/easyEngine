@@ -330,8 +330,12 @@ func TestPairOneWaitingRequestPerSource(t *testing.T) {
 	if len(pe.pr.Waiting()) != 2 {
 		t.Fatal("a second source did not get its own request")
 	}
+	// the person's side must name the code with the key: without it 400
+	if c, b := answer(t, pe, bearer(pe.master), `{"key":"`+key+`","allow":false}`); c != 400 {
+		t.Fatalf("key without code: %d %s", c, b)
+	}
 	// after a Deny, the source's next request is listed but quiet
-	if c, b := answer(t, pe, bearer(pe.master), `{"key":"`+key+`","allow":false}`); c != 200 {
+	if c, b := answer(t, pe, bearer(pe.master), `{"key":"`+key+`","code":"`+code+`","allow":false}`); c != 200 {
 		t.Fatalf("deny: %d %s", c, b)
 	}
 	if r := waitCollected(t, collect(t, pe, last)); r.code != 403 {

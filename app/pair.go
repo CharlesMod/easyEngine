@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/CharlesMod/easyEngine/discover"
+	osevents "github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/run"
 )
 
@@ -37,6 +38,30 @@ func engineName(sup *run.Supervisor) string {
 		h = h[:i]
 	}
 	return h
+}
+
+// followFile calls changed on each change of the file at path, as the system says it
+// (host.Changes watches the file's directory, so the file need not exist yet: its creation,
+// each rewrite and each rename onto it are told). The func ends the watch and waits for no call
+// to be running after it returns.
+func followFile(path string, changed func()) (func(), error) {
+	ch, stop, err := osevents.Changes(path)
+	if err != nil {
+		return nil, err
+	}
+	done, ended := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(ended)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ch:
+				changed()
+			}
+		}
+	}()
+	return func() { close(done); <-ended; stop() }, nil
 }
 
 // announcer keeps the mDNS responder in step with the settings: started when discovery is on

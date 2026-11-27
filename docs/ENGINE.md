@@ -1199,11 +1199,14 @@ side needs no token; non-GET calls carry `X-Easy-Engine: 1` like every other.
 | `GET pair/{id}` | held until the person answers. 200 `{"token","client_id","engine_id"}` on Allow: the token is issued now and shown this once; 403 `{"error","code":"pair_denied"}` on Deny; 410 `{"error","code":"pair_gone"}` when the request is gone: collected already, withdrawn, pushed out by the cap, never known, replaced by a newer ask from the same address, or the engine restarted or quit; 500 `{"error","code":"issue_failed"}` when the token could not be written (the Allow stands: GET again). A client that hangs up leaves its request waiting and may GET it again |
 | `DELETE pair/{id}` | the client withdraws for good: 204; 410 `pair_gone` if unknown |
 | `GET pairing` | the person's side (loopback listener or the master token only; else 403 `not_allowed`, and 401 with no token on the network): 200 `{"offered":bool,"requests":[{"key","name","code","from","quiet"?}]}`, oldest first; `quiet: true` on a request from an address the person denied in this life |
-| `POST pairing/answer {key\|code, allow}` | the same rule: 200 `{"key","name","code","allowed"}`; 404 no waiting request with that key or code; 409 a code two requests show; 400 without exactly one of key and code, or without `allow` |
+| `POST pairing/answer {key?, code, allow}` | the same rule: the answer names the `code` the person compared, with the request's `key` beside it when the caller has it (the page and the tray do; `easy-engine pair` answers by code alone). 200 `{"key","name","code","allowed"}`; 404 no waiting request with that key or code; 409 `{"error","code":"pair_changed"}` when the key's request now shows another code (its source asked again since): nothing is answered, look again; 409 a code two requests show (by code alone); 400 without `code` or `allow` |
 
 A request waits until it is answered, withdrawn, replaced or pushed out. One source address has
 at most one waiting request: a new ask from it replaces the old one (whose held GET gets 410)
-under the same public `key`, with a new code and id, so the person is not notified again. At most
+under the same public `key`, with a new code and id, so the person is not notified again. Because
+the key outlives a replacement, every answer binds to the code the person saw: an Allow or Deny
+named for the old code is refused (`pair_changed`), ends nothing and issues nothing; the person
+looks again at the new code. At most
 4 wait across sources, and a new one over that pushes the oldest out. Answered requests not yet
 collected are capped at 4 the same way. Once the person has denied a request from an address, that
 address's later requests in this life are still listed but marked `quiet` and raise no

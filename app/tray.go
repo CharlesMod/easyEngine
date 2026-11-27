@@ -121,8 +121,8 @@ func menu(v view) []tray.Item {
 	var items []tray.Item
 	for _, p := range v.pairs {
 		items = append(items,
-			tray.Item{ID: "allow:" + p.key, Title: "Allow " + p.label()},
-			tray.Item{ID: "deny:" + p.key, Title: "Deny " + p.label()})
+			tray.Item{ID: "allow:" + p.key + ":" + p.code, Title: "Allow " + p.label()},
+			tray.Item{ID: "deny:" + p.key + ":" + p.code, Title: "Deny " + p.label()})
 	}
 	if len(items) > 0 {
 		items = append(items, tray.Item{ID: "pairing-sep", Separator: true})
@@ -215,21 +215,24 @@ func (c *controller) click(id string) {
 	case "quit":
 		c.quit()
 	default:
-		if key, ok := strings.CutPrefix(id, "allow:"); ok {
-			c.answer(key, true)
-		} else if key, ok := strings.CutPrefix(id, "deny:"); ok {
-			c.answer(key, false)
+		if rest, ok := strings.CutPrefix(id, "allow:"); ok {
+			c.answer(rest, true)
+		} else if rest, ok := strings.CutPrefix(id, "deny:"); ok {
+			c.answer(rest, false)
 		}
 	}
 	c.refresh()
 }
 
-// answer is the person's Allow or Deny from the menu.
-func (c *controller) answer(key string, allow bool) {
+// answer is the person's Allow or Deny from the menu. The item's id carries the key and the code
+// the item showed ("<key>:<code>"), so a press answers the request the person compared and not
+// a replacement that took its key since the menu was drawn.
+func (c *controller) answer(keyCode string, allow bool) {
 	if c.pair == nil {
 		return
 	}
-	if _, err := c.pair.Answer(key, allow); err != nil {
+	key, code, _ := strings.Cut(keyCode, ":")
+	if _, err := c.pair.Answer(key, code, allow); err != nil {
 		log.Printf("easy-engine: pairing answer: %v", err)
 	}
 }

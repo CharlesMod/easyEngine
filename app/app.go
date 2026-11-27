@@ -429,19 +429,8 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		// tokens.json is followed as settings.json is (the kernel's word): a revoke, by
 		// `easy-engine token --revoke` or anything else that rewrites the file, takes the
 		// client's fact down at once, as the gate already refuses its token.
-		if tch, stopTokens, err := osevents.Changes(tk.Path()); err == nil {
-			tdone := make(chan struct{})
-			defer func() { close(tdone); stopTokens() }()
-			go func() {
-				for {
-					select {
-					case <-tdone:
-						return
-					case <-tch:
-						a.ForgetRevoked()
-					}
-				}
-			}()
+		if stopTokens, err := followFile(tk.Path(), a.ForgetRevoked); err == nil {
+			defer stopTokens()
 		} else {
 			log.Printf("easy-engine: cannot follow %s (%v): a revoked client's fact stands until the next start", tk.Path(), err)
 		}

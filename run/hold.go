@@ -17,14 +17,41 @@ const APIVersion = 1
 // count are taken under one lock, so a reshape that says its phase before it drains cannot slip
 // in between. A held request is not in flight: the hang watchdog does not arm for a request the
 // model server has not seen, and a drain does not wait for a request that waits for it.
-func (s *Supervisor) Enter() (Route, func()) {
+//
+// id is the request's id (X-Request-Id), said in the request begin and end so a client pairs
+// them; end takes what the streamer read of the reply (nil for one it did not read).
+func (s *Supervisor) Enter(id string) (Route, func(*RequestEnd)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rt := s.routeLocked()
 	if rt.Hold {
 		return rt, nil
 	}
-	return rt, s.Begin()
+	return rt, s.begin(id)
+}
+
+// RequestEnd is what the streamer read of a streamed reply (api fills it from stream.Summary):
+// how it ended, the finish reason, the token counts, the decode rate and timings, the slot. It
+// is said in the request end happening; a decode rate it carries is status tok_s.
+type RequestEnd struct {
+	End              string  `json:"end,omitempty"` // done | upstream_error | ended_early | client_gone
+	Events           int     `json:"events,omitempty"`
+	FinishReason     string  `json:"finish_reason,omitempty"`
+	PromptTokens     int     `json:"prompt_tokens,omitempty"`
+	CachedTokens     int     `json:"cached_tokens,omitempty"`
+	CompletionTokens int     `json:"completion_tokens,omitempty"`
+	TokS             float64 `json:"tok_s,omitempty"`
+	PromptMs         float64 `json:"prompt_ms,omitempty"`
+	PredictedMs      float64 `json:"predicted_ms,omitempty"`
+	Slot             *int    `json:"slot,omitempty"`
+}
+
+// requestSaid is the body of the request happening.
+type requestSaid struct {
+	What     string `json:"what"` // begin | end
+	Inflight int    `json:"inflight"`
+	ID       string `json:"id,omitempty"`
+	*RequestEnd
 }
 
 // Hold counts one request held at the door until the model is up; call the result when the

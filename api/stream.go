@@ -116,6 +116,23 @@ type fwd struct {
 	open, quiet time.Duration
 	// sw is the stream a held request opened before its hold (proxy); forward goes on in it.
 	sw *streamWriter
+	// onEnd takes the streamer's summary of a streamed reply (stream.Options.OnEnd).
+	onEnd func(stream.Summary)
+}
+
+// ending is f with the streamer's summary kept in *to (said in the request's end).
+func (f fwd) ending(to **run.RequestEnd) fwd {
+	f.onEnd = func(s stream.Summary) {
+		re := &run.RequestEnd{End: string(s.End), Events: s.Events, FinishReason: s.FinishReason,
+			PromptTokens: s.PromptTokens, CachedTokens: s.CachedTokens, CompletionTokens: s.CompletionTokens,
+			TokS: s.TokPerSec, PromptMs: s.PromptMs, PredictedMs: s.PredictedMs}
+		if s.Slot >= 0 {
+			slot := s.Slot
+			re.Slot = &slot
+		}
+		*to = re
+	}
+	return f
 }
 
 // with is f going on in the stream a held request opened (nil: none).
@@ -268,6 +285,7 @@ func streamThrough(w http.ResponseWriter, r *http.Request, rp *httputil.ReverseP
 		resp.Body = stream.New(resp.Body, stream.Options{
 			Dialect:   d,
 			OnEvent:   f.onEvent,
+			OnEnd:     f.onEnd,
 			Cut:       sw.cut,
 			Gone:      func() bool { return ctx.Err() != nil },
 			RequestID: f.id,

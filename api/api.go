@@ -401,6 +401,7 @@ type settingsPatch struct {
 	LingerS       *int    `json:"linger_s"`
 	KVType        *string `json:"kv_type"`
 	SamplerPolicy *string `json:"sampler_policy"`
+	Streamer      *string `json:"streamer"`
 }
 
 // apply lays the named fields over the current settings (whose api key is blank: SetSettings
@@ -429,6 +430,12 @@ func (p settingsPatch) apply(cur run.Settings) run.Settings {
 	}
 	if p.SamplerPolicy != nil {
 		cur.SamplerPolicy = *p.SamplerPolicy
+	}
+	if p.Streamer != nil {
+		cur.Streamer = *p.Streamer
+		if cur.Streamer == "" {
+			cur.Streamer = "-" // an explicit empty value is refused, not taken as "keep"
+		}
 	}
 	return cur
 }

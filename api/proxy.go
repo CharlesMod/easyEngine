@@ -42,7 +42,7 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	id := requestID(r)
 	w.Header().Set(RequestIDHeader, id)
-	rt, done := a.S.Enter()
+	rt, done := a.S.Enter(id)
 	var sw *streamWriter // a streamed request's stream, opened before its hold
 	if rt.Hold {
 		if a.S.Streamer() && r.Method == http.MethodPost && completionPath(r.URL.Path) {
@@ -59,11 +59,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var ok bool
-		if rt, done, ok = a.hold(r); !ok {
+		if rt, done, ok = a.hold(r, id); !ok {
 			return // the client went away while held
 		}
 	}
-	defer done()
+	var sum *run.RequestEnd // what the streamer read of the reply, said in the request's end
+	defer func() { done(sum) }()
 	if sw != nil {
 		w = sw // from here every answer goes through the stream opened for the hold
 	}
@@ -115,7 +116,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		forward(w, r, rp, a.fwd(true, id).with(sw))
+		forward(w, r, rp, a.fwd(true, id).with(sw).ending(&sum))
 	default:
 		target, err := url.Parse(rt.URL)
 		if err != nil {
@@ -136,7 +137,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ModifyResponse: dropCORS,
 			ErrorHandler:   badGateway,
 		}
-		forward(w, r, rp, a.fwd(false, id).with(sw))
+		forward(w, r, rp, a.fwd(false, id).with(sw).ending(&sum))
 	}
 }
 
@@ -150,17 +151,17 @@ var holdOn = []string{"phase", "model", "yield", "upgrade"}
 // context) or the engine's end. The held request is counted (Supervisor.Hold: the door fact, the
 // resident app's linger), never in flight. It answers the route to forward by and the end of its
 // count in flight; ok is false when the client went away while held.
-func (a *API) hold(r *http.Request) (rt run.Route, end func(), ok bool) {
+func (a *API) hold(r *http.Request, id string) (rt run.Route, end func(*run.RequestEnd), ok bool) {
 	hub := a.S.Hub()
 	wk, err := hub.Wake(holdOn...)
 	if err != nil { // a book without the names: answer as before the hold
-		return run.Route{Kind: "unavailable", Message: "Loading model"}, func() {}, true
+		return run.Route{Kind: "unavailable", Message: "Loading model"}, func(*run.RequestEnd) {}, true
 	}
 	defer wk.Close()
 	release := a.S.Hold()
 	defer release()
 	for {
-		if rt, end = a.S.Enter(); !rt.Hold {
+		if rt, end = a.S.Enter(id); !rt.Hold {
 			return rt, end, true
 		}
 		select {
@@ -168,7 +169,7 @@ func (a *API) hold(r *http.Request) (rt run.Route, end func(), ok bool) {
 		case <-r.Context().Done():
 			return rt, nil, false
 		case <-hub.Done():
-			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, func() {}, true
+			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, func(*run.RequestEnd) {}, true
 		}
 	}
 }

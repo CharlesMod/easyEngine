@@ -55,6 +55,7 @@ type door struct {
 	idleLong bool // GrowIdle has passed since the count last reached zero
 	why      causes
 	held     atomic.Int32 // requests held until the model is up (Hold); never in flight
+	tokSaid  bool         // a reply's own decode rate was said since the last idle: no /metrics read
 }
 
 // wakeMind records why and wakes the reactor (a writer never blocks: wakes coalesce).
@@ -81,6 +82,13 @@ func (s *Supervisor) Nudge(why string) { s.nudge(why) }
 
 // Begin marks a request at the door in flight; call the result when it ends.
 func (s *Supervisor) Begin() func() {
+	end := s.begin("")
+	return func() { end(nil) }
+}
+
+// begin is Begin with the request's id (said in the begin and the end, so a client pairs them);
+// the end may carry what the streamer read of the reply.
+func (s *Supervisor) begin(id string) func(*RequestEnd) {
 	d := &s.door
 	d.mu.Lock()
 	d.inflight++
@@ -98,12 +106,12 @@ func (s *Supervisor) Begin() func() {
 		d.hang.Heard()
 	}
 	d.mu.Unlock()
-	s.say("request", "", map[string]any{"what": "begin", "inflight": n})
+	s.say("request", "", requestSaid{What: "begin", Inflight: n, ID: id})
 	if s.listeners.Load() > 0 { // a request is a word for whatever waits for one (an agent, a download)
 		s.nudge("request")
 	}
 	var once sync.Once
-	return func() { once.Do(s.end) }
+	return func(re *RequestEnd) { once.Do(func() { s.end(id, re) }) }
 }
 
 // newHang makes the watchdog on the requests in flight.
@@ -113,11 +121,20 @@ func (s *Supervisor) newHang() *host.Silence {
 }
 
 // end is one request ending.
-func (s *Supervisor) end() {
+func (s *Supervisor) end(id string, re *RequestEnd) {
 	d := &s.door
+	streamed := re != nil && re.TokS > 0
+	if streamed { // the reply said its own decode rate: status says it, no /metrics read for it
+		s.mu.Lock()
+		s.tokS = re.TokS
+		s.mu.Unlock()
+	}
 	d.mu.Lock()
 	d.inflight--
 	n := d.inflight
+	if streamed {
+		d.tokSaid = true
+	}
 	if n == 0 {
 		if d.hang != nil {
 			d.hang.Stop()
@@ -129,7 +146,7 @@ func (s *Supervisor) end() {
 		d.hang.Heard()
 	}
 	d.mu.Unlock()
-	s.say("request", "", map[string]any{"what": "end", "inflight": n})
+	s.say("request", "", requestSaid{What: "end", Inflight: n, ID: id, RequestEnd: re})
 	if n == 0 {
 		select {
 		case s.poke <- struct{}{}:
@@ -431,6 +448,10 @@ func (s *Supervisor) react() {
 	c := d.why
 	d.why = causes{}
 	idleLong, n := d.idleLong, d.inflight
+	tokSaid := d.tokSaid
+	if c.idle && n == 0 {
+		d.tokSaid = false
+	}
 	d.mu.Unlock()
 	s.mu.Lock()
 	local := s.st.Mode == "local"
@@ -439,7 +460,7 @@ func (s *Supervisor) react() {
 	if !local {
 		url = "" // requests go elsewhere: no server of ours to read or ask
 	}
-	if c.idle && n == 0 && url != "" {
+	if c.idle && n == 0 && url != "" && !tokSaid {
 		s.readTokS(url)
 	}
 	restart := false

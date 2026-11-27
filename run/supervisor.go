@@ -130,6 +130,8 @@ type Settings struct {
 	KVType      string `json:"kv_type"`
 	// SamplerPolicy is enforce | fill | off; empty keeps the stored value.
 	SamplerPolicy string `json:"sampler_policy,omitempty"`
+	// Streamer is the token streamer, on | off (docs/STREAMING.md); empty keeps the stored value.
+	Streamer string `json:"streamer,omitempty"`
 }
 
 // Route tells the proxy where a request goes.
@@ -943,7 +945,11 @@ func (s *Supervisor) Settings() Settings {
 	defer s.mu.Unlock()
 	e := s.st.External
 	e.APIKey = ""
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy}
+	streamer := s.sf.streamer
+	if streamer == "" {
+		streamer = "on"
+	}
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer}
 }
 
 // LingerS is the stored linger setting.
@@ -978,7 +984,13 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	if in.LingerS < 0 {
 		return fmt.Errorf("linger_s must not be negative")
 	}
+	if in.Streamer != "" && in.Streamer != "on" && in.Streamer != "off" {
+		return fmt.Errorf("streamer must be on or off")
+	}
 	s.mu.Lock()
+	if in.Streamer != "" { // read by the proxy per request: applies to the next one
+		s.sf.streamer = in.Streamer
+	}
 	old := s.st.Mode
 	oldKV := s.st.KVType
 	s.st.Mode = in.Mode

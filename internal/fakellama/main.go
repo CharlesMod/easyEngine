@@ -17,6 +17,8 @@
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
+//	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
+//	                           id_slot 0, timings with predicted_per_second 50) before [DONE]
 //	(every completion request body is saved to <ctl>/lastbody.json)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
@@ -437,6 +439,10 @@ func main() {
 					continue
 				}
 				time.Sleep(gap) // named moment: FAKELLAMA_STREAM_DELAY, the fake's pace between tokens
+			}
+			if os.Getenv("FAKELLAMA_TIMINGS") != "" { // the last chunk llama-server sends: finish, slot, timings
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"id_slot\":0,\"timings\":{\"cache_n\":3,\"prompt_n\":7,\"prompt_ms\":12.5,\"predicted_n\":5,\"predicted_ms\":100,\"predicted_per_second\":50}}\n\n")
+				fl.Flush()
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			fl.Flush()

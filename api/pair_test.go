@@ -2,7 +2,10 @@ package api_test
 
 import (
 	"encoding/json"
+	"net"
+	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -270,17 +273,82 @@ func TestPairDenyAndWithdraw(t *testing.T) {
 	}
 }
 
+// askFrom opens a pairing request from the local source address ip (127.0.0.x on Linux).
+func askFrom(t *testing.T, pe pairEnv, ip, name string) (string, string) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("needs 127.0.0.x source addresses")
+	}
+	cl := &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(ip)}}).DialContext}}
+	req, _ := http.NewRequest("POST", pe.srv.URL+"/engine/v1/pair", strings.NewReader(`{"name":"`+name+`"}`))
+	req.Header.Set("X-Easy-Engine", "1")
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var r struct{ ID, Code string }
+	json.NewDecoder(resp.Body).Decode(&r)
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST pair from %s: %d", ip, resp.StatusCode)
+	}
+	return r.ID, r.Code
+}
+
 func TestPairCapPushesTheOldestOut(t *testing.T) {
 	pe := pairServer(t) // cap 2
-	first, _ := ask(t, pe, "one")
+	first, _ := askFrom(t, pe, "127.0.0.11", "one")
 	got := collect(t, pe, first)
-	ask(t, pe, "two")
-	ask(t, pe, "three")
+	askFrom(t, pe, "127.0.0.12", "two")
+	askFrom(t, pe, "127.0.0.13", "three")
 	if r := waitCollected(t, got); r.code != 410 {
 		t.Fatalf("the oldest over the cap: %+v", r)
 	}
 	if n := len(pe.pr.Waiting()); n != 2 {
 		t.Fatalf("waiting: %d", n)
+	}
+}
+
+// One source has one waiting request: a new ask replaces it under the same public key.
+func TestPairOneWaitingRequestPerSource(t *testing.T) {
+	pe := pairServer(t)
+	first, _ := askFrom(t, pe, "127.0.0.21", "mod")
+	got := collect(t, pe, first)
+	key := pe.pr.Waiting()[0].Key
+	var last, code string
+	for i := 0; i < 100; i++ {
+		last, code = askFrom(t, pe, "127.0.0.21", "mod")
+	}
+	if r := waitCollected(t, got); r.code != 410 {
+		t.Fatalf("the replaced request: %+v", r)
+	}
+	w := pe.pr.Waiting()
+	if len(w) != 1 || w[0].Key != key || w[0].Code != code || w[0].From != "127.0.0.21" {
+		t.Fatalf("waiting after 100 asks: %+v", w)
+	}
+	askFrom(t, pe, "127.0.0.22", "other")
+	if len(pe.pr.Waiting()) != 2 {
+		t.Fatal("a second source did not get its own request")
+	}
+	// after a Deny, the source's next request is listed but quiet
+	if c, b := answer(t, pe, bearer(pe.master), `{"key":"`+key+`","allow":false}`); c != 200 {
+		t.Fatalf("deny: %d %s", c, b)
+	}
+	if r := waitCollected(t, collect(t, pe, last)); r.code != 403 {
+		t.Fatalf("denied: %+v", r)
+	}
+	askFrom(t, pe, "127.0.0.21", "mod again")
+	quiet := 0
+	for _, r := range pe.pr.Waiting() {
+		if r.From == "127.0.0.21" && r.Quiet {
+			quiet++
+		}
+		if r.From == "127.0.0.22" && r.Quiet {
+			t.Fatal("another source went quiet")
+		}
+	}
+	if quiet != 1 {
+		t.Fatalf("the denied source's new request: %+v", pe.pr.Waiting())
 	}
 }
 

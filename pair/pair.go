@@ -54,6 +54,9 @@ type Request struct {
 	Name string `json:"name"`
 	Code string `json:"code"`           // six digits, e.g. "493201"
 	From string `json:"from,omitempty"` // the address it came from, as the engine saw it
+	// Quiet: the person has denied a request from this address in this life, so this one is
+	// listed but raises no notification.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // Outcome is how a request ended for its client.
@@ -98,6 +101,7 @@ type Pairer struct {
 	mu     sync.Mutex
 	n      uint64
 	reqs   map[string]*req
+	denied map[string]bool // source addresses the person denied in this life
 	closed bool
 	end    chan struct{}
 }
@@ -108,7 +112,7 @@ func New(hub *event.Hub, iss Issuer, max int) *Pairer {
 	if max <= 0 {
 		max = DefaultMax
 	}
-	return &Pairer{hub: hub, iss: iss, max: max, reqs: map[string]*req{}, end: make(chan struct{})}
+	return &Pairer{hub: hub, iss: iss, max: max, reqs: map[string]*req{}, denied: map[string]bool{}, end: make(chan struct{})}
 }
 
 // CleanName makes a client's name fit to show: control and format characters dropped, runs of
@@ -170,8 +174,10 @@ func randomCode() (string, error) {
 }
 
 // Ask opens a request for a client that calls itself name, from the address from, and returns
-// what a person is shown and the client's secret request id. When max requests already wait,
-// the oldest is pushed out (its client is told Gone).
+// what a person is shown and the client's secret request id. One address has at most one
+// waiting request: a new ask from it replaces the one it had (that client is told Gone) and keeps
+// its public key, so the person is not notified again. When max requests already wait, the
+// oldest is pushed out (its client is told Gone). All bounds are counts.
 func (p *Pairer) Ask(name, from string) (Request, string, error) {
 	id, err := randomID()
 	if err != nil {
@@ -197,14 +203,34 @@ func (p *Pairer) Ask(name, from string) (Request, string, error) {
 			code = c
 		}
 	}
+	// One waiting request per source: a new one replaces it, under the same public key.
+	if old := p.waitingFromLocked(from); old != nil {
+		key = old.Key
+		old.state = gone
+		close(old.done)
+		delete(p.reqs, old.id) // its fact is said again below, under the same key: not gone
+	}
 	// Count bounds, not clocks: at most max waiting, and at most max answered but not collected.
 	p.trimLocked(func(r *req) bool { return r.state == waiting }, p.max-1)
 	p.trimLocked(func(r *req) bool { return r.state != waiting }, p.max)
 	p.n++
-	r := &req{Request: Request{Key: key, Name: CleanName(name), Code: code, From: from}, id: id, n: p.n, done: make(chan struct{})}
+	r := &req{Request: Request{Key: key, Name: CleanName(name), Code: code, From: from, Quiet: from != "" && p.denied[from]}, id: id, n: p.n, done: make(chan struct{})}
 	p.reqs[id] = r
 	p.say(r.Request)
 	return r.Request, id, nil
+}
+
+// waitingFromLocked is the waiting request from the address from (none for an unknown address).
+func (p *Pairer) waitingFromLocked(from string) *req {
+	if from == "" {
+		return nil
+	}
+	for _, r := range p.reqs {
+		if r.state == waiting && r.From == from {
+			return r
+		}
+	}
+	return nil
 }
 
 func (p *Pairer) byKeyLocked(key string) *req {
@@ -322,6 +348,9 @@ func (p *Pairer) Answer(key string, allow bool) (Request, error) {
 	if allow {
 		st = allowed
 	}
+	if !allow && r.From != "" {
+		p.denied[r.From] = true // its later requests are listed, never notified
+	}
 	p.endLocked(r, st)
 	return r.Request, nil
 }
@@ -385,7 +414,7 @@ func (p *Pairer) say(r Request) {
 	if p.hub == nil {
 		return
 	}
-	_, _ = p.hub.Say(event.Event{Name: FactName, Key: r.Key}, map[string]string{"name": r.Name, "code": r.Code, "from": r.From})
+	_, _ = p.hub.Say(event.Event{Name: FactName, Key: r.Key}, map[string]any{"name": r.Name, "code": r.Code, "from": r.From, "quiet": r.Quiet})
 }
 
 func (p *Pairer) sayGone(id string) {

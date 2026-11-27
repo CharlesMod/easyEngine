@@ -108,7 +108,10 @@ type view struct {
 }
 
 // pending is a pairing request as the tray shows it (from the hub's pairing fact).
-type pending struct{ key, name, code string }
+type pending struct {
+	key, name, code string
+	quiet           bool // its source was denied in this life: listed, never notified
+}
 
 func (p pending) label() string { return p.name + " (" + pair.SpacedCode(p.code) + ")" }
 
@@ -240,9 +243,12 @@ func (c *controller) pendingPairs() []pending {
 	sort.Slice(evs, func(i, j int) bool { return evs[i].Seq < evs[j].Seq })
 	var out []pending
 	for _, e := range evs {
-		var b struct{ Name, Code string }
+		var b struct {
+			Name, Code string
+			Quiet      bool
+		}
 		if json.Unmarshal(e.Body, &b) == nil {
-			out = append(out, pending{key: e.Key, name: b.Name, code: b.Code})
+			out = append(out, pending{key: e.Key, name: b.Name, code: b.Code, quiet: b.Quiet})
 		}
 	}
 	return out
@@ -258,7 +264,10 @@ func (c *controller) notifyLocked(ps []pending) (says []string) {
 	for _, p := range ps {
 		now[p.key] = true
 		if !c.notified[p.key] {
-			c.notified[p.key] = true
+			c.notified[p.key] = true // a replacement by the same source keeps the key: said once
+			if p.quiet {
+				continue
+			}
 			says = append(says, "Allow "+p.label()+"?")
 		}
 	}

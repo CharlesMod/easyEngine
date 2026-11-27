@@ -215,9 +215,6 @@ func (o *linuxOS) wanted(link string) bool {
 func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 	out := map[int]string{}
 	for _, pid := range o.pids() {
-		if skip != nil && skip(pid) {
-			continue
-		}
 		dir := filepath.Join(o.root, strconv.Itoa(pid), "fd")
 		ents, err := os.ReadDir(dir)
 		if err != nil {
@@ -225,7 +222,11 @@ func (o *linuxOS) Openers(skip func(pid int) bool) map[int]string {
 		}
 		for _, e := range ents {
 			if l, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && o.wanted(l) {
-				out[pid] = o.name(pid)
+				// skip is asked only of a holder: it may walk the process tree (Under), which
+				// costs more than the one readdir that rules out nearly every process
+				if skip == nil || !skip(pid) {
+					out[pid] = o.name(pid)
+				}
 				break
 			}
 		}

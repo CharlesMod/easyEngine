@@ -44,6 +44,7 @@ var roomDevices = []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/c
 var (
 	roomReadDone atomic.Pointer[func()]
 	roomOpensEnd atomic.Pointer[func()]
+	roomWordDone atomic.Pointer[func()] // a word of the nodes has been looked at (read or not)
 )
 
 func hook(p *atomic.Pointer[func()]) {
@@ -63,6 +64,9 @@ type roomWatch struct {
 	opensStop func()
 	exits     map[int]func() // strangers followed to their end, with what lets each go; nil: none
 	stopped   bool
+
+	kmu   sync.Mutex
+	known map[int]bool // the holders at the last look (not nvidia-smi, not ours)
 }
 
 func newRoomWatch(s *Supervisor) *roomWatch {
@@ -147,6 +151,7 @@ func (rw *roomWatch) arm() {
 	rw.opensStop = func() { stop(); once.Do(func() { close(done) }) }
 	go func() {
 		defer hook(&roomOpensEnd)
+		rw.opened(true) // who holds the nodes now: what the next word is compared with
 		for {
 			select {
 			case <-done:
@@ -157,7 +162,7 @@ func (rw *roomWatch) arm() {
 				if !ok {
 					return
 				}
-				rw.event()
+				rw.opened(false)
 			}
 		}
 	}()
@@ -174,6 +179,53 @@ func (rw *roomWatch) disarm() {
 		rw.opensStop()
 		rw.opensStop = nil
 	}
+}
+
+// opened is a word from the card's device nodes: somebody opened one. That says a program touched
+// the card, not that the room moved (a monitor that opens it, queries and exits leaves it as it
+// was), so the holders of the nodes are looked at, once for every watch (run/holders.go), and the
+// card is read only when a holder not ours has appeared or gone since the last look. A holder
+// that grows without opening anything is the level's to find. baseline only takes the holders.
+func (rw *roomWatch) opened(baseline bool) {
+	h := rw.s.holders
+	set := h.look(h.word(), enginePCI(rw.s.yieldState()))
+	moved := rw.holdersMoved(set)
+	if moved && !baseline {
+		rw.event()
+	}
+	hook(&roomWordDone)
+}
+
+// holdersMoved says whether the holders differ from those at the last look, and keeps these.
+// nvidia-smi is no holder (a monitor runs it every second or two: it allocates nothing a game
+// would miss, and a change it makes is never the room's).
+func (rw *roomWatch) holdersMoved(set map[int]string) bool {
+	next := map[int]bool{}
+	for pid, name := range set {
+		if !ignoredHolder(name) {
+			next[pid] = true
+		}
+	}
+	rw.kmu.Lock()
+	defer rw.kmu.Unlock()
+	moved := len(next) != len(rw.known)
+	for pid := range next {
+		if !rw.known[pid] {
+			moved = true
+		}
+	}
+	rw.known = next
+	return moved
+}
+
+func ignoredHolder(name string) bool {
+	n := normName(name)
+	for _, b := range builtinIgnore {
+		if n == b {
+			return true
+		}
+	}
+	return false
 }
 
 // event is a word that the room may have moved (a stranger's open or end, the host's word, an

@@ -25,3 +25,23 @@ func SetRoomOpensEnd(f func()) func() {
 	roomOpensEnd.Store(&f)
 	return func() { roomOpensEnd.Store(nil) }
 }
+
+// SetRoomWordDone sets what is called when a word of the device nodes has been looked at, whether
+// a read followed or not; SetHolderScan replaces the scan of who holds the nodes (pid -> name).
+// Each returns the undo.
+func SetRoomWordDone(f func()) func() {
+	roomWordDone.Store(&f)
+	return func() { roomWordDone.Store(nil) }
+}
+
+func SetHolderScan(f func() map[int]string) func() {
+	holderScanHook.Store(&f)
+	return func() { holderScanHook.Store(nil) }
+}
+
+// HolderScans is how many scans of the holders have been made.
+func (s *Supervisor) HolderScans() int {
+	s.holders.mu.Lock()
+	defer s.holders.mu.Unlock()
+	return s.holders.scans
+}

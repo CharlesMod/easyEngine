@@ -15,6 +15,11 @@ for t in linux/amd64 windows/amd64 darwin/arm64 darwin/amd64; do
   dir="$OUT/$os-$arch"; mkdir -p "$dir"
   echo "build $dir/easy-engine$ext"
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch "$GO" build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$dir/easy-engine$ext" ./cmd/easy-engine
+  if [ "$os" = windows ]; then
+    # The same program as a GUI-subsystem exe: started at login it opens no console window.
+    echo "build $dir/easy-enginew$ext"
+    CGO_ENABLED=0 GOOS=$os GOARCH=$arch "$GO" build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" -o "$dir/easy-enginew$ext" ./cmd/easy-engine
+  fi
 done
 # Layout is what the game mods expect: dist/<os>-<arch>/easy-engine[.exe] (ENGINE.md section 10).
 ( cd "$OUT" && sha256sum */easy-engine* > SHA256SUMS )

@@ -40,6 +40,10 @@ module, `github.com/CharlesMod/easyEngine/core`, that other programs can require
 
 - [docs/ENGINE.md](docs/ENGINE.md): design and contract (control API, game profile, CLI, the
   context balancer).
+- [docs/FOOTPRINTS.md](docs/FOOTPRINTS.md): what each catalog model costs on a card, as measured,
+  and how the planner uses it.
+- [docs/SAMPLERS.md](docs/SAMPLERS.md): the sampler settings each model is meant to use and how
+  the proxy enforces them.
 
 ## Used by
 

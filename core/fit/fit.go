@@ -174,7 +174,8 @@ type Wants struct {
 	// Unset: expert layers may move to RAM (section 5, step 3).
 	Whole bool `json:"whole"`
 	// KVTypes is the cache types, best first: the shape takes the first type at which CtxMax fits
-	// at Slots; where none does, the last type with the most ctx that fits down to the floor.
+	// at Slots; where none does, the last type with the most ctx that fits down to the floor. The
+	// core orders the list itself, most bytes per element first (Norm), so any order means the same.
 	// Each type is priced from the footprint (Footprint.KVType), never tried. When set, KVType is
 	// not read. Unset: KVType alone, as given.
 	KVTypes []string `json:"kv_types,omitempty"`
@@ -295,6 +296,8 @@ type Shape struct {
 func (s Shape) CtxTotal() int { return s.Slots * s.CtxPerSlot }
 
 // Norm is w with every default filled in and every bound made consistent: what Choose plans with.
+// KVTypes is taken once and best first (each type once, empty names dropped, most bytes per
+// element first; since core v0.1.4).
 // CtxMax is taken down to the step of context (1024 tokens); CtxFloor is kept exactly as asked,
 // on the step or not (never under 1024), and where it is above CtxMax, CtxMax is the floor. So a
 // shape planned from it never holds less context per slot than the floor asked.
@@ -327,6 +330,7 @@ func (w Wants) Norm() Wants {
 	if w.MinTPS == 0 {
 		w.MinTPS = DefaultMinTPS
 	}
+	w.KVTypes = kvTypes(w.KVTypes)
 	return w
 }
 
@@ -951,8 +955,13 @@ func (room Room) Budget() (vram, ram float64, err error) {
 	return st.room.budget, st.room.ram, nil
 }
 
-// kvTypes is a list of cache types taken once: each type at its first place, repeats and empty
-// names dropped. Every reading of Wants.KVTypes goes through it (resolve).
+// kvTypes is a list of cache types taken once and best first: repeats and empty names dropped,
+// then ordered by bytes per element, most first (a stable order: types of equal bytes, as f16 and
+// bf16, keep the caller's order; a name the core does not know goes last, and resolve refuses it).
+// Every reading of Wants.KVTypes goes through it (Norm, resolve). A smaller type after a larger one
+// could only ever be planned as the last type's fallback, with less context than the smaller type
+// gives, so the order a caller passes never changes what fits; the walk down and the least shape a
+// refusal is worded from (the last type's floor) are those of the list best first.
 func kvTypes(list []string) []string {
 	var types []string
 	for _, t := range list {
@@ -960,6 +969,17 @@ func kvTypes(list []string) []string {
 			types = append(types, t)
 		}
 	}
+	slices.SortStableFunc(types, func(a, b string) int {
+		x, _ := kvBytes(a)
+		y, _ := kvBytes(b)
+		switch {
+		case x > y:
+			return -1
+		case x < y:
+			return 1
+		}
+		return 0
+	})
 	return types
 }
 
@@ -987,8 +1007,7 @@ func resolve(fp Footprint, w Wants) (Wants, error) {
 			w.CtxFloor = min(8192, fp.CtxTrain)
 		}
 	}
-	w = w.Norm()
-	w.KVTypes = kvTypes(w.KVTypes)
+	w = w.Norm() // the list taken once, best first (kvTypes)
 	if len(w.KVTypes) > 0 {
 		w.KVType = w.KVTypes[0]
 	}

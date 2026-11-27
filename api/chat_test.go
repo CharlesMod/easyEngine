@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,27 +14,23 @@ import (
 	"github.com/CharlesMod/easyEngine/internal/testkit"
 )
 
-// chatServer is a ready engine whose "open the browser" is recorded instead of done.
-func chatServer(t *testing.T) (srv *httptest.Server, opened func() []string) {
+// chatServer is a ready engine.
+func chatServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
 	s := e.StartSup(e.Config())
-	var mu sync.Mutex
-	var got []string
-	a := &api.API{S: s, OpenURL: func(u string) error { mu.Lock(); got = append(got, u); mu.Unlock(); return nil }}
-	srv = httptest.NewServer(a.Handler())
-	a.ChatAddr = strings.TrimPrefix(srv.URL, "http://") // as app.Serve sets it from its own listener
+	srv := httptest.NewServer((&api.API{S: s}).Handler())
 	t.Cleanup(srv.Close)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	return srv, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), got...) }
+	return srv
 }
 
 func TestChatServesWrapperAndStripsThePrefix(t *testing.T) {
-	srv, _ := chatServer(t)
+	srv := chatServer(t)
 	c, body, h := do(t, "GET", srv.URL+"/chat/", "", nil)
-	if c != 200 || !strings.Contains(body, `<iframe`) || !strings.Contains(body, "mini=1") || h.Get("Cache-Control") != "no-store" {
+	if c != 200 || !strings.Contains(body, `<iframe`) || h.Get("Cache-Control") != "no-store" {
 		t.Fatalf("wrapper: %d %s %v", c, body, h)
 	}
 	// The UI and its assets come from llama-server with /chat/ui stripped.
@@ -68,7 +63,7 @@ func TestChatServesWrapperAndStripsThePrefix(t *testing.T) {
 
 // The wrapper is cross-origin isolated like the UI it frames; the not-ready page is not.
 func TestChatWrapperIsCrossOriginIsolated(t *testing.T) {
-	srv, _ := chatServer(t)
+	srv := chatServer(t)
 	_, _, h := do(t, "GET", srv.URL+"/chat/", "", nil)
 	if h.Get("Cross-Origin-Embedder-Policy") != "require-corp" || h.Get("Cross-Origin-Opener-Policy") != "same-origin" {
 		t.Fatalf("headers %v", h)
@@ -78,7 +73,7 @@ func TestChatWrapperIsCrossOriginIsolated(t *testing.T) {
 // The proxy hands the client's Accept-Encoding to llama-server and the gzip body back with its
 // Content-Encoding untouched, as a browser needs (the real UI answers 415 without gzip).
 func TestChatUIPassesGzipThrough(t *testing.T) {
-	srv, _ := chatServer(t)
+	srv := chatServer(t)
 	cl := &http.Client{Transport: &http.Transport{DisableCompression: true}}
 	req, _ := http.NewRequest("GET", srv.URL+"/chat/ui/", nil)
 	req.Header.Set("Accept-Encoding", "gzip")
@@ -104,7 +99,7 @@ func TestChatUIPassesGzipThrough(t *testing.T) {
 }
 
 func TestChatStreamsUnbuffered(t *testing.T) {
-	srv, _ := chatServer(t)
+	srv := chatServer(t)
 	req, _ := http.NewRequest("POST", srv.URL+"/chat/ui/v1/chat/completions", strings.NewReader(`{"stream":true}`))
 	t0 := time.Now()
 	resp, err := http.DefaultClient.Do(req)
@@ -140,65 +135,5 @@ func TestChatWhenNoModelIsReady(t *testing.T) {
 	}
 	if c, body, _ := do(t, "GET", srv.URL+"/chat/ui/", "", nil); c != 503 || !strings.Contains(body, "No model is ready") {
 		t.Fatalf("ui while loading: %d %s", c, body)
-	}
-}
-
-func TestChatOpenOpensTheFullPage(t *testing.T) {
-	srv, opened := chatServer(t)
-	post := func(body string, hdr map[string]string) int {
-		c, _, _ := do(t, "POST", srv.URL+"/engine/v1/chat/open", body, hdr)
-		return c
-	}
-	if c := post(`{}`, nil); c != 403 {
-		t.Fatalf("without X-Easy-Engine: %d", c)
-	}
-	if got := opened(); len(got) != 0 {
-		t.Fatalf("opened without the header: %v", got)
-	}
-	if c := post(`{"hash":"#/chat/abc-123"}`, csrf); c != 200 {
-		t.Fatalf("open: %d", c)
-	}
-	if c := post(`{}`, csrf); c != 200 {
-		t.Fatalf("open with no conversation: %d", c)
-	}
-	for _, bad := range []string{`{"hash":"javascript:alert(1)"}`, `{"hash":"#/chat/a b"}`, `{"hash":"//evil"}`, `nonsense`} {
-		if c := post(bad, csrf); c != 400 {
-			t.Errorf("%s: %d, want 400", bad, c)
-		}
-	}
-	host := strings.TrimPrefix(srv.URL, "http://")
-	want := []string{"http://" + host + "/chat/#/chat/abc-123", "http://" + host + "/chat/"}
-	got := opened()
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("opened %v, want %v", got, want)
-	}
-}
-
-// A forged Host header cannot steer the engine's browser to another site: the address opened is
-// the engine's own, not the request's.
-func TestChatOpenIgnoresAForgedHost(t *testing.T) {
-	srv, opened := chatServer(t)
-	hdr := map[string]string{"X-Easy-Engine": "1", "Host": "evil.example"}
-	c, body, _ := do(t, "POST", srv.URL+"/engine/v1/chat/open", `{"hash":"#/chat/abc"}`, hdr)
-	// The gate refuses a non-loopback Host name outright; either way nothing foreign is opened.
-	if c == 200 {
-		t.Fatalf("a forged Host was served: %s", body)
-	}
-	hdr["Host"] = "localhost:1" // a loopback name the gate accepts, but not the engine's own port
-	if c, body, _ = do(t, "POST", srv.URL+"/engine/v1/chat/open", `{"hash":"#/chat/abc"}`, hdr); c != 200 {
-		t.Fatalf("%d %s", c, body)
-	}
-	want := "http://" + strings.TrimPrefix(srv.URL, "http://") + "/chat/#/chat/abc"
-	if got := opened(); len(got) != 1 || got[0] != want {
-		t.Fatalf("opened %v, want [%s]", got, want)
-	}
-}
-
-func TestChatOpenRefusedOnANetworkListener(t *testing.T) {
-	a := &api.API{AnyHost: true, Open: true, OpenURL: func(string) error { t.Error("opened"); return nil }}
-	srv := httptest.NewServer(a.Handler())
-	defer srv.Close()
-	if c, _, _ := do(t, "POST", srv.URL+"/engine/v1/chat/open", `{}`, csrf); c != 403 {
-		t.Fatalf("%d", c)
 	}
 }

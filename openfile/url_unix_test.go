@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenURL(t *testing.T) {
@@ -34,8 +35,9 @@ func TestOpenURL(t *testing.T) {
 	}
 }
 
-// Popup falls back to the ordinary opener when the default browser is not Chromium family.
-func TestPopupFallsBackToOpener(t *testing.T) {
+// Window falls back to the ordinary opener when the default browser is not one known to take
+// --new-window, and starts the browser itself when it is.
+func TestWindowFallsBackToOpener(t *testing.T) {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "log")
 	script := filepath.Join(dir, "opener")
@@ -43,22 +45,58 @@ func TestPopupFallsBackToOpener(t *testing.T) {
 	saved := opener
 	opener = script
 	defer func() { opener = saved }()
-	// A PATH with an xdg-settings that names Firefox, and an XDG_DATA_HOME holding its entry.
+	// A PATH with an xdg-settings that names a browser, and an XDG_DATA_HOME holding its entry.
 	bin := filepath.Join(dir, "bin")
 	os.MkdirAll(bin, 0o755)
-	os.WriteFile(filepath.Join(bin, "xdg-settings"), []byte("#!/bin/sh\necho firefox.desktop\n"), 0o755)
+	os.WriteFile(filepath.Join(bin, "xdg-settings"), []byte("#!/bin/sh\necho web.desktop\n"), 0o755)
 	data := filepath.Join(dir, "data")
 	os.MkdirAll(filepath.Join(data, "applications"), 0o755)
-	os.WriteFile(filepath.Join(data, "applications", "firefox.desktop"), []byte("[Desktop Entry]\nExec=firefox %u\n"), 0o644)
+	entry := filepath.Join(data, "applications", "web.desktop")
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	t.Setenv("XDG_DATA_HOME", data)
 	t.Setenv("XDG_DATA_DIRS", dir+"/none")
+	addr := "http://127.0.0.1:47480/chat/"
 
-	addr := "http://127.0.0.1:47480/chat/?mini=1"
-	if err := Popup(addr); err != nil {
+	// An unknown browser (Epiphany): the ordinary opener gets the address.
+	os.WriteFile(entry, []byte("[Desktop Entry]\nExec=epiphany %u\n"), 0o644)
+	if err := Window(addr); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != addr {
 		t.Fatalf("fallback opener got %q", b)
+	}
+	// A browser that is named but cannot be started: the same fallback.
+	os.Remove(log)
+	os.WriteFile(entry, []byte("[Desktop Entry]\nExec="+dir+"/missing/firefox %u\n"), 0o644)
+	if err := Window(addr); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != addr {
+		t.Fatalf("launch failure: opener got %q", b)
+	}
+	// A browser that starts: it gets --new-window <addr>, and the opener is not used.
+	os.Remove(log)
+	fx := filepath.Join(dir, "firefox")
+	started := filepath.Join(dir, "started")
+	os.WriteFile(fx, []byte("#!/bin/sh\necho \"$@\" > '"+started+"'\n"), 0o755)
+	os.WriteFile(entry, []byte("[Desktop Entry]\nExec="+fx+" %u\n"), 0o644)
+	if err := Window(addr); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second) // network timeout: the child runs on its own
+	for time.Now().Before(deadline) {
+		if b, _ := os.ReadFile(started); strings.TrimSpace(string(b)) == "--new-window "+addr {
+			break
+		}
+		time.Sleep(10 * time.Millisecond) // named moment: poll for the child's file; no event to wait on
+	}
+	if b, _ := os.ReadFile(started); strings.TrimSpace(string(b)) != "--new-window "+addr {
+		t.Fatalf("browser got %q", b)
+	}
+	if _, err := os.Stat(log); err == nil {
+		t.Fatal("the opener ran as well")
+	}
+	if Window("file:///etc/passwd") == nil {
+		t.Fatal("a non-http address must be refused")
 	}
 }

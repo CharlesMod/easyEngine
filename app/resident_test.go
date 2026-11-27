@@ -16,6 +16,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/autostart"
+	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/settings"
@@ -37,10 +38,38 @@ type fakeTray struct {
 	tooltip string
 	closed  bool
 	drawn   chan struct{} // a signal for each SetItems
+	changed chan struct{} // a signal for each SetItems and SetTooltip (one pending is enough)
 }
 
 func newFakeTray() *fakeTray {
-	return &fakeTray{clicks: make(chan string, 8), drawn: make(chan struct{}, 64)}
+	return &fakeTray{clicks: make(chan string, 8), drawn: make(chan struct{}, 64), changed: make(chan struct{}, 1)}
+}
+
+func (f *fakeTray) signal() {
+	select {
+	case f.changed <- struct{}{}:
+	default:
+	}
+}
+
+// until waits for ok to hold of what the tray shows, re-checking at every redraw. The one timer
+// is a watchdog for silence: the app drew nothing that made ok true.
+func (f *fakeTray) until(t *testing.T, what string, ok func(items []tray.Item, tip string) bool) {
+	t.Helper()
+	dog := time.NewTimer(20 * time.Second) // watchdog for silence: the tray was not redrawn into what the wait wants
+	defer dog.Stop()
+	for {
+		items, tip, _ := f.snap()
+		if ok(items, tip) {
+			return
+		}
+		select {
+		case <-f.changed:
+		case <-dog.C: // watchdog for silence
+			_, tip, _ := f.snap()
+			t.Fatalf("the tray never showed %s; the tooltip is %q", what, tip)
+		}
+	}
 }
 
 func (f *fakeTray) Clicks() <-chan string { return f.clicks }
@@ -52,8 +81,9 @@ func (f *fakeTray) SetItems(items []tray.Item) {
 	case f.drawn <- struct{}{}:
 	default:
 	}
+	f.signal()
 }
-func (f *fakeTray) SetTooltip(s string)             { f.mu.Lock(); f.tooltip = s; f.mu.Unlock() }
+func (f *fakeTray) SetTooltip(s string)             { f.mu.Lock(); f.tooltip = s; f.mu.Unlock(); f.signal() }
 func (f *fakeTray) Notify(title, body string) error { return nil }
 func (f *fakeTray) Close()                          { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
 func (f *fakeTray) snap() ([]tray.Item, string, bool) {
@@ -154,18 +184,16 @@ func (r *residentRun) errHas(t *testing.T, sub string) bool {
 func TestTrayMenuClicksAndQuit(t *testing.T) {
 	ft := newFakeTray()
 	place := autostart.Root(t.TempDir())
-	var mu sync.Mutex
-	var opened []string
+	opened := make(chan string, 4) // the opener signals each call
 	exe := filepath.Join(t.TempDir(), "easy-engine")
 	r := startResident(t, app.Options{Tray: ft, Menu: app.MenuOptions{
 		Autostart: place, Exe: exe,
-		Open: func(p string) error { mu.Lock(); opened = append(opened, p); mu.Unlock(); return nil },
+		Open: func(p string) error { opened <- p; return nil },
 	}})
 	// Exactly three items, in this order, and a tooltip that says what stands.
-	waitFor(t, func() bool {
-		items, tip, _ := ft.snap()
+	ft.until(t, "the menu", func(items []tray.Item, tip string) bool {
 		return len(items) == 3 && strings.HasPrefix(tip, "easy-engine: ")
-	}, "the menu")
+	})
 	items, tip, _ := ft.snap()
 	want := []string{"Launch at Startup", "Settings", "Quit"}
 	for i, it := range items {
@@ -181,7 +209,7 @@ func TestTrayMenuClicksAndQuit(t *testing.T) {
 	}
 	// Launch at Startup: a click turns it on in the (fake) place, the check follows what the OS says.
 	ft.clicks <- "autostart"
-	waitFor(t, ft.checked, "the checkmark")
+	ft.until(t, "the checkmark", func([]tray.Item, string) bool { return ft.checked() })
 	if on, _ := place.Enabled(app.AutostartName); !on {
 		t.Fatal("autostart was not enabled")
 	}
@@ -190,17 +218,22 @@ func TestTrayMenuClicksAndQuit(t *testing.T) {
 		t.Fatalf("entry: %q %v", b, err)
 	}
 	ft.clicks <- "autostart"
-	waitFor(t, func() bool { return !ft.checked() }, "the checkmark off")
+	ft.until(t, "the checkmark off", func([]tray.Item, string) bool { return !ft.checked() })
 	if on, _ := place.Enabled(app.AutostartName); on {
 		t.Fatal("autostart was not disabled")
 	}
 	// Settings: the opener gets settings.json, which exists.
 	ft.clicks <- "settings"
-	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(opened) == 1 }, "the opener")
-	if opened[0] != filepath.Join(r.dir, "settings.json") {
-		t.Fatalf("opened %q", opened[0])
+	var path string
+	select {
+	case path = <-opened:
+	case <-time.After(20 * time.Second): // watchdog for silence: the click never reached the opener
+		t.Fatal("the opener was not called")
 	}
-	if _, err := os.Stat(opened[0]); err != nil {
+	if path != filepath.Join(r.dir, "settings.json") {
+		t.Fatalf("opened %q", path)
+	}
+	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
 	// Quit ends the app and removes the lock.
@@ -247,14 +280,14 @@ func TestSettingsFileIsFollowedLive(t *testing.T) {
 	f := settings.Defaults()
 	f.LingerS, f.KVType = 11, "q8_0"
 	os.WriteFile(p, settings.Encode(f), 0o600)
-	waitFor(t, func() bool { return read().LingerS == 11 }, "the edit to take effect")
+	r.await(t, "the edit to take effect", func() bool { return read().LingerS == 11 })
 	if read().KVType != "q8_0" {
 		t.Fatalf("%+v", read())
 	}
 	// A broken file is reported, the last good settings stand, the file is not touched.
 	broken := "{\n  \"linger_s\": 99,\n  \"kv_type\": \"nonsense\"\n}\n"
 	os.WriteFile(p, []byte(broken), 0o600)
-	waitFor(t, func() bool { return r.errHas(t, "settings.json line 3") }, "the error")
+	r.await(t, "the error", func() bool { return r.errHas(t, "settings.json line 3") })
 	if !r.errHas(t, "using the previous settings") || read().LingerS != 11 {
 		t.Fatalf("%+v %v", read(), r.status(t).Errors)
 	}
@@ -265,8 +298,8 @@ func TestSettingsFileIsFollowedLive(t *testing.T) {
 	f.LingerS = 12
 	f.Listen.Port = 47999
 	os.WriteFile(p, settings.Encode(f), 0o600)
-	waitFor(t, func() bool { return read().LingerS == 12 && !r.errHas(t, "line 3") }, "the fix")
-	waitFor(t, func() bool { return r.errHas(t, "restart easy-engine to apply the new listen address") }, "the restart note")
+	r.await(t, "the fix", func() bool { return read().LingerS == 12 && !r.errHas(t, "line 3") })
+	r.await(t, "the restart note", func() bool { return r.errHas(t, "restart easy-engine to apply the new listen address") })
 }
 
 func TestPutSettingsWritesTheFile(t *testing.T) {
@@ -287,21 +320,34 @@ func TestPutSettingsWritesTheFile(t *testing.T) {
 
 // startFakeModel runs the resident app on an installed fake model.
 func startFakeModel(t *testing.T, linger time.Duration, parents []int) *residentRun {
+	return startFakeModelWith(t, linger, parents, nil, nil)
+}
+
+// startFakeModelWith is startFakeModel with extra FAKELLAMA_* environment and a tweak of the
+// app's options.
+func startFakeModelWith(t *testing.T, linger time.Duration, parents []int, llama map[string]string, tweak func(*app.Options)) *residentRun {
 	e := testkit.New(t)
 	e.InstallFake()
-	return startResident(t, app.Options{
+	for k, v := range llama {
+		e.Llama[k] = v
+	}
+	o := app.Options{
 		DataDir: e.Data, Linger: linger, LingerSet: true, ParentPIDs: parents,
 		Configure: func(c *run.Config) {
 			ec := e.Config()
-			ec.Parents, ec.Yield, ec.Group = c.Parents, c.Yield, c.Group
+			ec.Parents, ec.Yield, ec.Group, ec.StartSleeping = c.Parents, c.Yield, c.Group, c.StartSleeping
 			*c = ec
 		},
-	})
+	}
+	if tweak != nil {
+		tweak(&o)
+	}
+	return startResident(t, o)
 }
 
 func waitPhase(t *testing.T, r *residentRun, phase string) {
 	t.Helper()
-	waitFor(t, func() bool { return r.status(t).Phase == phase }, "phase "+phase)
+	r.await(t, "phase "+phase, func() bool { return r.status(t).Phase == phase })
 }
 
 func TestLastParentGoneThenLingerPutsTheModelToSleepNotTheEngine(t *testing.T) {
@@ -314,35 +360,42 @@ func TestLastParentGoneThenLingerPutsTheModelToSleepNotTheEngine(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(r.dir, "engine.lock")); err != nil {
 		t.Fatal("no lock:", err)
 	}
-	select {
-	case <-r.res:
-		t.Fatal("the engine ended with its parent")
-	case <-time.After(500 * time.Millisecond): // watchdog for silence
-	}
-	// A new client's attach wakes the model again.
+	// A new client's attach wakes the model again: the engine that answers it is the one that
+	// slept the model, so it did not end with its parent.
 	par2 := newSleeper(t)
 	if err := app.PostAttach(app.EngineTarget(r.dir, "127.0.0.1", r.port), par2.pid); err != nil {
 		t.Fatal(err)
 	}
 	waitPhase(t, r, "ready")
+	select {
+	case <-r.res:
+		t.Fatal("the engine ended with its parent")
+	default: // the engine answered the attach after the model slept: it is still serving
+	}
 	par2.kill()
 	waitPhase(t, r, "sleeping")
 }
 
+// A parent that returns while the linger runs keeps the model up: the model sleeps only after
+// the last client left, and no sooner than the linger after it (the events' own timestamps).
 func TestLingerHoldsWhileAParentReturns(t *testing.T) {
+	const linger = 1500 * time.Millisecond
 	par := newSleeper(t)
-	r := startFakeModel(t, 1500*time.Millisecond, []int{par.pid})
+	r := startFakeModel(t, linger, []int{par.pid})
 	waitPhase(t, r, "ready")
+	s := r.follow(t)
 	par.kill()
 	par2 := newSleeper(t)
-	time.Sleep(1200 * time.Millisecond) // watchdog for silence: inside the linger (the watcher notices at 1 s)
 	if err := app.PostAttach(app.EngineTarget(r.dir, "127.0.0.1", r.port), par2.pid); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-time.After(2500 * time.Millisecond): // watchdog for silence: well past the first linger
-	}
-	if got := r.status(t).Phase; got != "ready" {
-		t.Fatalf("phase %q: the model slept with a client attached", got)
+	left := time.Now() // the last client leaves now
+	par2.kill()
+	evs := s.until(t, "the model asleep", func(evs []event.Event) bool {
+		return indexOf(evs, 0, func(e event.Event) bool { return phaseIs(e, "sleeping") }) >= 0
+	})
+	slept := evs[indexOf(evs, 0, func(e event.Event) bool { return phaseIs(e, "sleeping") })]
+	if d := slept.At.Sub(left); d < linger {
+		t.Fatalf("the model slept %v after the last client left, linger is %v", d, linger)
 	}
 }

@@ -303,15 +303,3 @@ func newSleeper(t *testing.T) *sleeperProc {
 		once.Do(func() { c.Process.Kill(); c.Wait() })
 	}}
 }
-
-func waitFor(t *testing.T, cond func() bool, what string) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for", what)
-		}
-		runtime.Gosched()
-		time.Sleep(20 * time.Millisecond) // watchdog for silence
-	}
-}

@@ -245,6 +245,7 @@ type Supervisor struct {
 	move       *BuildNext
 	moveCancel context.CancelFunc
 	vmm        string
+	buildMu    sync.Mutex // one build install at a time: the job's and the move's may name one build
 	swapping   bool
 	removing   bool          // remove-downloads job running (storage.go)
 	stoCache   *storageCache // last complete storage walk

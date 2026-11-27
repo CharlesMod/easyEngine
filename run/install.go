@@ -276,6 +276,8 @@ func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw
 // its own release, and smoke-tests it; steps says how the install shows itself (the job's phase
 // and progress, or the move's fact).
 func (s *Supervisor) installBuild(ctx context.Context, cat *catalog.Catalog, a catalog.Asset, steps buildSteps) error {
+	s.buildMu.Lock() // the second finds the first's marker and installs nothing
+	defer s.buildMu.Unlock()
 	dir := backendDir(s.dir, a.ID, a.Tag)
 	marker := filepath.Join(dir, ".installed")
 	stem := filepath.Base(dir)

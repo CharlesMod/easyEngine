@@ -1,7 +1,6 @@
 package yield
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,104 +172,61 @@ func fakeDev(t *testing.T) (dev, nvidia, render string) {
 	return
 }
 
-func TestLinuxWaitInotify(t *testing.T) {
+func TestLinuxNodes(t *testing.T) {
 	dev, nvidia, render := fakeDev(t)
 	o := newLinuxOS(t.TempDir(), dev)
 	defer o.Close()
-	if o.ino < 0 {
-		t.Skip("inotify unavailable")
+	want := []string{render, nvidia} // sorted: dri/renderD128 before nvidia0
+	if got := o.Nodes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
+	if got := newLinuxOS(t.TempDir(), t.TempDir()).Nodes(); len(got) != 0 {
+		t.Fatalf("no devices: %v", got)
+	}
+}
+
+// Watch is the kernel's word that a program opened a node: no clock, so the test waits on the
+// word itself, bounded only so a broken watch fails the test.
+func TestLinuxWatchOpens(t *testing.T) {
+	dev, nvidia, render := fakeDev(t)
+	o := newLinuxOS(t.TempDir(), dev)
+	defer o.Close()
+	w := o.Watch()
+	if w.Opens == nil || w.Launches != nil {
+		t.Fatalf("words %+v", w)
+	}
+	defer w.Release()
 	for _, path := range []string{nvidia, render} {
-		o.Drain()
-		res := make(chan bool, 1)
-		start := time.Now()
-		go func() { res <- o.Wait(context.Background(), 2*time.Second) }()
-		time.Sleep(50 * time.Millisecond)
 		f, err := os.Open(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		f.Close()
 		select {
-		case got := <-res:
-			if !got {
-				t.Fatalf("%s: Wait returned false", path)
-			}
-			if el := time.Since(start); el > time.Second {
-				t.Fatalf("%s: took %v", path, el)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("%s: Wait did not return", path)
+		case <-w.Opens:
+		// watchdog for silence: a test whose watch never speaks fails after a bound
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: no word that it was opened", path)
 		}
 	}
 }
 
-func TestLinuxWaitTimeout(t *testing.T) {
-	dev, _, _ := fakeDev(t)
-	o := newLinuxOS(t.TempDir(), dev)
-	defer o.Close()
-	start := time.Now()
-	if o.Wait(context.Background(), 100*time.Millisecond) {
-		t.Fatal("Wait true with nothing opened")
-	}
-	if el := time.Since(start); el < 90*time.Millisecond || el > time.Second {
-		t.Fatalf("took %v", el)
-	}
-}
-
-func TestLinuxDrain(t *testing.T) {
-	dev, nvidia, _ := fakeDev(t)
-	o := newLinuxOS(t.TempDir(), dev)
-	defer o.Close()
-	if o.ino < 0 {
-		t.Skip("inotify unavailable")
-	}
-	f, err := os.Open(nvidia)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	o.Drain()
-	if o.Wait(context.Background(), 100*time.Millisecond) {
-		t.Fatal("Wait true after Drain")
-	}
-}
-
-func TestLinuxWaitCancel(t *testing.T) {
-	dev, _, _ := fakeDev(t)
-	o := newLinuxOS(t.TempDir(), dev)
-	defer o.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
-	start := time.Now()
-	if o.Wait(ctx, 5*time.Second) {
-		t.Fatal("Wait true on cancel")
-	}
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("cancel took %v", el)
-	}
-}
-
-func TestLinuxNoDeviceFallsBackToSleep(t *testing.T) {
+func TestLinuxWatchNoDevice(t *testing.T) {
 	o := newLinuxOS(t.TempDir(), t.TempDir())
 	defer o.Close()
-	if o.ino >= 0 {
-		t.Fatal("inotify fd set with no devices")
+	if w := o.Watch(); w.Opens != nil || w.Launches != nil {
+		t.Fatalf("words with no devices: %+v", w)
 	}
-	o.Drain()
-	start := time.Now()
-	if o.Wait(context.Background(), 80*time.Millisecond) {
-		t.Fatal("true")
-	}
-	if time.Since(start) < 70*time.Millisecond {
-		t.Fatal("returned early")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start = time.Now()
-	o.Wait(ctx, 5*time.Second)
-	if time.Since(start) > time.Second {
-		t.Fatal("cancel ignored")
+}
+
+func TestLinuxNodesAfterAdapter(t *testing.T) {
+	dev, _, _ := fakeDev(t)
+	o := newLinuxOS(t.TempDir(), dev)
+	defer o.Close()
+	o.nodes, o.pci = map[string]bool{"/dev/nvidia1": true, "/dev/dri/renderD129": true}, "x"
+	want := []string{"/dev/dri/renderD129", "/dev/nvidia1"}
+	if got := o.Nodes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }
 

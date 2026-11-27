@@ -88,7 +88,7 @@ func BuildArgs(model string, shape fit.Shape, host string, port int, alias strin
 	}
 	fixed := [][]string{
 		{"--no-kv-unified"}, {"-fa", "on"}, {"--jinja"}, {"--reasoning", "off"}, {"--cache-reuse", "256"},
-		{"--no-webui"}, {"--metrics"}, {"--slots"},
+		{"--metrics"}, {"--slots"},
 	}
 	for _, g := range fixed {
 		switch g[0] {

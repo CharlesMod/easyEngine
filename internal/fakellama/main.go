@@ -44,6 +44,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -357,6 +358,25 @@ func main() {
 		json.NewEncoder(w).Encode(v)
 	}
 	mux := http.NewServeMux()
+	// A stand-in for llama-server's web UI: one page and one asset, both naming the path they
+	// were asked for, so a test can see what the engine's /chat/ proxy forwarded.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/_app/x.js" {
+			http.NotFound(w, r)
+			return
+		}
+		// Like the real UI: gzip only (415 without it), isolation headers on the page.
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			http.Error(w, "Error: gzip is not supported by this browser", http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		fmt.Fprintf(zw, "fake llama web ui path=%s", r.URL.Path)
+		zw.Close()
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !loading(w) {
 			js(w, map[string]string{"status": "ok"})

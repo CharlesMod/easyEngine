@@ -364,7 +364,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	attached := make(chan struct{}, 1) // a parent was attached (resident: the connection)
 	var ctl *controller
 	if o.Tray != nil {
-		ctl = newController(o.Tray, o.Menu, sup, dir, func() {
+		ctl = newController(o.Tray, o.Menu, sup, dir, ChatURL(host, port), func() {
 			select {
 			case shutdown <- struct{}{}:
 			default:
@@ -386,7 +386,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			return nil
 		}
 	}
-	a := &api.API{S: sup, Attach: attach, AnyHost: !loopback, Open: o.Open,
+	a := &api.API{S: sup, ChatAddr: listenAddr(host, port), Attach: attach, AnyHost: !loopback, Open: o.Open,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:
@@ -461,6 +461,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		}()
 	}
 	if ctl != nil {
+		go ctl.watch(wctx)
 		go ctl.serve(wctx)
 	}
 	select {

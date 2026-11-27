@@ -470,10 +470,13 @@ and gives no measured answer):
 ```
 llama-server -m <gguf> -ngl 999 [--n-cpu-moe N] -np <slots> -c <slots*ctx_per_slot>
   --no-kv-unified  (independent slots: each one gets exactly ctx_per_slot)
-  -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --no-webui --metrics --slots
+  -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --metrics --slots
   --temp T --top-k K --top-p P --min-p M --repeat-penalty R --dry-multiplier 0   (the model's `official` sampler profile)
   --host 127.0.0.1 --port <free port> -a <model id>
 ```
+
+The web UI stays on (llama-server's default; `--no-webui` is not passed): the engine serves it at
+`/chat/` (see "The chat window" below), so llama-server's random port never shows.
 
 The sampler flags make the model's official values llama-server's own defaults, so a client that
 sends no sampler fields still samples as the vendor intends (`docs/SAMPLERS.md`). They are
@@ -613,7 +616,8 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   `settings.json` (§2); the `serve` flags are accepted as overrides for one run. Same lock, same
   rule as `serve`: if an engine already runs, a second `app` says so and exits 0 (it attaches no
   pid, and shows no second icon).
-- **The menu, for now exactly three items:** *Launch at Startup* (a checkmark; the user's own
+- **The menu, for now exactly four items:** *Chat* (above Settings; on only while a model is ready,
+  see "The chat window" below), *Launch at Startup* (a checkmark; the user's own
   startup entry named `easy-engine`: Windows `HKCU\...\Run`, macOS a LaunchAgent, Linux
   `~/.config/autostart/easy-engine.desktop`; it starts `<this program> app`, on Windows the
   windowless `easy-enginew.exe` beside it when there is one; the checkmark shows what the system
@@ -1046,6 +1050,34 @@ answered when the model is ready, instead of a 503:
 - The phase is said **before** a stop begins (yield, sleep, a person's stop, shutdown): a request
   that arrives during the stop is answered by that phase (yielded, held to wake again, 503), never
   proxied to a server being stopped. `stopping` is now said on the stream by the engine itself.
+
+### The chat window
+
+llama-server's web UI ("Llama Chat") is on (`--no-webui` is not passed). Its conversations live in
+browser storage keyed by origin and llama-server's port changes on every launch, so the engine
+serves it at a fixed address, on the control port:
+
+- `GET /chat/` is a small embedded page (`web/chat.html`): a same-origin frame holding the UI and
+  a slim bar. With `?mini=1` (the popup) the bar has one button, *Open in browser*. The page
+  remembers the frame's address hash (`#/chat/<id>`, how the UI names a conversation) in
+  `localStorage` and restores it when it opens, so the popup returns to the same conversation.
+  While no local model is ready it is a short plain page saying so (no timer: the tray's Chat item is off then, and the page says to reload).
+- `/chat/ui/*` is llama-server, reverse-proxied through the engine's proxy with the `/chat/ui`
+  prefix stripped (streaming is flushed at once). The UI builds every asset and API address
+  relative to where it was loaded, and routes by the address hash, so nothing else is needed;
+  llama-server's own routes (health, metrics, slots) are not moved, which is why `--api-prefix`
+  is not used.
+- `POST /engine/v1/chat/open {"hash": "#/chat/<id>"}` (loopback listener only) opens
+  `http://<host>:<port>/chat/<hash>` in the default browser. The popup's button calls it and then
+  closes the popup window.
+- The tray's *Chat* item starts the user's default browser in app mode
+  (`--app=<url> --window-size=420,640`, normal profile, so it shares storage with the full
+  browser window) when that browser is Chromium family: Linux resolves it from
+  `xdg-settings get default-web-browser` and the `.desktop` Exec line (Flatpaks included);
+  Windows from the `https` UserChoice ProgId; macOS from the LaunchServices handler (`open -na`).
+  Any other default browser (Firefox has no app mode), or one that cannot be resolved, gets the
+  full chat page in an ordinary tab. A listener beyond loopback needs a bearer token a page cannot
+  send, so chat is not offered there.
 
 ### 7c. Disk need
 

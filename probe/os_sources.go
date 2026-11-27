@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
-
-	"github.com/CharlesMod/easyEngine/probe/smiloop"
 )
 
 // OSSources reads the real machine.
@@ -23,13 +21,6 @@ func (OSSources) ReadFile(p string) ([]byte, error) {
 func (OSSources) Glob(p string) ([]string, error) { return filepath.Glob(p) }
 
 func (OSSources) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	if name == "nvidia-smi" && runtime.GOOS == "linux" {
-		// A read whose ctx is smiloop.Sampled, while a user holds the loop, is answered from the
-		// long-lived child's latest block; every other read (and any fallback) is the one-shot.
-		if b, ok := smiloop.ReadFor(ctx, args); ok {
-			return b, nil
-		}
-	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	path, err := exec.LookPath(name)

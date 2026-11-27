@@ -646,6 +646,9 @@ func (s *Supervisor) Route() Route {
 	}
 	switch s.phase {
 	case "ready":
+		if s.swapping { // a swap has begun and its phase is still to be said
+			return Route{Kind: "unavailable", Message: "Switching to the full model"}
+		}
 		return Route{Kind: "local", URL: s.llamaURL}
 	case "sleeping":
 		if !s.userStopped && !s.waking {

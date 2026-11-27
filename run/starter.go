@@ -340,12 +340,14 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	starterID := s.st.Model
 	stopped := s.userStopped
 	s.mu.Unlock()
-	s.setUpgrade(func(u *upgrade) { u.state = upSwapping })
-	s.logf("swapping %s -> %s", starterID, target.ID)
-	if s.srv != nil {
+	if s.srv != nil { // new requests are refused before the stage says swapping
 		s.mu.Lock()
 		s.swapping = true
 		s.mu.Unlock()
+	}
+	s.setUpgrade(func(u *upgrade) { u.state = upSwapping })
+	s.logf("swapping %s -> %s", starterID, target.ID)
+	if s.srv != nil {
 		s.setPhase("resizing", "Switching to the full model")
 		// wait for the requests in flight without the operation lock, then take it and look again
 		for s.inflightNow() != 0 {
@@ -377,6 +379,11 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 			s.countRestart()
 			s.stopServerLocked()
 		}
+		// the old server is gone: from here the phase says what the load does (the ready of the
+		// target must route to it)
+		s.mu.Lock()
+		s.swapping = false
+		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	s.st.Model, s.st.Target = target.ID, ""

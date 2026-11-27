@@ -9,9 +9,15 @@ func (s *Supervisor) RoomEvent()  { s.card.event() }
 
 // SetRoomDevices points the room's device-open watch at these globs; it returns the undo.
 func SetRoomDevices(globs []string) func() {
+	roomDevicesMu.Lock()
 	old := roomDevices
 	roomDevices = globs
-	return func() { roomDevices = old }
+	roomDevicesMu.Unlock()
+	return func() {
+		roomDevicesMu.Lock()
+		roomDevices = old
+		roomDevicesMu.Unlock()
+	}
 }
 
 // SetRoomReadDone sets what is called when a read of the room has ended (nil: nothing); SetRoomOpensEnd

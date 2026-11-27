@@ -37,6 +37,9 @@ func sameRoom(a, b roomRead) bool {
 	return a.room.NoGPU == b.room.NoGPU && d <= heldTolMiB && -d <= heldTolMiB
 }
 
+// roomDevicesMu guards roomDevices: a read of the room (its own goroutine) hears the globs too.
+var roomDevicesMu sync.RWMutex
+
 // roomDevices are the globs of the device nodes whose opens the room watch hears (a test points
 // them at a temp dir).
 var roomDevices = []string{"/dev/nvidia[0-9]*", "/dev/dri/renderD*", "/dev/dri/card*"}
@@ -128,17 +131,25 @@ func (rw *roomWatch) held() (roomRead, bool) { return rw.level.Last() }
 // arm keeps the reading while a model is loaded: the level's watchdog, and on Linux the opens of
 // the card's device nodes.
 func (rw *roomWatch) arm() {
-	paths := rw.roomPaths() // before rw.mu: it takes the supervisor's lock, which disarm holds first
 	rw.mu.Lock()
-	defer rw.mu.Unlock()
 	if rw.armed || rw.stopped {
+		rw.mu.Unlock()
 		return
 	}
 	rw.armed = true
 	rw.baseline.Store(true)
 	rw.level.Arm()
 	rw.level.Now() // a second read at once, so the baseline holds without waiting a period
-	rw.listenLocked(paths)
+	rw.mu.Unlock()
+	// The nodes come after the reads are on their way, and outside rw.mu: they take the
+	// supervisor's lock, which disarm holds before rw.mu. renew does the same, so a set found
+	// after a disarm is dropped there.
+	paths := rw.roomPaths()
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if rw.armed && !rw.stopped && rw.listened == "" {
+		rw.listenLocked(paths)
+	}
 }
 
 // roomPaths are the device nodes whose opens the room hears: the engine's adapter's (see
@@ -148,7 +159,10 @@ func (rw *roomWatch) roomPaths() []string {
 		return ns
 	}
 	var paths []string
-	for _, g := range roomDevices {
+	roomDevicesMu.RLock()
+	globs := roomDevices
+	roomDevicesMu.RUnlock()
+	for _, g := range globs {
 		m, _ := filepath.Glob(g)
 		paths = append(paths, m...)
 	}
@@ -215,6 +229,7 @@ func (rw *roomWatch) disarm() {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	rw.armed = false
+	rw.listened = ""
 	rw.level.Disarm()
 	rw.s.sayGone("room.held", "")
 	if rw.opensStop != nil {

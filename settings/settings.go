@@ -150,6 +150,9 @@ func (f File) Normalize() File {
 	if f.Yield.Ignore == nil {
 		f.Yield.Ignore = []string{}
 	}
+	if f.Streamer == "" {
+		f.Streamer = "on" // never written empty: an unset streamer is the default
+	}
 	return f
 }
 

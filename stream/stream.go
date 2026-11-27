@@ -290,8 +290,14 @@ func (r *reader) event(ev []byte) {
 		return
 	}
 	var c chunk
-	if json.Unmarshal(data, &c) != nil {
-		return
+	if err := json.Unmarshal(data, &c); err != nil {
+		// A field of another type than this reader expects (another server's "stop" or "usage")
+		// must not hide the rest of the chunk: Unmarshal has filled in what it could. Were the
+		// finish_reason lost here, a whole reply with no [DONE] would be taken for a cut one.
+		var te *json.UnmarshalTypeError
+		if !errors.As(err, &te) {
+			return
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

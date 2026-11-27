@@ -117,12 +117,12 @@ func (a *API) fwd(external bool, id string) fwd {
 	return fwd{
 		on: a.S.Streamer(), external: external, id: id, hear: a.hearing,
 		yielded: func() (bool, string) {
-			if a.S.Phase() != "yielded" {
-				return false, ""
-			}
-			// Route is asked only while yielded: then it answers from the yield and wakes nothing.
-			if rt := a.S.Route(); rt.Code == "yielded" {
-				return true, rt.Message
+			// The status is asked, not the phase and not Route. The yield stands in the status from
+			// the moment its drain begins, while the phase says "yielded" only after the model
+			// server has stopped, which is after the cut. Route would say it too, but a Route
+			// asked of a sleeping engine wakes the model. The message is Route's for this state.
+			if y := a.S.Status().Yield; y != nil {
+				return true, "Paused while " + y.Reason + " runs"
 			}
 			return false, ""
 		},
@@ -337,7 +337,9 @@ func (sw *streamWriter) writeHeaderLocked(code int) {
 		real[k] = v
 	}
 	sw.passed = true
-	sw.sse = code == http.StatusOK && eventStream(sw.h)
+	// A reply that declared its length has no room for a comment: one more byte than promised
+	// and the client's connection is failed. Such a stream is carried, never spoken into.
+	sw.sse = code == http.StatusOK && eventStream(sw.h) && sw.h.Get("Content-Length") == ""
 	sw.w.WriteHeader(code)
 	sw.last = time.Now()
 }

@@ -91,7 +91,8 @@ clients ignore comment lines, so they are never taken for tokens.
 - **Silence.** On any streamed reply, after **15 s** with no byte written, the engine writes a
   comment: `: easy waiting\n\n` before the upstream's first body byte, `: easy quiet\n\n` after it.
   A comment is only ever written between two events, never inside one. It repeats every 15 s of
-  silence.
+  silence. A stream whose reply declared a `Content-Length` gets no comment (there is no room for
+  a byte more than was promised).
 
 Both periods are a *watchdog for silence* in the engine's law (`docs/EVENTS.md`): one timer per
 streamed request, re-armed from the time of the last write, stopped when the request ends.

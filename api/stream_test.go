@@ -635,3 +635,31 @@ func TestStreamOwnWordsAreNotHeard(t *testing.T) {
 		t.Fatalf("the terminal event was heard (%d -> %d)", before, n)
 	}
 }
+
+// The watchdog says its comment into a silent stream, but never into one whose reply declared a
+// Content-Length: there is no room for one byte more than was promised. The watchdog is run by
+// hand here (its periods are an hour), so nothing waits on a clock.
+func TestStreamNoCommentIntoDeclaredLength(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		sw := newStreamWriter(rec, fwd{open: time.Hour, quiet: time.Hour})
+		sw.Header().Set("Content-Type", "text/event-stream")
+		if declared {
+			sw.Header().Set("Content-Length", "1000")
+		}
+		sw.WriteHeader(http.StatusOK)
+		io.WriteString(sw, ev1)
+		sw.mu.Lock()
+		sw.last = time.Now().Add(-2 * time.Hour) // silent for longer than the quiet period
+		sw.mu.Unlock()
+		sw.fire()
+		sw.finish(func() error { return nil })
+		want := ev1 + ": easy quiet\n\n"
+		if declared {
+			want = ev1
+		}
+		if got := rec.Body.String(); got != want {
+			t.Errorf("declared length %v: client got %q, want %q", declared, got, want)
+		}
+	}
+}

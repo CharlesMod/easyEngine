@@ -856,3 +856,22 @@ func TestConcurrentCloseDuringEvents(t *testing.T) {
 		t.Fatalf("OnEnd fired %d times", c.endCount())
 	}
 }
+
+// A chunk with a field of a type the reader does not expect (another server's "stop") still
+// gives its finish_reason: the reply is whole and nothing is added after it.
+func TestOddFieldTypeDoesNotHideFinish(t *testing.T) {
+	var c rec
+	in := "data: {\"stop\":\"\\n\",\"usage\":7,\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"stop\":\"\\n\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	got, err := readAll(New(whole(in), c.opts(Chat)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustSame(t, got, in)
+	if s := c.summary(t); s.End != Done || s.FinishReason != "stop" {
+		t.Errorf("End = %q FinishReason = %q", s.End, s.FinishReason)
+	}
+	if c.cutCount() != 0 {
+		t.Error("Cut called on a whole reply")
+	}
+}

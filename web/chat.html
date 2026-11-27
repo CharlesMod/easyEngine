@@ -45,10 +45,22 @@
     var h = here();
     if (h !== last && valid(h)) { last = h; store(h); }
   }
-  // The UI changes its address with history.pushState, which raises no event; look twice a second.
-  setInterval(save, 500);
+  // The UI changes its address with history.pushState / replaceState, which raise no event of
+  // their own, so each load of the frame wraps the two (the frame is same-origin) to save after
+  // them, and listens for the back and forward buttons.
+  function watch() {
+    var w;
+    try { w = frame.contentWindow; } catch (e) { return; }
+    ['pushState', 'replaceState'].forEach(function (m) {
+      var orig = w.history[m];
+      w.history[m] = function () { var r = orig.apply(this, arguments); save(); return r; };
+    });
+    w.addEventListener('hashchange', save);
+    w.addEventListener('popstate', save);
+    save();
+  }
+  frame.addEventListener('load', watch);
   addEventListener('pagehide', save);
-  frame.addEventListener('load', save);
 
   document.getElementById('open').addEventListener('click', function () {
     save();
@@ -60,6 +72,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       window.close();
       // A window the browser will not let a script close stays; say so instead of looking dead.
+      // watchdog for silence: window.close() raises no event when the browser refuses it
       setTimeout(function () { document.getElementById('msg').textContent = 'Opened in your browser. You can close this window.'; }, 400);
     }).catch(function (e) {
       document.getElementById('msg').textContent = 'Could not open the browser: ' + e.message;

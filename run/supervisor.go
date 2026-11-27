@@ -159,10 +159,11 @@ type server struct {
 
 // Supervisor owns the children and the state.
 type Supervisor struct {
-	cfg  Config
-	dir  string
-	root context.Context
-	stop context.CancelFunc
+	changed chan struct{} // closed and replaced at each phase change (Changed)
+	cfg     Config
+	dir     string
+	root    context.Context
+	stop    context.CancelFunc
 
 	log *lifecycle.LogSink
 
@@ -263,6 +264,21 @@ func (s *Supervisor) addError(format string, a ...any) {
 
 func (s *Supervisor) setPhaseLocked(phase, msg string) {
 	s.phase, s.message = phase, msg
+	if s.changed != nil {
+		close(s.changed) // wakes everyone waiting on Changed
+	}
+	s.changed = make(chan struct{})
+}
+
+// Changed returns a channel that is closed at the next phase change. A caller that wants every
+// change asks again after each wake, and reads the state after asking, so none slips between.
+func (s *Supervisor) Changed() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.changed == nil {
+		s.changed = make(chan struct{})
+	}
+	return s.changed
 }
 
 func (s *Supervisor) setPhase(phase, msg string) {

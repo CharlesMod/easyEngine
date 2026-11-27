@@ -34,8 +34,7 @@ const notReadyPage = `<!doctype html><meta charset="utf-8"><meta name="viewport"
 <title>Chat</title>
 <style>body{font:16px system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;color:#444;background:#fafafa}
 @media(prefers-color-scheme:dark){body{color:#ccc;background:#1b1b1b}}p{max-width:24em;text-align:center;padding:1em}</style>
-<p>No model is ready to chat yet.<br>This page will open the chat by itself when one is.</p>
-<script>setTimeout(function(){location.reload()},3000)</script>
+<p>No model is ready to chat yet.<br>Reload this page once one is. <a href="">Reload</a></p>
 `
 
 func (a *API) chatReady() bool {

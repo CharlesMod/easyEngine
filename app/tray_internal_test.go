@@ -93,8 +93,7 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 	if !qt.chatDisabled() {
 		t.Fatal("Chat must be disabled while loading")
 	}
-	c.click("chat")
-	time.Sleep(100 * time.Millisecond)
+	c.click("chat") // not ready: nothing is started, so there is nothing to wait for
 	if count() != 0 {
 		t.Fatal("a click while loading opened the chat")
 	}
@@ -115,6 +114,5 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 	if c2.chatReady() {
 		t.Fatal("Chat on with no page")
 	}
-	c2.click("chat")
-	time.Sleep(50 * time.Millisecond)
+	c2.click("chat") // a Chat call here fails the test through the t.Error above
 }

@@ -929,7 +929,7 @@ serves it at a fixed address, on the control port:
   a slim bar. With `?mini=1` (the popup) the bar has one button, *Open in browser*. The page
   remembers the frame's address hash (`#/chat/<id>`, how the UI names a conversation) in
   `localStorage` and restores it when it opens, so the popup returns to the same conversation.
-  While no local model is ready it is a short plain page saying so, which reloads itself.
+  While no local model is ready it is a short plain page saying so (no timer: the tray's Chat item is off then, and the page says to reload).
 - `/chat/ui/*` is llama-server, reverse-proxied through the engine's proxy with the `/chat/ui`
   prefix stripped (streaming is flushed at once). The UI builds every asset and API address
   relative to where it was loaded, and routes by the address hash, so nothing else is needed;

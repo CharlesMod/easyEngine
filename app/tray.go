@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/CharlesMod/easyEngine/autostart"
 	"github.com/CharlesMod/easyEngine/catalog"
@@ -229,23 +228,22 @@ func ChatURL(host string, port int) string {
 	return "http://" + net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)) + "/chat/?mini=1"
 }
 
-// watch redraws the menu and tooltip when the phase moves them (Chat turns on when a model is
-// ready), until ctx ends.
+// watch redraws the menu and tooltip when a phase change moves them (Chat turns on when a model
+// is ready), until ctx ends. It is driven by the supervisor's phase-change event, not a clock.
 func (c *controller) watch(ctx context.Context) {
-	tk := time.NewTicker(2 * time.Second)
-	defer tk.Stop()
 	for {
+		changed := c.sup.Changed() // asked before the state is read, so no change slips between
+		c.mu.Lock()
+		c.v.chat = c.chatReady()
+		stale := c.tooltip() != c.last || !reflect.DeepEqual(menu(c.v), c.drawn)
+		c.mu.Unlock()
+		if stale {
+			c.refresh()
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-tk.C:
-			c.mu.Lock()
-			c.v.chat = c.chatReady()
-			stale := c.tooltip() != c.last || !reflect.DeepEqual(menu(c.v), c.drawn)
-			c.mu.Unlock()
-			if stale {
-				c.refresh()
-			}
+		case <-changed:
 		}
 	}
 }

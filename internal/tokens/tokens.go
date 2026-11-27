@@ -36,11 +36,24 @@ type Entry struct {
 	Name    string `json:"name"`
 	Created string `json:"created"`
 	SHA256  string `json:"sha256"`
+	Revoked string `json:"revoked,omitempty"` // when it was revoked (RFC 3339), in the revoked list only
 }
+
+// Verdict is what Verify says of a bearer.
+type Verdict int
+
+const (
+	Unknown Verdict = iota // never issued by this store (or no bearer, or no file)
+	Valid                  // the master token or an issued one
+	Revoked                // an issued token that was revoked
+)
 
 type fileData struct {
 	Master string  `json:"master"`
 	Tokens []Entry `json:"tokens"`
+	// Revoked keeps the entries of revoked tokens (with the time of the revoke), so a revoked
+	// token is told apart from one this store never issued.
+	Revoked []Entry `json:"revoked,omitempty"`
 }
 
 // Store is the token file of one data dir. Methods are safe for concurrent use; each one reads
@@ -183,37 +196,60 @@ func (s *Store) NewMaster() (string, error) {
 // MasterID for the master token, the entry's id for an issued one. Hashes are compared in
 // constant time. A missing or unreadable file accepts nothing.
 func (s *Store) Check(bearer string) (clientID string, ok bool) {
+	id, v := s.Verify(bearer)
+	return id, v == Valid
+}
+
+// Verify is Check that also tells a revoked token (its id comes back with Revoked) from an
+// unknown one. Every hash is compared in constant time, with no early exit.
+func (s *Store) Verify(bearer string) (clientID string, v Verdict) {
 	if bearer == "" {
-		return "", false
+		return "", Unknown
 	}
 	s.mu.Lock()
 	d, _, err := s.load()
 	s.mu.Unlock()
 	if err != nil {
-		return "", false
+		return "", Unknown
 	}
 	h := hash(bearer)
-	clientID, ok = "", false
 	if d.Master != "" {
 		mh := hash(d.Master)
 		if subtle.ConstantTimeCompare(h[:], mh[:]) == 1 {
-			clientID, ok = MasterID, true
+			clientID, v = MasterID, Valid
 		}
 	}
-	for _, e := range d.Tokens { // no early exit: every entry is compared
-		want, err := hex.DecodeString(e.SHA256)
-		if err != nil || len(want) != len(h) {
-			continue
-		}
-		if subtle.ConstantTimeCompare(h[:], want) == 1 && !ok {
-			clientID, ok = e.ID, true
+	match := func(list []Entry, verdict Verdict) {
+		for _, e := range list { // no early exit: every entry is compared
+			want, err := hex.DecodeString(e.SHA256)
+			if err != nil || len(want) != len(h) {
+				continue
+			}
+			if subtle.ConstantTimeCompare(h[:], want) == 1 && v == Unknown {
+				clientID, v = e.ID, verdict
+			}
 		}
 	}
-	return clientID, ok
+	match(d.Tokens, Valid)
+	match(d.Revoked, Revoked)
+	return clientID, v
+}
+
+// NameOf is the name an issued token was given ("" for the master or an unknown id).
+func (s *Store) NameOf(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, _, _ := s.load()
+	for _, e := range d.Tokens {
+		if e.ID == id {
+			return e.Name
+		}
+	}
+	return ""
 }
 
 // Issue makes a new token for a named client and returns its id and the token, which is not
-// kept and cannot be shown again. Nothing calls it yet.
+// kept and cannot be shown again. Pairing calls it when a person allows a client.
 func (s *Store) Issue(name string) (id, token string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,7 +274,8 @@ func (s *Store) Issue(name string) (id, token string, err error) {
 	return id, token, nil
 }
 
-// Revoke removes an issued token by id. The master token is replaced with NewMaster, not revoked.
+// Revoke removes an issued token by id and keeps its entry in the revoked list, so the token is
+// then told apart from an unknown one. The master token is replaced with NewMaster, not revoked.
 func (s *Store) Revoke(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -249,6 +286,8 @@ func (s *Store) Revoke(id string) error {
 	for i, e := range d.Tokens {
 		if e.ID == id {
 			d.Tokens = append(d.Tokens[:i], d.Tokens[i+1:]...)
+			e.Revoked = time.Now().UTC().Format(time.RFC3339)
+			d.Revoked = append(d.Revoked, e)
 			return s.save(d)
 		}
 	}

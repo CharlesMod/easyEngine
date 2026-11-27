@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
+	"github.com/CharlesMod/easyEngine/pair"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/web"
 )
@@ -47,6 +48,16 @@ type API struct {
 	heard func()
 	// Client is used by POST test (default: a plain client with no overall timeout).
 	Client *http.Client
+
+	// Pair holds the pairing requests (pair.go). Nil: pairing is not offered (a loopback
+	// listener, or --open), hello says pairing false and POST pair answers 404.
+	Pair *pair.Pairer
+	// EngineID is this engine's stable id (pair.EngineID), said in hello and the Allow answer.
+	EngineID string
+	// Name is this engine's human name for hello (the settings key or the host name).
+	Name func() string
+	// seen holds the issued client ids already said as a client fact in this life.
+	seen sync.Map
 }
 
 // Listen binds host:base, falling back to base+1 .. base+9.
@@ -130,6 +141,9 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	if strings.HasPrefix(name, "custom/") && a.customRoute(w, r, ctx, name, need) {
+		return
+	}
+	if a.pairRoute(w, r, name, need) {
 		return
 	}
 	switch name {

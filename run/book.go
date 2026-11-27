@@ -29,7 +29,9 @@ var book = []event.Decl{
 	{Name: "request", Kind: event.Happening, What: "a request at the door began or ended, or the door went idle: {what: begin|end|idle, inflight, id (X-Request-Id)}; a streamed reply's end adds what the streamer read: {end: done|upstream_error|ended_early|client_gone, events, finish_reason, prompt_tokens, cached_tokens, completion_tokens, tok_s, prompt_ms, predicted_ms, slot}; idle says tok_s read from /metrics"},
 	{Name: "nudge", Kind: event.Happening, What: "a word that could change an outcome: a request at the door, a client's start or install: {why}"},
 	{Name: "network", Kind: event.Happening, What: "the system said a network link or address changed"},
-	{Name: "mark", Kind: event.Happening, What: "a marker said from outside (a test, a client) to order what came before it: {what}"},
+	{Name: "pairing", Kind: event.Fact, Keyed: true, What: "a pairing request waiting for a person's Allow or Deny (key: the request id): {name, code, from}; never a token; gone when answered, withdrawn or pushed out"},
+	{Name: "client", Kind: event.Fact, Keyed: true, What: "a paired client seen in this life (key: its client id): {name}; never a token"},
+	{Name: "mark", Kind: event.Happening,What: "a marker said from outside (a test, a client) to order what came before it: {what}"},
 }
 
 // say puts one event on the hub. A refusal is a programming error (an undeclared name, a body

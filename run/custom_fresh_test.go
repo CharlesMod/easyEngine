@@ -28,16 +28,14 @@ func TestCustomUseOnFreshMachine(t *testing.T) {
 	if err := sup.UseCustom(p); err != run.ErrBusy {
 		t.Fatalf("second use: %v (want ErrBusy)", err)
 	}
-	sawDownloading := false
 	testkit.WaitFor(t, 30*time.Second, "custom file served", func() bool {
-		st := sup.Status()
-		if st.Phase == "downloading" {
-			sawDownloading = true
-		}
-		return st.Phase == "ready" && strings.HasSuffix(strings.Join(s.e.Starts(), "\n"), "-a custom:mine")
+		return sup.Phase() == "ready" && strings.HasSuffix(strings.Join(s.e.Starts(), "\n"), "-a custom:mine")
 	})
-	if !sawDownloading {
-		t.Error("no downloading phase seen")
+	// The install job was reported as one: the phase went through downloading. A small archive
+	// from a local server is down in less than one look at the status, so the phase is read from
+	// the engine's log, which has a line for every phase it set.
+	if lg, err := sup.Logs("engine", 500); err != nil || !strings.Contains(lg, "phase downloading: Installing the model server") {
+		t.Errorf("no downloading phase in the engine log (%v):\n%s", err, lg)
 	}
 	st := run.LoadState(s.e.Data)
 	if st.Model != "custom" || st.Backend != "cpu-test" || st.Custom == nil || st.Custom.Path != p {

@@ -44,6 +44,8 @@ func (p *pidList) Set(v string) error {
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   hermes-engine serve   --profile F --parent-pid P [--port N] [--linger D]
+                        [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
+                         [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
   hermes-engine setup   [--profile F]
   hermes-engine probe
   hermes-engine plan    [--profile F]

@@ -6,7 +6,8 @@ file here may name a game (a test enforces it). HermesVoice for RimWorld
 RimWorld part is the mod code that starts the engine, writes the profile and shows setup and
 status in game.
 
-Background: the survey in `research_notes/` (and `~/.local/share/rimworld-easy-engine-research/easy_local_engine.md`)
+Background: the survey `easy_local_engine.md` (on the keeper's machine under
+`~/.local/share/rimworld-easy-engine-research/`, not in this repository)
 and the keeper's goal (2026-11-24): a GUI installer, the model picked by available RAM/VRAM,
 the hermes ctx balancer, starting when the game starts and tucking away when it exits, and
 any OpenAI-compatible endpoint as the alternative, with a Test light.
@@ -518,7 +519,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 
 | Method, path | What |
 |---|---|
-| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7b; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, port, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
@@ -538,7 +539,7 @@ cannot send the custom header cross-origin without a preflight that the engine r
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
 
 `phase` is one of: `not_installed`, `downloading`, `installing`, `starting`, `loading`,
-`ready`, `resizing`, `sleeping`, `yielded` (§6b), `external`, `error`. `progress` is `{done_bytes, total_bytes,
+`ready`, `resizing`, `sleeping`, `yielded` (§6b), `removing` (§7b), `external`, `error`. `progress` is `{done_bytes, total_bytes,
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
 n_cpu_moe, kv_type, vram_mib, vram_basis}`; `vram_basis` is `measured` where `vram_mib` was read
 from the running server, else `predicted`.
@@ -623,7 +624,7 @@ download is `upgrade.progress`. `status.model` is the id of the model answering 
 shows its "simpler speech" notice when `model_tier == "starter"`, and a progress bar from
 `upgrade.progress` when `model_stage` is `target_downloading`.
 
-### 7b. Your own GGUF file (`custom/*`)
+### 7d. Your own GGUF file (`custom/*`)
 
 The engine can serve a local GGUF file in place. The file is never copied, moved or deleted (not by
 `custom/clear`, not by any cleanup); `state.custom.path` lies outside `models/`.
@@ -847,7 +848,8 @@ hermes-engine version
 - **Real check on sprinter (RTX 5080 16 GB):** download the reference model from Hugging Face (or `hermes-engine import` a local copy), start
   with the HermesVoice profile, reach `ready` with 3 slots, three concurrent completions answer,
   a VRAM hog (`~/.local/share/sprinter-llm/probe/vram-hog.py`) makes it shrink when idle and grow
-  back after, and killing the parent stops everything. Live numbers go in `docs/ENGINE-RESULTS.md`.
+  back after, and killing the parent stops everything. Live numbers go in `docs/ENGINE-RESULTS.md`
+  (not written yet; the measured footprints are in `docs/FOOTPRINTS.md`, the disk evidence in §7c).
 
 ## 12. Not in this round
 

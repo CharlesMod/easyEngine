@@ -21,6 +21,7 @@ import (
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"hermesengine/catalog"
 	"hermesengine/probe"
+	"hermesengine/probe/gpusense"
 	"hermesengine/run"
 )
 
@@ -156,6 +157,12 @@ func (e *Env) Config() run.Config {
 		},
 		Others: func(ctx context.Context, g probe.GPU, pids []int) (int, error) {
 			return int(atomic.LoadInt32(&e.others)), nil
+		},
+		// Nothing sensed: the room comes from the fake Probe and Others above, never from the
+		// machine the tests run on (an Apple silicon Mac's own adapter, a Linux box's AMD or
+		// Intel card in sysfs). A test that wants a picture sets its own Sense.
+		Sense: func(ctx context.Context, ours []int, host int) gpusense.Picture {
+			return gpusense.Picture{Adapters: []gpusense.Adapter{}, Processes: []gpusense.Process{}, Sources: map[string]string{"testkit": "nothing sensed"}}
 		},
 		Seed: func(m catalog.Model, path, kv string) (fit.Footprint, error) {
 			return fit.Footprint{FixedMiB: 5000, PerTokenMiB: 0.05, ScratchMiB: 500}, nil

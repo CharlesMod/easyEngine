@@ -190,8 +190,11 @@ func TestYieldGameReturnsDuringGrace(t *testing.T) {
 	last := time.Now()
 	f.setLaunches()
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if d := time.Since(last); d < 800*time.Millisecond {
-		t.Fatalf("grace not restarted: resumed %s after the last sighting", d)
+	// The grace runs from the engine's own last sighting of the game, which is up to one look
+	// (run.YieldTick) before this clock was read. Had the grace not started again, the engine
+	// would resume at its first look after the game left: within one look, far under this.
+	if d, least := time.Since(last), 800*time.Millisecond-run.YieldTick; d < least {
+		t.Fatalf("grace not restarted: resumed %s after the game left, want at least %s", d, least)
 	}
 }
 

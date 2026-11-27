@@ -13,6 +13,9 @@ func SetAgentNoVenv(on bool) func() {
 	return func() { agentNoVenv = old }
 }
 
+// YieldTick is how often the yield loop looks for launcher games.
+const YieldTick = yieldTick
+
 // Disk-need seams for the external tests.
 
 func (s *Supervisor) SetupNeed(cat *catalog.Catalog, hw probe.Hardware, backendID string, models ...catalog.Model) plan.DiskNeed {

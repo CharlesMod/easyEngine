@@ -12,7 +12,7 @@ import (
 // Every byte the engine writes is counted in a DiskNeed, so the headroom covers only what no
 // count can see: the filesystem's own metadata for new files and directories. The plan's disk
 // verdict and every installer check use it through DiskNeed. Evidence for the figure is in
-// docs/ENGINE.md section 7a (measured on a fresh install).
+// docs/ENGINE.md section 7c (measured on a fresh install).
 const DiskHeadroomMiB = 125
 
 // diskBlock is the allocation unit the counts round each file up to (ext4 and NTFS default).

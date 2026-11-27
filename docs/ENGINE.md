@@ -712,9 +712,9 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   load too. The app never ends because clients are gone. A client that
   attaches a pid (`POST attach`) wakes the model if it sleeps; a request at the proxy wakes it too,
   and the door **holds** that request until the model is up (§7e). The clients are the attached
-  pids and the requests at the door (in flight or held: a remote client that never attached a
-  pid counts by its requests). Once a client has come, when no pid is attached and the door is
-  empty while a model is up, the keeper's `linger_s` (a named moment) runs; a request or an
+  pids, the attachments (§7g: held or by pid) and the requests at the door (in flight or held: a
+  remote client that never attached counts by its requests). Once a client has come, when no pid
+  and no attachment stands and the door is empty while a model is up, the keeper's `linger_s` (a named moment) runs; a request or an
   attach cancels it, and it runs again from the door's next empty. When it ends with nobody
   there the model is **put to sleep** (`POST sleep`'s unload); the engine stays. A model a person
   started with no client ever coming is not put to sleep by the linger. The tooltip follows the
@@ -890,7 +890,8 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST sleep`, `POST wake` | §6 |
 | `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer` and `keep_context`. `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
-| `POST attach {pid}` | adds a parent pid; **409** once the engine is stopping |
+| `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
+| `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
 
 `phase` is one of: `not_installed`, `downloading`, `installing`, `starting`, `loading`,
@@ -899,8 +900,11 @@ engine is shutting down; it wins over every other phase), `error`. `progress` is
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
 n_cpu_moe, kv_type, vram_mib, vram_basis}`; `vram_basis` is `measured` where `vram_mib` was read
 from the running server, else `predicted`. `contexts` is the prompt cache kept across a restart:
-`{slots, tokens, bytes, kept: [{slot, tokens, bytes, client?}]}` while saved slots wait for the
-next start, else absent (§5, "The prompt cache across a restart").
+`{slots, tokens, bytes, kept: [{slot, tokens, bytes, client?, client_slot?}]}` while saved slots
+wait for the next start, else absent (§5, "The prompt cache across a restart"); `client` is the
+key of the attachment the slot served and `client_slot` its own number (§7g). `attachments` lists
+every attachment as its `attachment` fact says it, the base first; `wants` is the `wants` fact
+(§7g).
 
 ### 7a. First run: a starter model, then the target
 
@@ -1089,7 +1093,8 @@ The engine says what happens on its hub (docs/EVENTS.md §2): facts that stand u
 said gone, readings (levels said when they change) and happenings (history). The names are in
 `GET book` (`run/book.go`): `engine` `{version, api, port}`, `phase` `{phase, message}`, `model`,
 `door` `{held}`, `mind.shape`, `mind.device`, `job`, `install.progress`, `upgrade`, `yield`,
-`recovery`, `room`, `agent` (keyed), `pairing` (keyed, §7f), `client` (keyed, §7f), and the happenings `request`, `error`, `nudge`, `mind.exit`,
+`recovery`, `room`, `agent` (keyed), `pairing` (keyed, §7f), `client` (keyed, §7f), `attachment` (keyed, §7g),
+`wants` (§7g), and the happenings `request`, `error`, `nudge`, `mind.exit`,
 `mind.hang`, `mind.oom`, `network`, `mark`. No secret is ever on the stream (the external API key
 and the tokens are in no fact). The three paths pass the same gate and token as every other.
 
@@ -1290,6 +1295,124 @@ token.
 - On Quit every waiting request ends: held GETs are answered 410, the facts go, no token is
   issued after, and the network hears the mDNS goodbye before the listener closes.
 
+### 7g. Clients: one engine, several programs (ee-clients)
+
+Several mods and programs share one engine; each attaches with its profile (docs/EVENTS.md §5).
+A **client** is who connects (a paired token's `client_id`, or `loopback`); an **attachment** is
+one use of the engine by a client, keyed by `<identity>/<name>` (identity `loopback` for a local
+caller). The `--profile` file is the **base** attachment (`attachment: "profile"`), first in every
+order, for the engine's life. A caller is **local** when its TCP peer is this machine (loopback,
+or the listener's own address) and the gate's client is the loopback listener, the setup page,
+`--open` or the master token; every paired token is **remote**.
+
+**Attach.** `POST /engine/v1/attach` (with `X-Easy-Engine: 1`):
+
+```json
+{"pid": 4242, "name": "narrator-mod", "hold": false,
+ "profile": {"slots": 3, "min_slots": 1, "ctx_per_slot": {"max": 65536, "floor": 8192},
+   "samplers": {"cold": {"temperature": 0.2}},
+   "server": {"ubatch": 256, "reasoning": "off", "extra_args": ["--top-n-sigma", "1.5"],
+              "required": ["reasoning"]},
+   "models": {"prefer": ["gemma4-rp-maxxed-q3kxl"], "can_use": ["gemma4-rp-maxxed-q3kxl", "gemma4-e4b-rp-q40"]},
+   "game_reserve_mib": 1500, "host_pid": 4242,
+   "agent": {"id": "my-agent", "wheel": "/abs/agent.whl", "args": ["run"]}}}
+```
+
+The profile is the `--profile` file's shape (§8) plus `server` and `models`. A profile with no
+`slots` states no wants (it counts for presence only, as `{pid}` alone does). 200 (with `hold`,
+the first NDJSON line):
+
+```json
+{"status":"attached","pid":4242,"attachment":"9f2c4e01a7b3d655","name":"narrator-mod",
+ "key":"loopback/narrator-mod","client_id":"loopback","local":true,"presence":"pid",
+ "slots":{"want":3,"min":1,"given":3,"first":0,"pending":false},
+ "ctx_per_slot":{"asked":65536,"given":32768},
+ "server":{"taken":["reasoning","--top-n-sigma"],"not_taken":[],"checked":true},
+ "model":{"selected":"gemma4-e4b-rp-q40","usable":true,"advice":"prefers gemma4-rp-maxxed-q3kxl"},
+ "agent":"my-agent"}
+```
+
+(`"resumed": true` and `"replaced": true` appear when they happened.)
+
+- `slots.given` and `ctx_per_slot.given` are what the running model gives it now; `pending: true`
+  while a reshape for it is coming (its requests wait at the door meanwhile); `unserved` says why
+  it has none when the card has no room for it beside the attachments before it (its requests get
+  503 `no_room` until the next start). `first` is its first engine slot, for logs only: a client
+  numbers its own slots `0..given-1`.
+- `server.not_taken[]` is `{option, asked, standing?, held_by?, why}`: `why` is `conflict` (an
+  attachment earlier in order holds another value), `this build has no such flag`, or `the engine
+  sets this flag`. `checked: false` when no build is installed yet (checked at the launch).
+- **Presence.** `pid` (local callers only): the attachment leaves when that process ends. `hold:
+  true`: the response stays open (`application/x-ndjson`), a new line of the same shape each time
+  its slots, the context per slot or its options change, a last line `{"end":"detached"}`,
+  `{"end":"replaced"}` or `{"end":"engine_ending"}`; the attachment leaves when the connection
+  ends. A remote client must hold. Both given: it leaves at the first to end. The listener sets
+  TCP keepalive (idle 30 s, 3 probes 10 s apart; a network timeout), so a peer that vanished is
+  found in about a minute; it helps the held `events` and `pair/{id}` too.
+- **Resume.** The running model's slot map changes only at a start. A leave leaves its slots
+  vacant (`wants.vacant`); an attach of the same key with the same slot count takes them back,
+  cache and all, with no restart (`"resumed": true`). An attach of a key that stands replaces its
+  presence (`"replaced": true`, the same id and slots). A new attachment is served from vacant
+  slots when they suffice, the running ctx is at least its floor and its options change nothing;
+  else the model grows: requests are held at the door while the replies in flight finish (never
+  cut), then it starts with the new merge. A leave reshapes, when idle, only when that gives
+  someone something (an unserved one served, an option handed over, more ctx to one below its
+  max).
+- **Errors** `{"error","code",...}`: 400 `bad_request` (shape or bounds: slots 1-16 per attachment,
+  64 in all, ctx 1024-1048576, 16 samplers named `[a-z0-9_-]{1,32}` (stored lower-cased), 16 model
+  ids, 8 required names), 400 `pid_remote` (a remote `pid` or `host_pid`), 400 `agent_not_allowed`
+  (a remote agent), 400 `path_not_allowed` (a remote `host_files_mib`), 400 `extra_args_not_allowed`
+  (any remote `extra_args`), 400 `not_offered` (`server.mmproj`, `server.speculative`: a projector
+  will come from the catalog with its model; ngram speculation goes in a local `extra_args`), 400
+  `flag_owned` (`{"flag"}`), 400 `flag_unknown` (not in the build's `--help`), 409 `conflict`
+  (`{option, asked, standing, held_by, why}`: a `required` option not taken), 409
+  `model_unsupported` (`"model"` required and the selection not in `can_use`), 413 (body over 1 MiB
+  local, 64 KiB remote), 429 `too_many_attachments` (32 in all, 4 per remote client). Nothing is
+  registered on any error. The old wire keeps its answers: `{}` is 400 `body must be {"pid": n}`,
+  `{pid}` with no watcher is 501.
+- **Engine-owned flags** (refused in `extra_args` in every spelling the build's help gives the
+  flag, plain or `=value`, any case of a long name): the model and its sources, sizing, devices,
+  the listener and API, roles (embedding, rerank, router, tools, web UI), the logs the engine
+  reads, `--jinja`, `--cache-reuse`, `-a`, every projector, media and draft-model flag, presets,
+  and info-and-exit flags (`run/ownedflags.go`). A test reads a recorded b12651 `--help` and fails
+  when a flag taking a file, path, directory, host, port or URL is neither owned nor in the local
+  allow list (`--grammar-file`, `-jf`, `--chat-template-file`, `--lora*`, `--control-vector*`,
+  `-lcs`, `-lcd`, `--tts-lang`).
+- **Options merge.** In order (the base, then by attach): the first to state an option holds it, a
+  later same value shares it, a later other value is not taken. `reasoning` replaces the engine's
+  `--reasoning off`. The merge is made again from scratch at every start, so an option passes to
+  the next asker when its holder leaves.
+- **Agent.** One: the base profile's (as before), else the first attachment in order that brings
+  one; it runs while that attachment stands. Remote clients bring none.
+- **Model.** The person's selection; `models` is advice in the answer, never a swap.
+- **Host.** The host pid is `POST host`'s, else the base profile's `host_pid`, else the first parent
+  pid, else the first local attachment's `host_pid` or pid; other programs' card use is measured.
+
+**Requests.** `X-Easy-Client: <attachment id>` on a proxied request:
+
+- completions (`/completion`, `/v1/completions`, `/v1/chat/completions`, ...): `id_slot` n in the
+  client's numbering goes to its engine slot; absent or -1 goes to its lowest slot with no request
+  on it; n outside `0..given-1` is 400 `{"error":"id_slot 3 is outside this client's 3 slot(s)
+  (0..2)","code":"slot_out_of_range"}`; a non-integer (or below -1) is 400 `bad_request`.
+  `/slots/{n}?action=erase` is mapped the same way. Save and restore stay refused (403).
+- the reply's `id_slot` is mapped back: a JSON reply whole, an event stream line by line as it
+  flows.
+- 404 `attachment_unknown` (it left or the engine restarted: attach again), 403 `not_yours` (a
+  paired token naming another client's), 503 `no_room` (unserved). The header is never forwarded.
+- samplers: `X-Easy-Sampler` is looked up in the attachment's own profiles first.
+- the `request` happening's begin and end say `attachment`; the end says `client_slot` (its own
+  number) beside `slot` (the engine's).
+- **No header** (anonymous): with a base attachment and another attachment holding slots, the
+  request is the base's (mapped inside the base's range, 400 outside it). With the base alone, or
+  no attachment holding slots, exactly as before. With no base and attachments present, `id_slot`
+  passes through as before: **an anonymous caller shares the clients' slots there** (and may evict
+  their cache); send the header.
+
+**Facts.** `attachment` (keyed by id: the answer's shape, gone when it leaves); `wants` (`{slots,
+min_slots, ctx_max, ctx_floor, from, unserved: [{attachment, why}], vacant: [{first, count, key}],
+server}`); `client` (§7f) gains `attachments: [ids]` once a paired client attaches; `context`
+gains `client` (the key) and `client_slot`. Status says `attachments` and `wants`.
+
 ### The chat window
 
 llama-server's web UI ("Llama Chat") is on (`--no-webui` is not passed). Its conversations live in
@@ -1378,6 +1501,10 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
   }
 }
 ```
+
+`server` (optional: `ubatch` 32-512, `reasoning` on/off/auto, `extra_args`, `required`) and
+`models` (optional: `prefer`, `can_use`) are the launch options and model advice of §7g; the
+file's are the base attachment's.
 
 `host_files_mib` (optional) is how far the host's own files on the engine's disk may still grow,
 e.g. the agent's call log at its cap times its copies; every disk check counts it in full (§7c).

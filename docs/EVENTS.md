@@ -70,6 +70,7 @@ type Event struct {
   `mind.device`, `agent` (keyed by client), `client` (keyed), `install.progress` (reading, said per
   step of bytes, never per time), `upgrade`, `room` (reading: adapters, reserve, free for the model),
   `yield`, `recovery`, `error` (happening), `request` (happening: begin, end, slot, tokens, tok/s),
+  `attachment` (keyed) and `wants` (§5),
   `context` (happening: saved, laid back, let go).
 
 ## 3. What replaces each poll
@@ -103,17 +104,47 @@ type Event struct {
 
 ## 5. Clients (one engine, several mods)
 
-Each `attach` carries the client's profile. A client is keyed by its name and host pid; it has its
-wants (slots, ctx per slot, floor), its sampler profiles, its agent, its host facts (pid, adapter,
-reserve) and its `server` options. The engine's wants are the clients' merged: slots summed, ctx the
-greatest asked, floors kept per client; the fit steps down as for one. A client leaves when its pid
-ends (`host.Exits`); the wants shrink and the mind reshapes when idle. A profile's `server` block
-states what the launch needs that sizing must know (`ubatch`, `reasoning`, speculative decoding, a
-projector file) plus `extra_args`, each checked against the build's `--help`; flags the engine owns
-(`-m`, `-c`, `-np`, `-ngl`, `--n-cpu-moe`, `-ctk`, `-ctv`, `--host`, `--port`, `--slot-save-path`,
-`--api-key`) are refused. A profile may name a catalog file of its own models, merged over the
-built-in one after validation (ids and file names are plain names; urls are https; sizes and sha256
-present).
+*Built* (ee-clients); the wire is docs/ENGINE.md §7g. Two words: a **client** is who connects
+(a paired token's `client_id`, or the local machine, `loopback`); an **attachment** is one use of
+the engine by a client, with its profile, keyed by (identity, name). The `--profile` file is the
+**base** attachment, first in every order, for the engine's life.
+
+- **Presence, by events only.** A local caller may give a pid: the attachment leaves when it ends
+  (`host.ExitsOf`). Any caller may hold its attach (`hold: true`): the POST's response stays open
+  as NDJSON and the attachment leaves when that connection ends; a peer that vanished is found by
+  TCP keepalive on the listener (the network timeout) and by a write that fails. `DELETE
+  attach/{id}` detaches. No lease, no clock.
+- **Wants.** The attachments' merged: slots summed, min slots summed, the largest ctx and floor
+  (llama-server gives every slot one ctx, so the largest floor is everyone's). None stating any:
+  the profile (the base, else the defaults), exactly as before. A merge the fit refuses even at
+  the floor leaves the latest attachment out (unserved, said with why) until the next start.
+- **The running mind's slot map changes only at a start.** Each attachment gets a range (each its
+  want when all fit, else its min slots, then the rest in order). One that leaves is said gone and
+  counts for nothing in the next merge, but its range stays, **vacant**, until the next start;
+  nothing is erased in the server. An attach of the same key with the same count takes it back
+  (`resumed`, the cache in it); an attach of a key that stands replaces its presence
+  (`replaced`, the old held stream ends `{"end":"replaced"}`); otherwise vacant slots serve a new
+  attachment when they suffice, the running ctx is at least its floor and its options change
+  nothing. Only otherwise does the mind grow: a drain (requests held at the door, those in flight
+  finish, never cut), then a start with the new merge. A leave reshapes, when idle, only if that
+  gives someone something (an unserved one served, an option handed over, more ctx to one below
+  its max).
+- **Slots belong to clients.** A request naming its attachment (`X-Easy-Client`) has `id_slot` in
+  its own numbering mapped to its engine slot, the reply's mapped back (a JSON reply whole, an
+  event stream line by line); absent or -1 is its own free slot; outside its count is a 400.
+  Anonymous requests are the base's when the base and another attachment hold slots; else as
+  before. Saved contexts are keyed by the attachment's key and its own slot number, and laid
+  back into the slot that key has after a start that renumbered; a key with no standing
+  attachment at the lay-back is let go.
+- **Launch options** (`server`: `ubatch`, `reasoning`, a local client's `extra_args`): the first in
+  order to state one holds it, a later different value is told `not_taken` (409 when it marked the
+  option `required`); each is checked against the installed build's `--help` and never passed
+  blind. Engine-owned flags are refused in every spelling the help gives. One agent: the base's,
+  else the first attachment that brings one. The model stays the person's selection; a client's
+  `models` is advice.
+- **Facts**: `attachment` (keyed), `wants` (with `unserved` and `vacant`), `client` gains
+  `attachments`, `request` and `context` gain the attachment and the client's slot number. The
+  catalog a profile may bring is a later step (after the catalog's build-rung schema).
 
 ## 6. The prompt cache across a reshape
 
@@ -194,8 +225,9 @@ connection.
   that first request until the mind is up. When the last client is gone (its pid ended, by
   `host.Exits`, or its connection closed for a remote client) and nothing is in flight, the keeper's
   `linger` (a named moment) runs and the mind is unloaded; the engine stays. *Built* (ee-stream):
-  a remote client is counted by its requests at the door (in flight or held); the linger is armed
-  when the door is empty and no pid is attached, and a request or an attach cancels it. A mod does not start
+  a remote client is counted by its requests at the door (in flight or held) and, since
+  ee-clients, by its attachments (held or by pid, §5); the linger is armed when the door is empty
+  and no pid or attachment stands, and a request or an attach cancels it. A mod does not start
   the engine with a parent pid any more: it finds the engine (the lock, hello), attaches with its
   profile, and only if none runs on its own machine starts the app detached.
 - The tray is also where a pairing request is answered (§7): a notification "Allow <client>

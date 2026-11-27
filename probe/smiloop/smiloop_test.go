@@ -10,11 +10,11 @@ import (
 )
 
 // fakeSMI is an nvidia-smi that prints one block for each word written to its control fifo
-// (csv, xml, pids), ends on "exit", and logs every start to ./spawns. Without -lms it is a
+// (csv, xml, pids), ends on "exit", and logs every start to ./startLog. Without -lms it is a
 // one-shot: it prints the csv block's line and ends.
 const fakeSMI = `#!/bin/sh
 d=$(dirname "$0")
-echo "$$ $*" >> "$d/spawns"
+echo "$$ $*" >> "$d/startLog"
 case "$*" in
   *-lms*) ;;
   *) echo "0, Fake GPU, 16384, 4321"; exit 0 ;;
@@ -24,7 +24,8 @@ case "$1$2" in
   -q-x) k=xml ;;
   *) k=pids ;;
 esac
-while read -r w < "$d/ctl.$k"; do
+exec 3<>"$d/ctl.$k"
+while read -r w <&3; do
   case "$w" in
     csv) echo "1, 0, Fake GPU, 16384, 1234" ;;
     xml) printf '<?xml version="1.0" ?>\n<nvidia_smi_log>\n<gpu/>\n</nvidia_smi_log>\n' ;;
@@ -83,8 +84,8 @@ func (r *rig) say(w string) {
 	f.Close()
 }
 
-func (r *rig) spawns() int {
-	b, _ := os.ReadFile(filepath.Join(r.dir, "spawns"))
+func (r *rig) startLog() int {
+	b, _ := os.ReadFile(filepath.Join(r.dir, "startLog"))
 	return strings.Count(string(b), "\n")
 }
 
@@ -119,7 +120,7 @@ func TestManyReadsOneChild(t *testing.T) {
 			t.Fatalf("read %d: %q %v", i, b, ok)
 		}
 	}
-	if n := r.spawns(); n != 1 {
+	if n := r.startLog(); n != 1 {
 		t.Fatalf("21 reads started %d children", n)
 	}
 	// a different query is another child, another shape of block
@@ -139,8 +140,9 @@ func TestManyReadsOneChild(t *testing.T) {
 	if !ok || !strings.Contains(string(b), "Process ID") || !strings.HasPrefix(string(b), "==============NVSMI LOG") {
 		t.Fatalf("pids block: %q %v", b, ok)
 	}
-	if n := r.spawns(); n != 3 {
-		t.Fatalf("three queries started %d children", n)
+	if n := r.startLog(); n != 3 {
+		b, _ := os.ReadFile(filepath.Join(r.dir, "startLog"))
+		t.Fatalf("three queries started %d children (Starts %d):\n%s", n, r.m.Starts(), b)
 	}
 }
 
@@ -174,8 +176,8 @@ func TestStaleSampleIsNotUsed(t *testing.T) {
 	if _, ok := r.m.Read(csvArgs); !ok {
 		t.Fatal("a block after Stale is")
 	}
-	if r.spawns() != 1 {
-		t.Fatalf("spawns %d", r.spawns())
+	if r.startLog() != 1 {
+		t.Fatalf("startLog %d", r.startLog())
 	}
 }
 
@@ -202,8 +204,8 @@ func TestDeadChildRestartedOnceThenOneShot(t *testing.T) {
 			t.Fatal("it gave up: reads are the one-shot's")
 		}
 	}
-	if n := r.m.Starts(); n != 2 || r.spawns() != 2 {
-		t.Fatalf("after giving up: %d starts, %d on disk", n, r.spawns())
+	if n := r.m.Starts(); n != 2 || r.startLog() != 2 {
+		t.Fatalf("after giving up: %d starts, %d on disk", n, r.startLog())
 	}
 }
 

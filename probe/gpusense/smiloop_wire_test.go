@@ -27,7 +27,8 @@ case "$1$2" in
   --query-gpu*) k=csv ;;
   *) k=pids ;;
 esac
-while read -r w < "$d/ctl.$k"; do
+exec 3<>"$d/ctl.$k"
+while read -r w <&3; do
   case "$w" in
     csv) csv "1," ;;
     pids) pids ;;

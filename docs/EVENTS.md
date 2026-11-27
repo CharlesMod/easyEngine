@@ -162,7 +162,7 @@ connection.
 - `easy-engine` with no command (and `easy-engine app`) runs the engine with a tray icon on Linux,
   Windows and macOS. `serve` stays, for a service or a shell with no desktop; it shows no tray. On
   Windows `easy-enginew.exe` is the same program built windowless, for login start.
-- The tray menu, for now, is four items: **Chat** (llama-server's web UI in a small window; on only
+- The tray menu, for now, is four items: **Chat** (llama-server's web UI in a new browser window; on only
   while a model is ready; `docs/ENGINE.md` "The chat window"), **Launch at Startup** (a checkmark; package `autostart`:
   the Run key, a LaunchAgent, an XDG autostart entry, all for the current user), **Settings** (opens
   `settings.json` with the system's own editor) and **Quit** (drain, stop the mind and the agents,

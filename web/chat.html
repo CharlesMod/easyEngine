@@ -3,30 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chat</title>
+<title>easyEngine</title>
+<link rel="icon" type="image/png" href="icon.png">
 <style>
   :root { --bg:#fff; --fg:#222; --line:#ddd; }
   @media (prefers-color-scheme: dark) { :root { --bg:#1b1b1b; --fg:#ddd; --line:#383838; } }
   html, body { height:100%; margin:0; background:var(--bg); color:var(--fg); font:13px system-ui, sans-serif; }
   body { display:flex; flex-direction:column; }
-  #bar { display:none; flex:none; justify-content:flex-end; align-items:center; height:30px; padding:0 8px;
-         border-bottom:1px solid var(--line); }
-  body.mini #bar { display:flex; }
-  #bar button { font:inherit; color:inherit; background:none; border:1px solid var(--line); border-radius:4px;
-                padding:2px 8px; cursor:pointer; }
-  #bar button:hover { border-color:var(--fg); }
-  #msg { margin-right:auto; opacity:.7; }
   iframe { flex:1; width:100%; border:0; min-height:0; }
 </style>
 </head>
 <body>
-<div id="bar"><span id="msg"></span><button id="open" type="button" title="Open this conversation in your browser">Open in browser</button></div>
 <iframe id="ui" title="Llama Chat"></iframe>
 <script>
 (function () {
   var KEY = 'easyEngine.chat.hash';
-  var mini = /[?&]mini=1(&|$)/.test(location.search);
-  if (mini) document.body.classList.add('mini');
   var frame = document.getElementById('ui');
 
   function store(v) { try { return v === undefined ? localStorage.getItem(KEY) : localStorage.setItem(KEY, v); } catch (e) { return null; } }
@@ -61,23 +52,6 @@
   }
   frame.addEventListener('load', watch);
   addEventListener('pagehide', save);
-
-  document.getElementById('open').addEventListener('click', function () {
-    save();
-    fetch('../engine/v1/chat/open', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Easy-Engine': '1' },
-      body: JSON.stringify({ hash: valid(last) ? last : '' })
-    }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      window.close();
-      // A window the browser will not let a script close stays; say so instead of looking dead.
-      // watchdog for silence: window.close() raises no event when the browser refuses it
-      setTimeout(function () { document.getElementById('msg').textContent = 'Opened in your browser. You can close this window.'; }, 400);
-    }).catch(function (e) {
-      document.getElementById('msg').textContent = 'Could not open the browser: ' + e.message;
-    });
-  });
 })();
 </script>
 </body>

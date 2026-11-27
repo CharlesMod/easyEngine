@@ -48,7 +48,7 @@ type Autostarter interface {
 type MenuOptions struct {
 	Autostart Autostarter                                    // default autostart.Real()
 	Open      func(path string) error                        // default openfile.Open
-	Chat      func(url string) error                         // shows the chat page in a small window; default openfile.Popup
+	Chat      func(url string) error                         // shows the chat page in a new browser window; default openfile.Window
 	Exe       string                                         // the program to start at login; default this one (ExePath)
 	Args      []string                                       // its arguments; default ["app"]
 	Run       func(context.Context, tray.Spec) (Tray, error) // default tray.Run
@@ -62,7 +62,7 @@ func (m *MenuOptions) defaults() {
 		m.Open = func(p string) error { _, err := openfile.Open(p); return err }
 	}
 	if m.Chat == nil {
-		m.Chat = openfile.Popup
+		m.Chat = openfile.Window
 	}
 	if m.Exe == "" {
 		m.Exe = ExePath()
@@ -150,7 +150,7 @@ type controller struct {
 	sup  *run.Supervisor
 	file string // settings.json
 	quit func()
-	chat string // the chat page in popup form ("" when this engine's page cannot be reached from here)
+	chat string // the chat page ("" when this engine's page cannot be reached from here)
 
 	// pair answers the pairing requests the menu shows; nil where pairing is not offered.
 	pair *pair.Pairer
@@ -293,13 +293,12 @@ func (c *controller) chatReady() bool {
 	return c.chat != "" && c.sup.Status().Phase == "ready"
 }
 
-// ChatURL is the chat page in its popup form (?mini=1: the bar with one button) on this engine,
-// or "" when the engine listens beyond loopback, where the page cannot send a token.
+// ChatURL is the chat page on this engine, or "" when the engine listens beyond loopback, where the page cannot send a token.
 func ChatURL(host string, port int) string {
 	if !IsLoopbackHost(host) {
 		return ""
 	}
-	return "http://" + listenAddr(host, port) + "/chat/?mini=1"
+	return "http://" + listenAddr(host, port) + "/chat/"
 }
 
 // listenAddr is host:port as a client on this machine reaches the engine (an empty host is loopback).

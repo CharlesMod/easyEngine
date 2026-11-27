@@ -401,7 +401,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			return nil
 		}
 	}
-	a := &api.API{S: sup, ChatAddr: listenAddr(host, port), Attach: attach, AnyHost: !loopback, Open: o.Open,
+	a := &api.API{S: sup, Attach: attach, AnyHost: !loopback, Open: o.Open,
 		Shutdown: func() {
 			select {
 			case shutdown <- struct{}{}:

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/internal/testkit"
 	"github.com/CharlesMod/easyEngine/tray"
+	"github.com/CharlesMod/easyEngine/web"
 )
 
 func TestMenuChatSitsAboveSettingsAndFollowsReadiness(t *testing.T) {
@@ -35,9 +37,9 @@ func TestChatURL(t *testing.T) {
 		port int
 		want string
 	}{
-		{"", 47480, "http://127.0.0.1:47480/chat/?mini=1"},
-		{"127.0.0.1", 47481, "http://127.0.0.1:47481/chat/?mini=1"},
-		{"::1", 47480, "http://[::1]:47480/chat/?mini=1"},
+		{"", 47480, "http://127.0.0.1:47480/chat/"},
+		{"127.0.0.1", 47481, "http://127.0.0.1:47481/chat/"},
+		{"::1", 47480, "http://[::1]:47480/chat/"},
 		{"0.0.0.0", 47480, ""}, // a network listener needs a token a page cannot send
 		{"192.168.1.5", 47480, ""},
 	} {
@@ -89,7 +91,7 @@ func (q *quietTray) chatDisabled() bool {
 	return true
 }
 
-// A click on Chat shows the chat page in a popup only once a model is ready, and the menu
+// A click on Chat shows the chat page in a new browser window only once a model is ready, and the menu
 // item turns on by itself when the phase gets there.
 func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 	testkit.SkipWindows(t)
@@ -109,7 +111,7 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 		popped <- struct{}{}
 		return nil
 	}},
-		s, t.TempDir(), "http://127.0.0.1:1/chat/?mini=1", func() {})
+		s, t.TempDir(), "http://127.0.0.1:1/chat/", func() {})
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(shown) }
 
 	testkit.WaitFor(t, 10*time.Second, "loading phase", func() bool { return s.Phase() == "loading" })
@@ -131,9 +133,9 @@ func TestChatClickAndEnableFollowThePhase(t *testing.T) {
 	select {
 	case <-popped:
 	case <-time.After(3 * time.Second): // watchdog for silence
-		t.Fatal("the popup was not shown")
+		t.Fatal("the chat window was not shown")
 	}
-	if shown[0] != "http://127.0.0.1:1/chat/?mini=1" {
+	if shown[0] != "http://127.0.0.1:1/chat/" {
 		t.Fatalf("shown %q", shown[0])
 	}
 
@@ -151,5 +153,12 @@ func TestListenAddr(t *testing.T) {
 	}
 	if got := listenAddr("::1", 47481); got != "[::1]:47481" {
 		t.Fatal(got)
+	}
+}
+
+// The chat page's tab icon is the tray's icon: web/icon.png is a copy, kept equal here.
+func TestChatIconIsTheTrayIcon(t *testing.T) {
+	if !bytes.Equal(web.Icon, tray.DefaultIcon().PNG) {
+		t.Fatal("web/icon.png differs from tray/icons/tray.png; copy it again")
 	}
 }

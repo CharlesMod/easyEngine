@@ -240,7 +240,7 @@ func (s *Supervisor) installBackendOnly(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if s.cfg.Profile.Agent != nil && s.cfg.Profile.Agent.Wheel != "" {
+	if s.agentSpec() != nil && s.agentSpec().Wheel != "" {
 		if err := s.ensureAgent(ctx, cat); err != nil {
 			return err
 		}

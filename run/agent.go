@@ -55,11 +55,7 @@ func (a *agentMgr) set(phase, msg string, pid int) {
 	a.mu.Lock()
 	a.phase, a.msg, a.pid = phase, msg, pid
 	a.mu.Unlock()
-	key := a.s.cfg.Profile.Game
-	if key == "" {
-		key = "agent"
-	}
-	a.s.say("agent", key, a.status())
+	a.s.say("agent", a.s.agentKey(), a.status())
 }
 
 func venvDir(dataDir string, ag *AgentSpec) string {
@@ -152,7 +148,7 @@ func wheelModule(wheel string) (string, error) {
 
 // agentReady is true when the venv holds the current wheel.
 func (s *Supervisor) agentReady() bool {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	if ag == nil || ag.Wheel == "" {
 		return false
 	}
@@ -177,14 +173,14 @@ func (s *Supervisor) agentReady() bool {
 // llm_url_env, else EASY_ENGINE_LLM_URL and its old twin (internal/legacy).
 func (s *Supervisor) agentURLEnv() []string {
 	configured := ""
-	if ag := s.cfg.Profile.Agent; ag != nil {
+	if ag := s.agentSpec(); ag != nil {
 		configured = ag.LLMURLEnv
 	}
 	return legacy.LLMURLNames(configured, "EASY_ENGINE_LLM_URL")
 }
 
 func (s *Supervisor) agentEnv() []string {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	env := os.Environ()
 	for k, v := range ag.Env {
 		env = append(env, k+"="+v)
@@ -259,7 +255,7 @@ func (s *Supervisor) restartAgent() {
 
 // agentWanted says whether the profile has an agent the engine installs (a wheel).
 func (s *Supervisor) agentWanted() bool {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	return ag != nil && ag.Wheel != ""
 }
 
@@ -379,7 +375,7 @@ func (s *Supervisor) restartAgentInstalled() {
 }
 
 func (s *Supervisor) agentLoop(ctx context.Context) {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	a := &s.agent
 	module := ag.Module
 	if module == "" {

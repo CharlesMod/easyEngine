@@ -44,6 +44,10 @@ type RequestEnd struct {
 	PromptMs         float64 `json:"prompt_ms,omitempty"`
 	PredictedMs      float64 `json:"predicted_ms,omitempty"`
 	Slot             *int    `json:"slot,omitempty"`
+	// Attachment is the client's attachment the request was for (X-Easy-Client), ClientSlot the
+	// slot in its own numbering (run/clients.go); Slot stays the engine's.
+	Attachment string `json:"attachment,omitempty"`
+	ClientSlot *int   `json:"client_slot,omitempty"`
 }
 
 // requestSaid is the body of the request happening.

@@ -45,6 +45,10 @@ type Profile struct {
 	// YieldExcept is the launcher app ids (Steam's) that never make the engine yield the card
 	// under serve --yield-to-games: the supported host itself.
 	YieldExcept []string `json:"yield_except,omitempty"`
+	// Server is the launch options this client needs (run/clients.go); Models its advice on the
+	// model. Both are merged across clients; neither changes what another client was given.
+	Server *ServerOpts `json:"server,omitempty"`
+	Models *ModelPrefs `json:"models,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.
@@ -142,6 +146,10 @@ type Config struct {
 	// "Model not loaded") and the first Wake, Start or request at the door loads it.
 	StartSleeping bool
 	Parents       func() []int
+	// ProfileGiven: Profile came from --profile (or the caller's own); it is then the base
+	// attachment, first among the clients for the engine's life (run/clients.go). Without it the
+	// profile is only the wants when no client states any.
+	ProfileGiven bool
 
 	// Timing. Tests shrink these. Each is one of the three honest timers (docs/EVENTS.md section
 	// 1): a watchdog for silence, a network timeout or a named moment.

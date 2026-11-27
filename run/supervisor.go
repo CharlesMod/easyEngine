@@ -115,6 +115,10 @@ type Status struct {
 	Yield *YieldInfo `json:"yield"`
 	// Held is the count of requests the door holds until the model is up (Supervisor.Hold).
 	Held int `json:"held"`
+	// Attachments are the clients' attachments (the base first), Wants the merged wants with who
+	// is unserved and the vacant ranges of the running mind (run/clients.go).
+	Attachments []AttachView `json:"attachments"`
+	Wants       WantsInfo    `json:"wants"`
 }
 
 // Parent is a watched parent process.
@@ -252,7 +256,9 @@ type Supervisor struct {
 	gpu       gpuState
 
 	agent agentMgr
-	wg    sync.WaitGroup
+	// clients is the attachments and the running mind's slot map (run/clients.go).
+	clients clientReg
+	wg      sync.WaitGroup
 }
 
 // New builds a supervisor. Call Run to start the watchdog.
@@ -288,6 +294,8 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	s.setPhaseLocked("not_installed", "No model installed")
 	s.contextsInit()
+	s.clientsInit()
+	s.sayClients()
 	return s, nil
 }
 
@@ -387,6 +395,7 @@ func (s *Supervisor) Phase() string {
 
 // Status returns a snapshot.
 func (s *Supervisor) Status() Status {
+	atts, wi := s.attachmentsInfo(), s.wantsInfo()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := Status{
@@ -439,6 +448,7 @@ func (s *Supervisor) Status() Status {
 	st.Recovery = s.recoveryLocked()
 	st.Held = int(s.door.held.Load())
 	st.Contexts = s.kept.info()
+	st.Attachments, st.Wants = atts, wi
 	return st
 }
 
@@ -525,12 +535,14 @@ func (s *Supervisor) Hardware(ctx context.Context, refresh bool) (probe.Hardware
 	return hw, nil
 }
 
+// wants is the engine's wants: the clients' merged (run/clients.go), or the profile's when no
+// client states any.
 func (s *Supervisor) wants() fit.Wants {
-	p := s.cfg.Profile
+	w, _ := s.mergedWants()
 	s.mu.Lock()
-	kv := s.st.KVType
+	w.KVType = s.st.KVType
 	s.mu.Unlock()
-	return fit.Wants{Slots: p.Slots, MinSlots: p.MinSlots, CtxMax: p.CtxPerSlot.Max, CtxFloor: p.CtxPerSlot.Floor, KVType: kv}
+	return w
 }
 
 // wantsFor applies the stored ctx cap of (model, device) to the profile's wants.

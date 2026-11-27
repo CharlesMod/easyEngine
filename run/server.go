@@ -105,6 +105,9 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 		s.logf("ctx cap %d stands; lifted by a room above %d MiB or a build other than %s", was.CapCtxTotal, lift.RoomMiB+lift.MissMiB, lift.Build)
 		s.save()
 	}
+	// a projector or a draft model a client brings sits beside the model: its file is counted in
+	// the host's reserve (predicted)
+	room.GameReserve += s.clientFilesMiB()
 	lc := loadCtx{in: in, key: key, fp: fp, seed: seed, gpu: g, hasG: hasG, sum: sn.sum}
 	return lc, room, s.wantsFor(key), nil
 }
@@ -141,11 +144,21 @@ func (s *Supervisor) startLocked() error {
 		return nil
 	}
 	s.setPhase("starting", "Choosing a shape")
+	s.clearExcl() // every client is in the merge again: the shape is chosen afresh
 	lc, room, w, err := s.loadContext(ctx)
 	if err != nil {
 		return s.failStart(err, true)
 	}
 	shape, err := fit.Choose(lc.fp, room, w)
+	for err != nil && errors.Is(err, fit.ErrTooBig) {
+		// the clients' merged wants do not fit even at the floor: the latest client is left out
+		// (unserved, said) until the next start; the first ones keep what they had
+		if _, ok := s.dropLatest(); !ok {
+			break
+		}
+		w = s.wantsFor(lc.key)
+		shape, err = fit.Choose(lc.fp, room, w)
+	}
 	if err != nil { // another app may be holding the card: look again slowly, never give up for good
 		return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
 	}
@@ -264,6 +277,10 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	known := knownFlags(lc.in.bin, s.cfg.ExtraEnv)
 	args, dropped := BuildArgs(lc.in.modelPath, shape, "127.0.0.1", port, alias, known, official)
 	args = withBefore(args, "--host", s.slotSaveArgs(known))
+	// the clients' launch options (run/clients.go), checked against this build's --help
+	help := helpOf(lc.in.bin, s.cfg.ExtraEnv)
+	opts := s.clientOpts(help)
+	args = withOptions(args, opts.args, help)
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
 	}
@@ -406,6 +423,8 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			s.rec.waitingFor = ""
 			s.tokS = 0
 			s.mu.Unlock()
+			// the clients' slots in this mind are set now, before the saved slots go back to them
+			s.startMap(shape, opts)
 			// the saved slots go back before the phase says ready: the door holds requests till then
 			s.layBack(srv, url)
 			s.mindUp(srv)

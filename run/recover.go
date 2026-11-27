@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -254,10 +255,13 @@ func (w *oomWatch) take() { w.live.Store(true) }
 // phase is resizing) and the resize runs once the count of requests in flight reaches zero or
 // the named moment DrainMax comes (the reactor, run/mind.go).
 type drain struct {
-	to     fit.Shape
-	why    string
-	late   atomic.Bool
-	cancel func() bool
+	to  fit.Shape
+	why string
+	// rechoose: the drain is for the clients (run/clients.go): the shape is chosen afresh from
+	// the merged wants once the replies end, and no DrainMax cuts them (cancel nil, never late).
+	rechoose bool
+	late     atomic.Bool
+	cancel   func() bool
 }
 
 func (s *Supervisor) startDrain(srv *server, to fit.Shape, why string) {
@@ -270,6 +274,32 @@ func (s *Supervisor) startDrain(srv *server, to fit.Shape, why string) {
 	srv.drain = d
 	s.logf("%s: finishing the replies in flight, then %d x %d (moe %d); new requests wait", why, to.Slots, to.CtxPerSlot, to.NCpuMoe)
 	s.setPhase("resizing", fmt.Sprintf("Making room on the graphics card: finishing replies, then %d x %d", to.Slots, to.CtxPerSlot))
+}
+
+// startClientDrain holds new requests and waits for the replies in flight to end, then reshapes
+// for the clients (rechoose). There is no DrainMax: a client's reply is never cut for another.
+func (s *Supervisor) startClientDrain(srv *server, why string) {
+	srv.drain = &drain{why: why, rechoose: true}
+	s.logf("%s: finishing the replies in flight, then a new shape; new requests wait", why)
+	s.setPhase("resizing", "Making room for a client: finishing replies")
+}
+
+// rechoose stops the model and starts it again with the shape chosen from the clients' merged
+// wants: the contexts are kept across it (run/context.go), the door holds requests meanwhile.
+func (s *Supervisor) rechoose(ctx context.Context, srv *server, why string) {
+	s.setPhase("resizing", "Reshaping for the clients")
+	if s.inflightNow() != 0 { // a request slipped in before the phase: looked at again when idle
+		s.setPhase("ready", "Ready")
+		return
+	}
+	s.clients.mu.Lock()
+	s.clients.reclient = 0
+	s.clients.mu.Unlock()
+	s.logf("clients: %s: reshaping", why)
+	s.countRestart()
+	s.keepContexts(why, false)
+	s.stopServerLocked()
+	s.startLocked()
 }
 
 // needShort is how far the running shape's need passes the room's budget (MiB, <= 0: fits).

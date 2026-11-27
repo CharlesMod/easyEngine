@@ -107,6 +107,17 @@ func (s *Supervisor) hostInfo() (plan.HostInfo, int) {
 			pid = ps[0]
 		}
 	}
+	if pid == 0 { // else the first local client that says what it is (run/clients.go)
+		if hp, had, hest, ok := s.clientHost(); ok {
+			pid = hp
+			if ad == nil {
+				ad = had
+			}
+			if est == 0 {
+				est = hest
+			}
+		}
+	}
 	return plan.HostInfo{PID: pid, Adapter: ad}, est
 }
 

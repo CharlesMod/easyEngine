@@ -40,6 +40,8 @@ type causes struct {
 	retry bool // the first failure in a row: try again at once
 	drain bool // a drain's DrainMax came
 	grow  bool // the named moment GrowIdle came
+	// clients: an attachment came or left (run/clients.go); clientReg.reclient says what it asks
+	clients bool
 
 	oomLine string
 }
@@ -426,6 +428,7 @@ func (s *Supervisor) mindDown(srv *server) {
 	}
 	s.door.idleLong = false
 	s.door.mu.Unlock()
+	s.stopMap()
 }
 
 // mind is the reactor's goroutine: it looks when woken, never on a clock.
@@ -537,6 +540,10 @@ func (s *Supervisor) react() {
 		if !idle {
 			s.addError("replies still running after %s: making room now (%s)", s.cfg.DrainMax, dr.why)
 		}
+		if dr.rechoose {
+			s.rechoose(ctx, srv, dr.why)
+			return
+		}
 		s.shrink(ctx, srv, dr.to)
 		return
 	}
@@ -549,6 +556,23 @@ func (s *Supervisor) react() {
 		s.reshape = false
 		s.mu.Unlock()
 		s.reload(ctx, srv, "KV type changed")
+		return
+	}
+	// 2b. the clients changed (run/clients.go): an attach the running mind cannot serve grows it
+	// once the replies in flight end (new requests wait at the door, nothing fails); a leave
+	// that gives someone something reshapes when idle
+	s.clients.mu.Lock()
+	rc := s.clients.reclient
+	s.clients.mu.Unlock()
+	switch {
+	case rc == 2 && idle:
+		s.rechoose(ctx, srv, "a client needs room")
+		return
+	case rc == 2:
+		s.startClientDrain(srv, "a client needs room")
+		return
+	case rc == 1 && idle:
+		s.rechoose(ctx, srv, "a client left")
 		return
 	}
 	// 3. make room for the game: the held reading of the room (the reserve is measured, never

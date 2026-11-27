@@ -66,9 +66,12 @@ type keptCtx struct {
 	Slot   int    `json:"slot"`
 	Tokens int    `json:"tokens"`
 	Bytes  int64  `json:"bytes"`
-	Client string `json:"client,omitempty"` // the client the slot served; "" until clients own slots
-	File   string `json:"file"`
-	Key    ctxKey `json:"key"`
+	Client string `json:"client,omitempty"` // the key of the attachment the slot served (run/clients.go); "" none
+	// ClientSlot is the slot in that client's own numbering: it is laid back into the slot the
+	// client has under that number after a start that renumbered the engine's slots.
+	ClientSlot *int   `json:"client_slot,omitempty"`
+	File       string `json:"file"`
+	Key        ctxKey `json:"key"`
 }
 
 // KeptContext is one saved slot as status shows it.
@@ -77,6 +80,8 @@ type KeptContext struct {
 	Tokens int    `json:"tokens"`
 	Bytes  int64  `json:"bytes"`
 	Client string `json:"client,omitempty"`
+	// ClientSlot is the slot in the client's own numbering (with Client).
+	ClientSlot *int `json:"client_slot,omitempty"`
 }
 
 // ContextsInfo is status "contexts": the slots kept while no model server holds them.
@@ -94,6 +99,9 @@ type contextSaid struct {
 	Tokens int    `json:"tokens,omitempty"`
 	Bytes  int64  `json:"bytes,omitempty"`
 	Why    string `json:"why,omitempty"`
+	// Client and ClientSlot: the attachment's key and its own slot number, for a slot a client owns.
+	Client     string `json:"client,omitempty"`
+	ClientSlot *int   `json:"client_slot,omitempty"`
 }
 
 // keptContexts is the engine's record of its saved slots, in memory and in contexts/index.json.
@@ -114,7 +122,7 @@ func (k *keptContexts) info() *ContextsInfo {
 		in.Slots++
 		in.Tokens += c.Tokens
 		in.Bytes += c.Bytes
-		in.Kept = append(in.Kept, KeptContext{Slot: c.Slot, Tokens: c.Tokens, Bytes: c.Bytes, Client: c.Client})
+		in.Kept = append(in.Kept, KeptContext{Slot: c.Slot, Tokens: c.Tokens, Bytes: c.Bytes, Client: c.Client, ClientSlot: c.ClientSlot})
 	}
 	return in
 }
@@ -219,7 +227,7 @@ func (s *Supervisor) dropFile(c keptCtx, why string) {
 		}
 	}
 	s.logf("context: slot %d (%d tokens, %d bytes) let go: %s", c.Slot, c.Tokens, c.Bytes, why)
-	s.say("context", strconv.Itoa(c.Slot), contextSaid{What: "let_go", Slot: c.Slot, Tokens: c.Tokens, Bytes: c.Bytes, Why: why})
+	s.say("context", strconv.Itoa(c.Slot), contextSaid{What: "let_go", Slot: c.Slot, Tokens: c.Tokens, Bytes: c.Bytes, Why: why, Client: c.Client, ClientSlot: c.ClientSlot})
 }
 
 // letGoContexts removes every kept slot.
@@ -398,6 +406,7 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 		}
 		err := s.slotCall(base, id, "save", name, &ans)
 		c := keptCtx{Slot: id, Tokens: held[id], File: name, Key: srv.ctxKey}
+		c.Client, c.ClientSlot = s.slotOwner(id)
 		switch {
 		case err != nil:
 			s.addError("context: saving slot %d before %s failed: %v (not kept)", id, why, err)
@@ -411,7 +420,7 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 		c.Tokens, c.Bytes = ans.NSaved, ans.NWritten
 		got = append(got, c)
 		s.logf("context: slot %d saved before %s: %d tokens, %d bytes", id, why, c.Tokens, c.Bytes)
-		s.say("context", strconv.Itoa(id), contextSaid{What: "saved", Slot: id, Tokens: c.Tokens, Bytes: c.Bytes, Why: why})
+		s.say("context", strconv.Itoa(id), contextSaid{What: "saved", Slot: id, Tokens: c.Tokens, Bytes: c.Bytes, Why: why, Client: c.Client, ClientSlot: c.ClientSlot})
 	}
 	if len(got) == 0 {
 		return
@@ -448,6 +457,15 @@ func (s *Supervisor) layBack(srv *server, base string) {
 		return
 	}
 	for _, c := range l {
+		if c.Client != "" && c.ClientSlot != nil {
+			// a client's slot goes back into the slot that client has under its own number now
+			e, why := s.slotFor(c.Client, *c.ClientSlot)
+			if why != "" {
+				s.dropFile(c, why)
+				continue
+			}
+			c.Slot = e
+		}
 		switch {
 		case c.Key != srv.ctxKey:
 			s.dropFile(c, layBackMismatch(c.Key, srv.ctxKey))
@@ -471,7 +489,7 @@ func (s *Supervisor) layBack(srv *server, base string) {
 		srv.laidBack[c.Slot] = ans.NRestored
 		s.dropFileQuiet(c.File)
 		s.logf("context: slot %d laid back: %d tokens, %d bytes", c.Slot, ans.NRestored, ans.NRead)
-		s.say("context", strconv.Itoa(c.Slot), contextSaid{What: "laid_back", Slot: c.Slot, Tokens: ans.NRestored, Bytes: ans.NRead, Why: "the start after the stop it was saved at"})
+		s.say("context", strconv.Itoa(c.Slot), contextSaid{What: "laid_back", Slot: c.Slot, Tokens: ans.NRestored, Bytes: ans.NRead, Why: "the start after the stop it was saved at", Client: c.Client, ClientSlot: c.ClientSlot})
 	}
 	s.writeIndex()
 }

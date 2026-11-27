@@ -210,7 +210,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			}
 		}
 	}
-	if s.cfg.Profile.Agent != nil && s.cfg.Profile.Agent.Wheel != "" {
+	if s.agentSpec() != nil && s.agentSpec().Wheel != "" {
 		if err := s.ensureAgent(ctx, cat); err != nil {
 			return err
 		}
@@ -481,7 +481,7 @@ func (s *Supervisor) ensureUV(ctx context.Context, cat *catalog.Catalog) (string
 
 // ensureAgent installs the agent wheel into its venv, reinstalling when the wheel's sha changes.
 func (s *Supervisor) ensureAgent(ctx context.Context, cat *catalog.Catalog) error {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	if s.agentReady() {
 		return nil
 	}

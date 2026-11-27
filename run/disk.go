@@ -117,7 +117,7 @@ func backendInstalled(dataDir, id string) bool {
 
 // agentSteps are uv and the agent's runtime when the profile has an agent that is not set up.
 func (s *Supervisor) agentSteps(cat *catalog.Catalog) []plan.DiskStep {
-	ag := s.cfg.Profile.Agent
+	ag := s.agentSpec()
 	if ag == nil || ag.Wheel == "" || s.agentReady() {
 		return nil
 	}

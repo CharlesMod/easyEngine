@@ -131,7 +131,7 @@ func TestCleanName(t *testing.T) {
 		"":                      "unnamed client",
 		"\x00\x1b":              "unnamed client",
 		strings.Repeat("x", 99): strings.Repeat("x", NameMax),
-		"a‮b":              "ab", // a direction override is a format character, not shown
+		"a\u202eb":              "ab", // a direction override is a format character, not shown
 	} {
 		if got := CleanName(in); got != want {
 			t.Errorf("CleanName(%q) = %q, want %q", in, got, want)

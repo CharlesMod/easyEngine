@@ -84,7 +84,7 @@ func (f *fakeTray) SetItems(items []tray.Item) {
 	}
 	f.signal()
 }
-func (f *fakeTray) SetTooltip(s string)             { f.mu.Lock(); f.tooltip = s; f.mu.Unlock(); f.signal() }
+func (f *fakeTray) SetTooltip(s string) { f.mu.Lock(); f.tooltip = s; f.mu.Unlock(); f.signal() }
 func (f *fakeTray) Notify(title, body string) error {
 	f.mu.Lock()
 	f.notes = append(f.notes, body)
@@ -92,7 +92,7 @@ func (f *fakeTray) Notify(title, body string) error {
 	f.signal()
 	return nil
 }
-func (f *fakeTray) Close()                          { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
+func (f *fakeTray) Close() { f.mu.Lock(); f.closed = true; f.mu.Unlock() }
 func (f *fakeTray) snap() ([]tray.Item, string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

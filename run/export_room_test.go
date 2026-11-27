@@ -38,3 +38,10 @@ func SetHolderScan(f func() map[int]string) func() {
 	old := holderScanHook.Swap(&f)
 	return func() { holderScanHook.Store(old) }
 }
+
+// RoomListened is the nodes the room listens to now, joined by commas.
+func (s *Supervisor) RoomListened() string {
+	s.card.mu.Lock()
+	defer s.card.mu.Unlock()
+	return s.card.listened
+}

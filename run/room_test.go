@@ -14,6 +14,7 @@ import (
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
 	"github.com/CharlesMod/easyEngine/run"
+	"github.com/CharlesMod/easyEngine/yield"
 )
 
 // roomEnv is a supervisor that is not started (no model, no loop) with a room watch of its own
@@ -43,6 +44,10 @@ func roomEnv(t *testing.T, opens int) (s *run.Supervisor, node string, probes *a
 }
 
 func roomEnvH(t *testing.T, opens int) (s *run.Supervisor, node string, probes *atomic.Int32, readDone chan struct{}, hold *fakeHolders) {
+	return roomEnvWith(t, opens, nil)
+}
+
+func roomEnvWith(t *testing.T, opens int, mod func(*run.Config)) (s *run.Supervisor, node string, probes *atomic.Int32, readDone chan struct{}, hold *fakeHolders) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the opens of a device are heard on linux only")
 	}
@@ -82,6 +87,9 @@ func roomEnvH(t *testing.T, opens int) (s *run.Supervisor, node string, probes *
 	cfg.Sense = func(ctx context.Context, ours []int, host int) gpusense.Picture {
 		touch()
 		return gpusense.Picture{Adapters: []gpusense.Adapter{}, Processes: []gpusense.Process{}, Sources: map[string]string{"test": "nothing"}}
+	}
+	if mod != nil {
+		mod(&cfg)
 	}
 	s, err := run.New(cfg)
 	if err != nil {
@@ -211,4 +219,89 @@ func TestRoomDisarmEndsTheOpensGoroutine(t *testing.T) {
 	if after := runtime.NumGoroutine(); after > before+cycles/4 {
 		t.Fatalf("goroutines grew from %d to %d over %d arm/disarm cycles", before, after, cycles)
 	}
+}
+
+// nodeOS is the yield's view of the machine for the room's listening: the adapter's nodes are
+// the one /dev/nvidia node once its pci is given, every node before.
+type nodeOS struct {
+	mu       sync.Mutex
+	all, own []string
+	pci      string
+}
+
+func (o *nodeOS) Launches() []yield.Launch              { return nil }
+func (o *nodeOS) Openers(func(int) bool) map[int]string { return map[int]string{} }
+func (o *nodeOS) Under(int, int) bool                   { return false }
+func (o *nodeOS) Close()                                {}
+func (o *nodeOS) Adapter(pci string)                    { o.mu.Lock(); o.pci = pci; o.mu.Unlock() }
+func (o *nodeOS) Nodes() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.pci == "" {
+		return o.all
+	}
+	return o.own
+}
+
+// The room listens to every node while the engine's adapter is not known, and to the adapter's
+// own node only once the room's reading says which it is (the event: the reading), with no clock:
+// an open of another node (its dri node) then makes no word at all.
+func TestRoomListensAgainWhenTheAdapterIsKnown(t *testing.T) {
+	dev := t.TempDir()
+	nv, dri := filepath.Join(dev, "nvidia0"), filepath.Join(dev, "renderD128")
+	for _, p := range []string{nv, dri} {
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nos := &nodeOS{all: []string{dri, nv}, own: []string{nv}}
+	var pci atomic.Value
+	pci.Store("")
+	s, _, _, readDone, _ := roomEnvWith(t, 0, func(c *run.Config) {
+		c.Yield = &run.YieldConfig{OS: func() yield.OS { return nos }}
+		c.Sense = func(ctx context.Context, ours []int, host int) gpusense.Picture {
+			a := gpusense.Adapter{Index: 0, Vendor: "nvidia", VendorID: 0x10de, Name: "Fake", DedicatedMiB: 16384, PCI: pci.Load().(string), Source: "test"}
+			return gpusense.Picture{Adapters: []gpusense.Adapter{a}, Processes: []gpusense.Process{}, Sources: map[string]string{"test": "ok"}}
+		}
+	})
+	t.Cleanup(run.SetRoomDevices([]string{filepath.Join(dev, "*")}))
+	words := wordsDone(t)
+	open := func(p string) {
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	s.RoomArm()
+	readEnds(t, readDone, "the arming's first read")
+	readEnds(t, readDone, "the arming's second read")
+	readEnds(t, words, "the baseline look")
+	// every node is listened to: a word. (An open made while the gate of our own reads is still
+	// closed is dropped, so it is made again until the word comes.)
+	until := func(p string) {
+		t.Helper()
+		end := time.Now().Add(10 * time.Second) // watchdog for silence: no word came
+		for len(words) == 0 {
+			if time.Now().After(end) {
+				t.Fatalf("no word of %s", p)
+			}
+			open(p)
+			runtime.Gosched()
+		}
+		<-words
+	}
+	until(dri)
+	if got := s.RoomListened(); got != dri+","+nv && got != nv+","+dri {
+		t.Fatalf("listening to %q before the adapter is known, want every node", got)
+	}
+	pci.Store("0000:01:00.0")
+	if _, err := s.GPUReport(context.Background(), true); err != nil { // the reading that says which adapter
+		t.Fatal(err)
+	}
+	readEnds(t, words, "the baseline look of the new listening")
+	if got := s.RoomListened(); got != nv { // not the dri node any more (its open makes no word)
+		t.Fatalf("listening to %q, want only %q", got, nv)
+	}
+	until(nv)
 }

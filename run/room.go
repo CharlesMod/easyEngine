@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -64,6 +66,7 @@ type roomWatch struct {
 	opensStop func()
 	exits     map[int]func() // strangers followed to their end, with what lets each go; nil: none
 	stopped   bool
+	listened  string // the nodes listened to, joined
 
 	kmu   sync.Mutex
 	known map[int]bool // the holders at the last look (not nvidia-smi, not ours)
@@ -125,6 +128,7 @@ func (rw *roomWatch) held() (roomRead, bool) { return rw.level.Last() }
 // arm keeps the reading while a model is loaded: the level's watchdog, and on Linux the opens of
 // the card's device nodes.
 func (rw *roomWatch) arm() {
+	paths := rw.roomPaths() // before rw.mu: it takes the supervisor's lock, which disarm holds first
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	if rw.armed || rw.stopped {
@@ -134,11 +138,32 @@ func (rw *roomWatch) arm() {
 	rw.baseline.Store(true)
 	rw.level.Arm()
 	rw.level.Now() // a second read at once, so the baseline holds without waiting a period
+	rw.listenLocked(paths)
+}
+
+// roomPaths are the device nodes whose opens the room hears: the engine's adapter's (see
+// yield/os_linux.go adapterNodes), every GPU node while the adapter is not known.
+func (rw *roomWatch) roomPaths() []string {
+	if ns, ok := rw.s.holders.nodes(enginePCI(rw.s.yieldState())); ok && len(ns) > 0 {
+		return ns
+	}
 	var paths []string
 	for _, g := range roomDevices {
 		m, _ := filepath.Glob(g)
 		paths = append(paths, m...)
 	}
+	return paths
+}
+
+// listenLocked starts the goroutine that hears the opens of roomPaths; the caller holds rw.mu
+// and has set armed. A listening already on foot is stopped first.
+func (rw *roomWatch) listenLocked(paths []string) {
+	if rw.opensStop != nil {
+		rw.opensStop()
+		rw.opensStop = nil
+	}
+	sort.Strings(paths)
+	rw.listened = strings.Join(paths, ",")
 	if len(paths) == 0 {
 		return
 	}
@@ -166,6 +191,23 @@ func (rw *roomWatch) arm() {
 			}
 		}
 	}()
+}
+
+// renew listens again when the nodes of the engine's adapter are not those listened to: the
+// event that says so is the room's own new reading (the engine's adapter, and so its pci, is
+// known or has changed: measure), never a clock.
+func (rw *roomWatch) renew() {
+	paths := rw.roomPaths() // before rw.mu, as in arm
+	sort.Strings(paths)
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if !rw.armed || rw.stopped {
+		return
+	}
+	if strings.Join(paths, ",") == rw.listened {
+		return
+	}
+	rw.listenLocked(paths)
 }
 
 // disarm lets the reading go when no model is loaded.

@@ -79,3 +79,28 @@ func (h *holderScan) scan(pci string) map[int]string {
 	}
 	return out
 }
+
+// nodes are the device nodes to listen to for the engine's adapter at pci, from the same OS view
+// the scan uses, so that what is listened to and what is scanned for cannot differ (the yield's
+// Watch asks its own OS the same question). ok is false when this OS cannot say (not Linux, or
+// the adapter is not known): the caller listens to every node.
+func (h *holderScan) nodes(pci string) ([]string, bool) {
+	if pci == "" {
+		return nil, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.o == nil {
+		if y := h.s.cfg.Yield; y != nil && y.OS != nil {
+			h.o = y.OS()
+		} else {
+			h.o = yield.NewOS()
+		}
+	}
+	h.o.Adapter(pci)
+	l, ok := h.o.(interface{ Nodes() []string })
+	if !ok {
+		return nil, false
+	}
+	return l.Nodes(), true
+}

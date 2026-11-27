@@ -531,8 +531,10 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   which slots to save: "The prompt cache across a restart" below). Tok/s is read once from `/metrics` each time the count
   returns to zero.
 - **Make room for the game:** the room is read when needed, never on a clock of its own: at each
-  start, before a grow, on an out-of-memory line, when another program opens the engine's card
-  device (Linux, inotify), when a program the last picture listed ends, and on the host's word
+  start, before a grow, on an out-of-memory line, when the holders of the engine's card device
+  change (Linux, inotify: an open is a word that somebody touched the card, and the room is read
+  only when the set of other programs holding its nodes differs from the last look; one scan of
+  `/proc/*/fd` per word serves the room and the yield), when a program the last picture listed ends, and on the host's word
   (`POST host`). Another living program's memory gives no event (NVIDIA, and everything on
   Windows and macOS), so while a model is loaded, and while a start that failed for want of room
   waits for the room to change, the reading is also kept by the one watchdog for it, inside
@@ -750,8 +752,18 @@ and loads again once it is free. The engine process, its port and its API stay u
    before the game opens the GPU at all. gamescope is not a signal: in Steam's game mode it is
    the compositor and always runs (games inside it still show as `reaper`).
 2. **A process opens the engine's GPU** (Linux only). A program must open `/dev/nvidia<minor>`
-   or a DRM card/render node before it can allocate. inotify `IN_OPEN` on those nodes
-   (`host.Opens`, no time cap) wakes the watch at once; it then reads `/proc/<pid>/fd` of every
+   or a DRM card/render node before it can allocate. inotify `IN_OPEN` on the engine adapter's
+   nodes (`host.Opens`, no time cap) wakes the watch at once. Which nodes: one rule
+   (`adapterNodes` in `yield/os_linux.go`), used by the yield's watch and the room's alike and by
+   the scan's `wanted` set. An NVIDIA adapter (its DRM nodes driven by `nvidia`) is listened to at
+   `/dev/nvidia<minor>` alone, minor from `/proc/driver/nvidia/gpus/<pci>/information` (every
+   `/dev/nvidia<n>` if it cannot be read), never its dri nodes: the NVIDIA driver's clients open
+   the device node, so a holder of a dri node that does not hold `/dev/nvidia<minor>` is no holder
+   of the card, and a compositor's opens of the dri nodes would only add words. Another driver
+   (amdgpu, i915, xe) has its own dri nodes only. While the adapter's PCI address is not known,
+   every GPU node. The set is made again by the event that says the adapter is known or changed
+   (the room's reading, `measure`: the room renews its listening and the yield loop wakes on
+   `room`), never by a clock. The watch then wakes at once; it then reads `/proc/<pid>/fd` of every
    process (about 25 ms) and reads the level again at once. A process that still holds one of the engine adapter's nodes (mapped from
    `/proc/driver/nvidia/gpus/<pci>/information` and `/sys/class/drm/<node>/device`) and is not
    in the baseline is a newcomer. `nvidiactl` alone does not count (NVML monitors open it),

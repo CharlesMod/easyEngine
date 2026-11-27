@@ -266,7 +266,7 @@ func (r *yieldReactor) wake() {
 func (s *Supervisor) yieldLoop() {
 	r := newYieldReactor(s)
 	defer r.close()
-	w, err := s.hub.Wake("phase", "yield", "model")
+	w, err := s.hub.Wake("phase", "yield", "model", "room") // "room": the engine's adapter may be known or changed, and so its nodes
 	if err != nil {
 		s.logf("yield: %v", err)
 		return

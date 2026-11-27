@@ -26,6 +26,13 @@ func LogCeiling() int64                                            { return logC
 // and wants to know the engine has looked at it calls it once the change holds (HeldReserve).
 func (s *Supervisor) React() { s.react() }
 
+// RoomMoved is what a stranger's open of the card and then its end would say (two words): the
+// room is read twice, so a new level holds without the level's own period.
+func (s *Supervisor) RoomMoved() {
+	s.card.event()
+	s.card.event()
+}
+
 // Network says the network happening, as the system's word that a link or an address changed
 // would (watchNetwork).
 func (s *Supervisor) Network() { s.say("network", "", nil) }

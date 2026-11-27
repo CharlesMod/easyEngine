@@ -195,6 +195,7 @@ func TestGrowWhenIdleNeverMidRequest(t *testing.T) {
 	}
 	done := s.Begin()
 	e.SetOthers(0) // room is back, but a line is being served
+	s.RoomMoved()  // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "the room held", func() bool { r, ok := s.HeldReserve(); return ok && r == 0 })
 	s.React() // the engine has looked at the room that came back
 	if n := len(e.Starts()); n != 1 {

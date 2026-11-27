@@ -306,6 +306,7 @@ func TestSmallShortfallWaitsForIdle(t *testing.T) {
 	done := s.Begin() // a reply in flight
 	e.SetUsed(16000)
 	e.SetOthers(8000)
+	s.RoomMoved() // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "the new room held", func() bool { r, ok := s.HeldReserve(); return ok && r >= 8000 })
 	s.React() // the engine has looked at the held room
 	if len(e.Starts()) != 1 || s.Phase() != "ready" {
@@ -371,7 +372,9 @@ func TestNoRoomAtAllShrinksOnce(t *testing.T) {
 	s := ready(t, e)
 	e.SetUsed(16300)
 	e.SetOthers(12000) // budget well under the 5000 MiB the model needs at any ctx
+	s.RoomMoved()      // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "shrink", func() bool { return len(e.Starts()) >= 2 && s.Phase() == "ready" })
+	s.RoomMoved() // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "the room held again", func() bool { r, ok := s.HeldReserve(); return ok && r >= 12000 })
 	s.React() // the engine has looked at the room the smallest shape runs in
 	if n := len(e.Starts()); n != 2 {

@@ -140,6 +140,7 @@ func TestShrinkStaysOnTheEnginesCard(t *testing.T) {
 	}
 	grab.Store(9500) // card 1 now holds more than card 0 even without our server
 	testkit.WaitFor(t, 10*time.Second, "shrink", func() bool { return len(e.Starts()) >= 2 && s.Phase() == "ready" })
+	s.RoomMoved() // the stranger's word
 	testkit.WaitFor(t, 10*time.Second, "the room held after the shrink", func() bool { r, ok := s.HeldReserve(); return ok && r >= 9500 })
 	s.React() // the engine has looked at the room it shrank for
 	for _, l := range e.Starts() {

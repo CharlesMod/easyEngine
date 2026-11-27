@@ -107,7 +107,8 @@ func (rw *roomWatch) read() (roomRead, bool) {
 }
 
 // changed is a held change of the room: the reactor looks at it.
-func (rw *roomWatch) changed(roomRead) {
+func (rw *roomWatch) changed(r roomRead) {
+	rw.s.say("room.held", "", map[string]int{"reserve_mib": r.total})
 	if rw.baseline.Swap(false) {
 		return // the first reading of an arming is where the room stands, not a move
 	}
@@ -168,6 +169,7 @@ func (rw *roomWatch) disarm() {
 	defer rw.mu.Unlock()
 	rw.armed = false
 	rw.level.Disarm()
+	rw.s.sayGone("room.held", "")
 	if rw.opensStop != nil {
 		rw.opensStop()
 		rw.opensStop = nil

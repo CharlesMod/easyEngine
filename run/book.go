@@ -21,6 +21,7 @@ var book = []event.Decl{
 	{Name: "job", Kind: event.Fact, What: "an install, import or remove job: {kind, running}; gone when none runs"},
 	{Name: "upgrade", Kind: event.Fact, What: "the starter-to-target upgrade (status upgrade); gone when none"},
 	{Name: "room", Kind: event.Reading, What: "the adapters and the measured reserve, as last sensed (status gpu)"},
+	{Name: "room.held", Kind: event.Reading, What: "the reserve the room watch holds to (two reads agreed): {reserve_mib}; gone when the watch is let go"},
 	{Name: "yield", Kind: event.Fact, What: "the card is yielded to another program, or replies drain before that (status yield); gone when not"},
 	{Name: "recovery", Kind: event.Fact, What: "the crash and failed-start record (status recovery), with what a retry waits for; gone when none"},
 	{Name: "error", Kind: event.Happening, What: "something went wrong: {message}, as status errors lists it"},

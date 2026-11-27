@@ -336,7 +336,8 @@ func waitOn(hs []*event.Hub, timeout time.Duration, cond func() bool, paths ...s
 	for !cond() {
 		select {
 		case <-limit.C:
-			return cond()
+			// a condition that came true with no word for it is a missed event, not a pass
+			return false
 		case <-wake:
 		}
 	}

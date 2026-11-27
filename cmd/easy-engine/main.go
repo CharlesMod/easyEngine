@@ -55,7 +55,9 @@ func usage() {
                         [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                          [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
   easy-engine setup   [--profile F]
-  easy-engine token   [--new]
+  easy-engine token   [--new | --list | --revoke ID]
+  easy-engine find    [--wait D] [--json]       engines that answer on this network (mDNS)
+  easy-engine pair    [--approve CODE | --deny CODE]   pairing requests waiting at the running engine
   easy-engine probe
   easy-engine plan    [--profile F]
   easy-engine gpu     [--profile F] [--host-pid N] [--json]
@@ -112,6 +114,10 @@ func realMain() int {
 		code = cmdImport(args)
 	case "token":
 		code = cmdToken(args)
+	case "find":
+		code = cmdFind(args)
+	case "pair":
+		code = cmdPair(args)
 	case "status":
 		code = cmdStatus()
 	case "stop":
@@ -381,14 +387,26 @@ func cmdImport(args []string) int {
 
 func engineTarget() (app.Target, bool) { return app.Find(dirs.Data()) }
 
-// cmdToken prints the engine's bearer token (made if absent); --new replaces it.
+// cmdToken prints the engine's bearer token (made if absent); --new replaces it; --list shows
+// the paired clients' tokens (id, name, created; never a token); --revoke ID revokes one.
 func cmdToken(args []string) int {
 	fs := newFlags("token")
 	fresh := fs.Bool("new", false, "replace the token with a new one (clients must be given the new one)")
+	list := fs.Bool("list", false, "list the paired clients' tokens (id, name, created)")
+	revoke := fs.String("revoke", "", "revoke a paired client's token by its id")
 	if fs.Parse(args) != nil {
 		return 2
 	}
 	st := tokens.Open(dirs.Data())
+	switch {
+	case *list && (*fresh || *revoke != ""), *fresh && *revoke != "":
+		fmt.Fprintln(os.Stderr, "token: give one of --new, --list, --revoke")
+		return 2
+	case *list:
+		return tokenList(st, os.Stdout)
+	case *revoke != "":
+		return tokenRevoke(st, *revoke, os.Stdout)
+	}
 	var tok string
 	var err error
 	if *fresh {

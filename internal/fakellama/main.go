@@ -411,9 +411,30 @@ func main() {
 			if gap == 0 {
 				gap = 100 * time.Millisecond
 			}
+			gated := os.Getenv("FAKELLAMA_STREAM_GATE") != "" && ctl != ""
 			for i := 0; i < 5; i++ {
 				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"t%d \"}}]}\n\n", i)
 				fl.Flush()
+				if gated && i < 4 {
+					// the next chunk only once the test has read this one: <ctl>/go.<i+1>, by
+					// the kernel's word of its making (a proxy that buffered would never let
+					// the test read, and the test fails on its own watchdog)
+					gate := filepath.Join(ctl, fmt.Sprintf("go.%d", i+1))
+					ch, stop, err := host.Changes(gate)
+					if err != nil {
+						return
+					}
+					for !exists(filepath.Base(gate)) {
+						select {
+						case <-ch:
+						case <-r.Context().Done():
+							stop()
+							return
+						}
+					}
+					stop()
+					continue
+				}
 				time.Sleep(gap) // named moment: FAKELLAMA_STREAM_DELAY, the fake's pace between tokens
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")

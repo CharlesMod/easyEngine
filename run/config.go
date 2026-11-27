@@ -148,13 +148,11 @@ type Config struct {
 	HangSilence time.Duration
 	// RoomEvery is the period of the one watchdog on the room while a model is loaded (default
 	// 5s): another program's memory on the card gives no event (run/room.go, host.Level).
-	RoomEvery        time.Duration
-	StopGrace        time.Duration // default 5s
-	AgentBackoffBase time.Duration // default 1s
-	AgentBackoffMax  time.Duration // default 30s
-	AgentStable      time.Duration // default 60s of uptime resets the backoff
-	CmdTimeout       time.Duration // default 5 min for uv commands
-	SwapDrain        time.Duration // default 2 min: named moment, longest wait for requests in flight before a model swap
+	RoomEvery   time.Duration
+	StopGrace   time.Duration // default 5s
+	AgentStable time.Duration // default 60s: a run this long counts as stable (a quick failure is shorter)
+	CmdTimeout  time.Duration // default 5 min for uv commands
+	SwapDrain   time.Duration // default 2 min: named moment, longest wait for requests in flight before a model swap
 	// Crash recovery (run/recover.go).
 	CrashQuick  time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
 	CrashSteps  int           // default 2: quick crashes in a row at one shape before one step down
@@ -207,8 +205,6 @@ func (c *Config) defaults() {
 	dur(&c.HangSilence, 2*time.Minute)
 	dur(&c.RoomEvery, 5*time.Second)
 	dur(&c.StopGrace, 5*time.Second)
-	dur(&c.AgentBackoffBase, time.Second)
-	dur(&c.AgentBackoffMax, 30*time.Second)
 	dur(&c.AgentStable, 60*time.Second)
 	dur(&c.CmdTimeout, 5*time.Minute)
 	dur(&c.SwapDrain, 2*time.Minute)

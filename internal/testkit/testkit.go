@@ -171,8 +171,8 @@ func (e *Env) Config() run.Config {
 		// the honest timers, shrunk: the room's watchdog, the moments and the silences
 		RoomEvery: 40 * time.Millisecond, GrowIdle: 10 * time.Minute, HangSilence: time.Minute,
 		LoadTimeout: 20 * time.Second, StopGrace: 500 * time.Millisecond,
-		AgentBackoffBase: 40 * time.Millisecond, AgentBackoffMax: 200 * time.Millisecond, AgentStable: time.Hour,
-		CmdTimeout: 30 * time.Second,
+		AgentStable: time.Hour,
+		CmdTimeout:  30 * time.Second,
 	}
 	return cfg
 }

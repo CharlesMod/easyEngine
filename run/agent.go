@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/CharlesMod/easyEngine/internal/legacy"
 	"github.com/CharlesMod/easyEngine/lifecycle"
@@ -49,10 +48,16 @@ func (a *agentMgr) status() AgentStatus {
 	return AgentStatus{Phase: p, Pid: a.pid, Restarts: a.restarts, Message: a.msg}
 }
 
+// set records the status and says the agent fact (key: the profile's game name, else "agent").
 func (a *agentMgr) set(phase, msg string, pid int) {
 	a.mu.Lock()
 	a.phase, a.msg, a.pid = phase, msg, pid
 	a.mu.Unlock()
+	key := a.s.cfg.Profile.Game
+	if key == "" {
+		key = "agent"
+	}
+	a.s.say("agent", key, a.status())
 }
 
 func venvDir(dataDir string, ag *AgentSpec) string {
@@ -261,15 +266,19 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			module = strings.ReplaceAll(ag.ID, "-", "_")
 		}
 	}
-	backoff := s.cfg.AgentBackoffBase
+	// quick counts failures in a row: a run shorter than AgentStable (a launch that failed is a
+	// run of no length). The first is restarted at once; from the second on the loop waits for a
+	// word that could change the outcome (docs/EVENTS.md section 3).
+	quick := 0
 	for ctx.Err() == nil {
 		sink, _ := lifecycle.OpenLog(filepath.Join(s.dir, "logs", "agent.log"))
 		args := append([]string{"-m", module}, ag.Args...)
 		started := s.cfg.Now()
+		var why string // what ended the run, in plain words
 		proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "agent", Path: agentPython(venvDir(s.dir, ag)), Args: args, Env: s.agentEnv(), Dir: s.dir, Log: sink})
 		if err != nil {
+			why = fmt.Sprintf("could not start: %v", err)
 			s.addError("agent start: %v", err)
-			a.set("error", err.Error(), 0)
 		} else {
 			a.mu.Lock()
 			a.proc = proc
@@ -283,8 +292,9 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			a.mu.Lock()
 			a.proc = nil
 			a.mu.Unlock()
+			why = fmt.Sprintf("exited (%v)", proc.Err())
 			if ctx.Err() == nil {
-				s.addError("agent exited (%v): restarting in %s", proc.Err(), backoff)
+				s.addError("agent %s", why)
 			}
 		}
 		if sink != nil {
@@ -294,20 +304,23 @@ func (s *Supervisor) agentLoop(ctx context.Context) {
 			return
 		}
 		if s.cfg.Now().Sub(started) >= s.cfg.AgentStable {
-			backoff = s.cfg.AgentBackoffBase
+			quick = 0
 		}
+		quick++
 		a.mu.Lock()
 		a.restarts++
 		a.mu.Unlock()
-		a.set("restarting", "restarting in "+backoff.String(), 0)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
+		if quick < 2 {
+			a.set("restarting", "agent "+why+": restarting at once", 0)
+			continue
 		}
-		backoff *= 2
-		if backoff > s.cfg.AgentBackoffMax {
-			backoff = s.cfg.AgentBackoffMax
+		w, err := s.listenWord() // listen before saying that we wait
+		if err != nil {
+			return
+		}
+		a.set("error", "agent "+why+" twice soon after starting: waiting for a request or a word from a client", 0)
+		if s.awaitWord(ctx, w) != nil {
+			return
 		}
 	}
 }

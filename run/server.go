@@ -337,6 +337,10 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		default:
 		}
 	})
+	select { // a word from a request held during an earlier load is not about this one
+	case <-s.loadAsk:
+	default:
+	}
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
 	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, env), Log: sink})
 	if err != nil {
@@ -370,6 +374,10 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			oom, mb := ParseOOM(tail)
 			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-ask:
+			if !s.healthy(url) {
+				continue
+			}
+		case <-s.loadAsk: // a request held at the door is a word: /health is asked once on it
 			if !s.healthy(url) {
 				continue
 			}

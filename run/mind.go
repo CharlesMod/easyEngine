@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/event"
@@ -53,6 +54,7 @@ type door struct {
 	growStop func() bool
 	idleLong bool // GrowIdle has passed since the count last reached zero
 	why      causes
+	held     atomic.Int32 // requests held until the model is up (Hold); never in flight
 }
 
 // wakeMind records why and wakes the reactor (a writer never blocks: wakes coalesce).

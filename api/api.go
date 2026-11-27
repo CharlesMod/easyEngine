@@ -320,6 +320,18 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 			a.S.Nudge("attach")
 			writeJSON(w, 200, map[string]any{"status": "attached", "pid": in.Pid})
 		}
+	case "facts":
+		if need("GET") {
+			a.S.Hub().ServeFacts(w, r)
+		}
+	case "events":
+		if need("GET") {
+			a.S.Hub().ServeEvents(w, r)
+		}
+	case "book":
+		if need("GET") {
+			a.S.Hub().ServeBook(w, r)
+		}
 	case "logs":
 		if need("GET") {
 			n, _ := strconv.Atoi(r.URL.Query().Get("tail"))

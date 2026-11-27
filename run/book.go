@@ -8,7 +8,8 @@ import (
 // names"). GET /engine/v1/book serves it. A fact stands until replaced or said gone, a reading is
 // a level said when it changes, a happening is history no choice may depend on.
 var book = []event.Decl{
-	{Name: "engine", Kind: event.Fact, What: "this engine: {version, port}"},
+	{Name: "engine", Kind: event.Fact, What: "this engine: {version, api, port}; api is the control API's version (run.APIVersion)"},
+	{Name: "door", Kind: event.Fact, What: "the door: {held}, the requests held until the model is up (not in flight; request counts those)"},
 	{Name: "phase", Kind: event.Fact, What: "where the engine stands: {phase, message}, as status says them"},
 	{Name: "model", Kind: event.Fact, What: "the selected model and the settings it runs with, as state.json holds them (no keys): {mode, model, backend, kv_type, target, previous, starter_owned, custom, sampler_policy, linger_s}"},
 	{Name: "mind.shape", Kind: event.Fact, What: "the running shape (status shape); gone when no model server is up"},

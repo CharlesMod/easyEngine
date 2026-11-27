@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 var transport = &http.Transport{
@@ -38,9 +40,11 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 // proxy forwards every non-/engine path to llama-server (local) or, in external
 // mode, /v1/* to the player's endpoint with its key.
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
-	done := a.S.Begin() // count first, so a resize cannot slip in between Route and the forward
+	rt, done, ok := a.enter(r)
+	if !ok {
+		return // the client went away while held
+	}
 	defer done()
-	rt := a.S.Route()
 	switch rt.Kind {
 	case "unavailable":
 		if rt.Code == "yielded" {
@@ -107,6 +111,43 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			ErrorHandler:   badGateway,
 		}
 		rp.ServeHTTP(a.hearing(w), r)
+	}
+}
+
+// holdOn are the names whose change can end a hold: the phase, the model and mode (a switch to
+// external), the yield, and the upgrade (the swap to the full model).
+var holdOn = []string{"phase", "model", "yield", "upgrade"}
+
+// enter is a request at the door (docs/ENGINE.md, "The door holds"). While the route says hold
+// (the model is on its way up), the request waits on the hub, never on a clock: listen first,
+// then look at what stands, then wait for a word on holdOn, the client's going (its context) or
+// the engine's end. The held request is counted (Supervisor.Hold: the door fact, the resident
+// app's linger), never in flight. It answers the route to forward by and the end of its count in
+// flight; ok is false when the client went away while held.
+func (a *API) enter(r *http.Request) (run.Route, func(), bool) {
+	rt, end := a.S.Enter()
+	if !rt.Hold {
+		return rt, end, true
+	}
+	hub := a.S.Hub()
+	wk, err := hub.Wake(holdOn...)
+	if err != nil { // a book without the names: answer as before the hold
+		return run.Route{Kind: "unavailable", Message: rt.Message}, func() {}, true
+	}
+	defer wk.Close()
+	release := a.S.Hold()
+	defer release()
+	for {
+		if rt, end = a.S.Enter(); !rt.Hold {
+			return rt, end, true
+		}
+		select {
+		case <-wk.C():
+		case <-r.Context().Done():
+			return rt, nil, false
+		case <-hub.Done():
+			return run.Route{Kind: "unavailable", Message: "The engine is stopping"}, func() {}, true
+		}
 	}
 }
 

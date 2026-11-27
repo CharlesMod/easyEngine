@@ -35,7 +35,7 @@ func TestPageCallsAnswer(t *testing.T) {
 	}
 	for p := range found {
 		switch p {
-		case "facts", "events", "status", "plan", "hardware", "logs", "test", "start", "stop", "sleep", "wake", "cancel", "import", "install", "settings":
+		case "facts", "events", "status", "plan", "hardware", "logs", "test", "start", "stop", "sleep", "wake", "cancel", "import", "install", "settings", "pairing":
 		default:
 			t.Errorf("the page calls %q, which this test does not know", p)
 		}
@@ -64,7 +64,7 @@ func TestPageCallsAnswer(t *testing.T) {
 	if err := json.Unmarshal([]byte(get("book")), &book); err != nil {
 		t.Fatalf("book: %v", err)
 	}
-	for _, p := range []string{"plan", "hardware", "logs?name=engine&tail=10"} {
+	for _, p := range []string{"plan", "hardware", "logs?name=engine&tail=10", "pairing"} {
 		get(p)
 	}
 

@@ -74,7 +74,7 @@ func stepOf(total int64) int64 {
 // ctx.Err() and keeps the .part file so a later call resumes. A finished file already at dest
 // with the right hash is left alone.
 //
-// An attempt that wrote bytes and then failed resumes at once (progress bounds it). An attempt
+// An attempt that wrote bytes past the furthest byte this call has held and then failed resumes at once (that bounds it: a server that ignores Range and re-sends the same prefix is no progress). An attempt
 // that wrote none asks again; see Again. Progress is reported per step (1% of the total, or every
 // 4 MiB when the total is unknown), never on a clock.
 func Download(ctx context.Context, url, dest, sha256hex string, size int64, onProgress func(Progress), again Again) error {
@@ -96,8 +96,9 @@ func Download(ctx context.Context, url, dest, sha256hex string, size int64, onPr
 		}
 	}
 	part := dest + ".part"
+	var reach int64 // the furthest byte this Download has held in the .part, across attempts: progress is growth beyond it
 	for {
-		progressed, err := attemptDownload(ctx, url, part, size, onProgress)
+		progressed, err := attemptDownload(ctx, url, part, size, &reach, onProgress)
 		if err == nil {
 			return finish(ctx, part, dest, sha256hex, size, onProgress)
 		}
@@ -193,7 +194,7 @@ func hashFile(ctx context.Context, path string, progress func(int64)) (string, e
 
 // attemptDownload makes one request, appending to part. It returns nil when part holds the
 // whole file (all bytes of the response were written and, if size is known, it is complete).
-func attemptDownload(ctx context.Context, url, part string, size int64, onProgress func(Progress)) (progressed bool, err error) {
+func attemptDownload(ctx context.Context, url, part string, size int64, reach *int64, onProgress func(Progress)) (progressed bool, err error) {
 	var have int64
 	if st, err := os.Stat(part); err == nil {
 		have = st.Size()
@@ -205,7 +206,12 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 		os.Remove(part)
 		have = 0
 	}
-	have0 := have // the .part's length before this attempt: progress is growth beyond it
+	*reach = max(*reach, have)      // what the .part held at the start counts as reached
+	grew := func(done int64) bool { // progress is growth past the furthest byte ever held, not past this attempt's start
+		g := done > *reach
+		*reach = max(*reach, done)
+		return g
+	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
@@ -302,12 +308,12 @@ func attemptDownload(ctx context.Context, url, part string, size int64, onProgre
 		}
 		if rerr != nil {
 			f.Sync()
-			return done > have0, rerr
+			return grew(done), rerr
 		}
 	}
 	report(true)
 	if total > 0 && done < total {
-		return done > have0, fmt.Errorf("connection ended at %d of %d bytes", done, total)
+		return grew(done), fmt.Errorf("connection ended at %d of %d bytes", done, total)
 	}
 	return true, nil
 }

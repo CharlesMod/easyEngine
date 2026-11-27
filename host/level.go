@@ -6,8 +6,12 @@ package host
 // when it moves is read once, by that word (Now).
 
 import (
+	"context"
+	"errors"
 	"reflect"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -187,20 +191,48 @@ func (l *Level[T]) take(gen uint64, v T) bool {
 	return false
 }
 
-// Unheld tries for a file another process holds (an antivirus scan, an
-// indexer): there is no event for its letting go. try is called up to 8
-// times, 150 ms apart, and stops at the first that answers true; Unheld
-// says whether one did.
-func Unheld(try func() bool) bool {
-	for i := 0; i < 8; i++ {
-		if try() {
-			return true
+// unheldPeriod is how often a held file is looked at again.
+const unheldPeriod = 150 * time.Millisecond
+
+// IsHeld says whether err means "another process has the file open" (on
+// Windows a sharing or lock violation, or access denied while a scan has it),
+// the one answer that is worth looking at again. Elsewhere nothing is held
+// that way, and it is false.
+func IsHeld(err error) bool {
+	var en syscall.Errno
+	if runtime.GOOS != "windows" || !errors.As(err, &en) {
+		return false
+	}
+	return en == 5 || en == 32 || en == 33 // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+}
+
+// Unheld runs try (an operation on a file) until it works. When it fails
+// because another process holds the file (IsHeld: an antivirus scan, an
+// indexer, a just-stopped process whose handle lingers), the system gives no
+// event for the letting go, so the file is looked at again every
+// unheldPeriod; any other failure is returned at once. It returns nil when
+// try worked, and ctx's error (joined with the last held error) when ctx ends
+// first. A caller whose holder is a process it knows (its own child) should
+// wait for that process's exit (Exits) before calling it, and give ctx a
+// bound.
+func Unheld(ctx context.Context, try func() error) error {
+	return unheld(ctx, try, IsHeld)
+}
+
+// unheld is Unheld with the meaning of "held" given.
+func unheld(ctx context.Context, try func() error, held func(error) bool) error {
+	for {
+		err := try()
+		if err == nil || !held(err) {
+			return err
 		}
-		if i < 7 {
-			// watchdog for silence: a held file says nothing when it is let go: it is tried again after a short silence, 8 times at most
-			t := time.NewTimer(150 * time.Millisecond)
-			<-t.C
+		// watchdog for silence: a watchdog for a thing with no event (nothing says a held file was let go), armed only while the answer matters (ctx not ended)
+		t := time.NewTimer(unheldPeriod)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return errors.Join(ctx.Err(), err)
 		}
 	}
-	return false
 }

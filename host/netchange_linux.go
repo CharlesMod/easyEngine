@@ -5,6 +5,7 @@ package host
 // a link or an address changes. It needs no privilege.
 
 import (
+	"errors"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -32,11 +33,31 @@ func NetworkChanges() (<-chan struct{}, func(), error) {
 	go func() {
 		buf := make([]byte, 64<<10)
 		for {
-			if _, err := f.Read(buf); err != nil {
-				return // closed by the stop func
+			_, err := f.Read(buf)
+			change, end := readVerdict(err)
+			if change {
+				signal(c)
 			}
-			signal(c)
+			if end {
+				return
+			}
 		}
 	}()
 	return c, func() { f.Close() }, nil
+}
+
+// readVerdict says what one netlink read's outcome means: change is true when
+// a change is to be signalled (a message came, or the kernel said ENOBUFS:
+// messages were dropped, so something changed that was not seen), end is true
+// when the reading is over (the fd was closed by the stop func, or the read
+// failed in a way that will not mend).
+func readVerdict(err error) (change, end bool) {
+	switch {
+	case err == nil:
+		return true, false
+	case errors.Is(err, unix.ENOBUFS):
+		return true, false
+	default:
+		return false, true
+	}
 }

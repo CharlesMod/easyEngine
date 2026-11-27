@@ -1,8 +1,12 @@
 package host
 
 import (
+	"context"
+	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -302,17 +306,47 @@ func TestLevelCustomSame(t *testing.T) {
 }
 
 func TestUnheld(t *testing.T) {
+	errHeld := errors.New("held")
+	errOther := errors.New("other")
+	held := func(err error) bool { return err == errHeld }
+	ctx := context.Background()
+
 	calls := 0
-	if !Unheld(func() bool { calls++; return true }) || calls != 1 {
-		t.Fatalf("first try: %d calls", calls)
+	if err := unheld(ctx, func() error { calls++; return nil }, held); err != nil || calls != 1 {
+		t.Fatalf("first try: %v, %d calls", err, calls)
 	}
+	// another error returns at once, never looked at again
 	calls = 0
-	if !Unheld(func() bool { calls++; return calls == 3 }) || calls != 3 {
-		t.Fatalf("third try: %d calls", calls)
+	if err := unheld(ctx, func() error { calls++; return errOther }, held); err != errOther || calls != 1 {
+		t.Fatalf("other error: %v, %d calls", err, calls)
 	}
+	// held keeps looking (no fixed count) until it is let go
 	calls = 0
-	if Unheld(func() bool { calls++; return false }) || calls != 8 {
-		t.Fatalf("never: %d calls", calls)
+	if err := unheld(ctx, func() error {
+		calls++
+		if calls < 10 {
+			return errHeld
+		}
+		return nil
+	}, held); err != nil || calls != 10 {
+		t.Fatalf("let go: %v, %d calls", err, calls)
+	}
+	// held for ever ends with ctx
+	cctx, cancel := context.WithCancel(ctx)
+	calls = 0
+	err := unheld(cctx, func() error {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return errHeld
+	}, held)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, errHeld) {
+		t.Fatalf("ctx end: %v", err)
+	}
+	// IsHeld is false off Windows
+	if runtime.GOOS != "windows" && IsHeld(syscall.Errno(32)) {
+		t.Fatal("IsHeld true off windows")
 	}
 }
 

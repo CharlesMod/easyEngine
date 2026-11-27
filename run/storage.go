@@ -382,7 +382,7 @@ func (s *Supervisor) removeEntry(p string) (freed int64, left []string) {
 			left = append(left, l...)
 		}
 		if len(left) == 0 {
-			if !retry(func() error { return os.Remove(p) }) {
+			if !s.retry(func() error { return os.Remove(p) }) {
 				left = append(left, p)
 			}
 		}
@@ -392,17 +392,28 @@ func (s *Supervisor) removeEntry(p string) (freed int64, left []string) {
 	if fi.Mode().IsRegular() {
 		size = fi.Size()
 	}
-	if !retry(func() error { return os.Remove(p) }) {
+	if !s.retry(func() error { return os.Remove(p) }) {
 		return 0, []string{p}
 	}
 	return size, nil
 }
 
-// retry runs f until it works or the host's named watchdog gives up: on Windows a file just
-// released by a stopped process can stay locked briefly, and there is no event for its letting go.
-func retry(f func() error) bool {
-	return host.Unheld(func() bool {
+// retry runs f until it works. Our own children have ended before anything is removed (the
+// remove waits for the job's end), so a file still held is held by a stranger (on Windows an
+// antivirus scan or an indexer) and nothing says when it lets go: host.Unheld looks again while
+// it is held, for as long as heldLinger, then the file is reported as left.
+func (s *Supervisor) retry(f func() error) bool {
+	// named moment: how long a held file may linger before the remove reports it as left
+	ctx, cancel := context.WithTimeout(s.root, heldLinger)
+	defer cancel()
+	return host.Unheld(ctx, func() error {
 		err := f()
-		return err == nil || os.IsNotExist(err)
-	})
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}) == nil
 }
+
+// heldLinger bounds the wait for a file a stranger holds open (retry).
+const heldLinger = 2 * time.Second

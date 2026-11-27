@@ -218,6 +218,39 @@ func TestDownloadNoProgressAsksAgain(t *testing.T) {
 	}
 }
 
+// A server that ignores Range and sends only the first k bytes each time is
+// progress once (past the old .part) and then none: Download must ask Again
+// instead of going round at once for ever.
+func TestDownloadRangeIgnoredNoEndlessLoop(t *testing.T) {
+	data, sum := payload(10000)
+	const k = 4000
+	var n, calls atomic.Int32
+	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		w.WriteHeader(200)
+		w.Write(data[:k])
+		w.(http.Flusher).Flush()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	dest := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(dest+".part", data[:1000], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("client said stop")
+	err := Download(context.Background(), url, dest, sum, int64(len(data)), nil, againAnswers(0, stop, &calls))
+	if !errors.Is(err, stop) {
+		t.Fatalf("err=%v", err)
+	}
+	// attempt 1 grew the .part past 1000 (progress); attempt 2 reached no further, so Again was asked once
+	if n.Load() != 2 || calls.Load() != 1 {
+		t.Fatalf("requests=%d again=%d", n.Load(), calls.Load())
+	}
+}
+
 func TestDownloadAgainErrorEnds(t *testing.T) {
 	var n, calls atomic.Int32
 	url := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); http.Error(w, "busy", 503) }))

@@ -115,7 +115,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 // fwd is what the streamer needs of the supervisor for one request.
 func (a *API) fwd(external bool, id string) fwd {
 	return fwd{
-		on: true, external: external, id: id,
+		on: a.S.Streamer(), external: external, id: id,
 		yielded: func() (bool, string) {
 			if a.S.Phase() != "yielded" {
 				return false, ""

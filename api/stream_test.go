@@ -537,3 +537,65 @@ func TestStreamThroughHandler(t *testing.T) {
 		t.Fatalf("generated id %q", id)
 	}
 }
+
+// The streamer setting: settings.json "streamer": "off" turns the streamer off (a cut stream
+// then ends as the upstream ended it, as before the streamer), a PUT of another field keeps the
+// key, and an edit of the file applies at once.
+func TestStreamerSetting(t *testing.T) {
+	ctx := testCtx(t)
+	up := upstream(t, dies(false))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	set := func(streamer string) {
+		b := `{"mode":"external","external":{"base_url":"` + up.URL + `/v1","model":"","api_key":""},"streamer":"` + streamer + `"}`
+		if err := os.WriteFile(path, []byte(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set("off")
+	s, err := run.New(run.Config{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Shutdown)
+	srv := httptest.NewServer((&API{S: s}).Handler())
+	t.Cleanup(srv.Close)
+	cut := ev1 + `data: {"choices":[{"index":0,"delta":{"content":"half`
+
+	resp := post(t, ctx, srv.URL, "/v1/chat/completions", streamBody, nil)
+	if got := readRest(t, resp.Body); got != cut {
+		t.Fatalf("off: got %q", got)
+	}
+	if resp.Header.Get(RequestIDHeader) == "" || resp.Header.Get("Cache-Control") != "" {
+		t.Fatalf("off: headers %v", resp.Header)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, "PUT", srv.URL+"/engine/v1/settings", strings.NewReader(`{"linger_s":30}`))
+	req.Header.Set("X-Easy-Engine", "1")
+	put, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, put.Body)
+	put.Body.Close()
+	if put.StatusCode != 200 {
+		t.Fatalf("PUT settings: %d", put.StatusCode)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"streamer": "off"`) || !strings.Contains(string(b), `"linger_s": 30`) {
+		t.Fatalf("settings.json after PUT:\n%s", b)
+	}
+	if s.Streamer() {
+		t.Fatal("streamer on after an unrelated PUT")
+	}
+
+	set("on")
+	s.ReloadSettings()
+	resp = post(t, ctx, srv.URL, "/v1/chat/completions", streamBody, nil)
+	if got := readRest(t, resp.Body); !strings.HasPrefix(got, ev1+`data: {"error":{"code":"upstream_ended"`) {
+		t.Fatalf("on after reload: got %q", got)
+	}
+}

@@ -147,12 +147,14 @@ func LoadState(dir string) State { st, _ := loadState(dir); return st }
 type settingsFile struct {
 	listen, startListen settings.Listen
 	yield, startYield   settings.Yield
+	streamer            string // on | off: read by the proxy per request, so an edit applies at once
 	err                 string // settings.json cannot be used: the previous settings stand
 	note                string // a listen or yield edit that waits for a restart
 }
 
 func (f *settingsFile) begin(file settings.File, serr *settings.Error) {
 	f.listen, f.startListen, f.yield, f.startYield = file.Listen, file.Listen, file.Yield, file.Yield
+	f.streamer = file.Streamer
 	if serr != nil {
 		f.err = serr.Error() + "; using the defaults"
 	}
@@ -178,8 +180,15 @@ func (s *Supervisor) fileLocked() settings.File {
 	return settings.File{
 		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
 		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
-		Listen: s.sf.listen, Yield: s.sf.yield,
+		Streamer: s.sf.streamer, Listen: s.sf.listen, Yield: s.sf.yield,
 	}.Normalize()
+}
+
+// Streamer reports whether the token streamer is on (settings.json "streamer"; docs/STREAMING.md).
+func (s *Supervisor) Streamer() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sf.streamer != "off"
 }
 
 // SettingsFile is the settings as the engine holds them (the API key included: for the
@@ -262,7 +271,7 @@ func (s *Supervisor) ReloadSettings() {
 		}, false)
 	}
 	s.mu.Lock()
-	s.sf.listen, s.sf.yield = f.Listen, f.Yield
+	s.sf.listen, s.sf.yield, s.sf.streamer = f.Listen, f.Yield, f.Streamer
 	var what []string
 	if f.Listen != s.sf.startListen {
 		what = append(what, "listen address")

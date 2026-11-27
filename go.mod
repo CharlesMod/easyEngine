@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/ebitengine/purego v0.11.3
 	github.com/godbus/dbus/v5 v5.2.4
+	golang.org/x/net v0.35.0
 	golang.org/x/sys v0.30.0
 )
 

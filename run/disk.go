@@ -191,7 +191,14 @@ func (s *Supervisor) checkNeed(n plan.DiskNeed, what string) error {
 		s.addError("could not read the free disk space (%v): installing %s without a space check", err, what)
 		return nil
 	}
-	if fb := int64(free) << 20; n.Short(fb) {
+	fb := int64(free) << 20
+	if kb := s.kept.bytes(); n.Short(fb) && kb > 0 { // the disk runs short: kept contexts go first
+		s.letGoContexts("the disk runs short (" + what + ")")
+		if f2, err := s.cfg.DiskFree(s.dir); err == nil {
+			fb = int64(f2) << 20
+		}
+	}
+	if n.Short(fb) {
 		return fmt.Errorf("%w for %s: %s, %s free (%s short)", ErrNoSpace, what, n.Explain(), plan.GB(fb), plan.GB(n.Total-fb))
 	}
 	return nil

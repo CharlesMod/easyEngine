@@ -19,6 +19,7 @@
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
 //	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
 //	                           id_slot 0, timings with predicted_per_second 50) before [DONE]
+//	FAKELLAMA_SLOT_BYTES       bytes a saved slot file holds per token (default 16)
 //	(every completion request body is saved to <ctl>/lastbody.json)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
@@ -33,6 +34,9 @@
 //	             print the CUDA out-of-memory lines (the server survives)
 //	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
 //	  loadfail   while present, every start fails while loading with a non-memory error
+//	  savefail / restorefail  while present, slot save / restore answer 500 (nothing written)
+//	  slots.log  written: one line per slot save ("save <id> <name> <n>") and restore attempt
+//	             ("restore <id> <name> ok|fail"); needs --slot-save-path to be served at all
 //	  healthy    written (with the pid) when /health turns 200
 //
 // It says the lines a real llama-server says, in the same order (run/testdata/ready-*.txt): once
@@ -68,6 +72,7 @@ var withValue = map[string]bool{
 	"--temp": true, "--top-k": true, "--top-p": true, "--min-p": true, "--repeat-penalty": true, "--dry-multiplier": true,
 	"--typical": true, "--repeat-last-n": true, "--presence-penalty": true, "--frequency-penalty": true,
 	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
+	"--slot-save-path": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 
@@ -93,6 +98,7 @@ func helpText(hidden map[string]bool) string {
 		"--no-webui                     disable the Web UI",
 		"--metrics                      enable prometheus compatible metrics endpoint",
 		"--slots                        enable slots monitoring endpoint",
+		"--slot-save-path PATH          path to save slot kv cache (default: disabled)",
 		"-dev,  --device <dev1,dev2,..> comma-separated list of devices to use for offloading",
 		"-sm,   --split-mode {none,layer,row}  how to split the model across multiple GPUs",
 		"--host HOST                    ip address to listen",
@@ -156,6 +162,70 @@ func finish(t int32) {
 		l = append(l, "srv  update_slots: all slots are idle")
 	}
 	say(l...)
+}
+
+// slot is one slot's token state; the fake holds a token count, never tokens.
+type slot struct {
+	tokens  int  // tokens the slot holds now
+	decoded int  // predicted tokens of the last answer
+	held    bool // has held a task
+	task    int32
+}
+
+var (
+	slotMu       sync.Mutex
+	slots        []slot
+	slotSavePath string // --slot-save-path
+)
+
+// promptTokens is the fake's token count of a request body: ceil(bytes of prompt text / 4).
+func promptTokens(raw []byte) int {
+	var b struct {
+		Prompt   any `json:"prompt"`
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(raw, &b)
+	n := 0
+	if p, ok := b.Prompt.(string); ok {
+		n += len(p)
+	}
+	for _, m := range b.Messages {
+		if c, ok := m.Content.(string); ok {
+			n += len(c)
+		}
+	}
+	return (n + 3) / 4
+}
+
+// account books a completion request on its slot and returns what the answer's timings say.
+func account(raw []byte, task int32, predicted int) (cacheN, promptN int) {
+	var b struct {
+		IDSlot *int `json:"id_slot"`
+	}
+	json.Unmarshal(raw, &b)
+	id := 0
+	if b.IDSlot != nil && *b.IDSlot >= 0 {
+		id = *b.IDSlot
+	}
+	slotMu.Lock()
+	defer slotMu.Unlock()
+	if id >= len(slots) {
+		id = 0
+	}
+	sl := &slots[id]
+	nt := promptTokens(raw)
+	if sl.tokens > 0 && nt >= sl.tokens {
+		cacheN, promptN = sl.tokens, nt-sl.tokens
+	} else {
+		promptN = nt
+	}
+	sl.tokens = nt + predicted
+	sl.decoded = predicted
+	sl.held = true
+	sl.task = task
+	return cacheN, promptN
 }
 
 // recordBody writes the last completion request body to <ctl>/lastbody.json so tests can see
@@ -240,6 +310,8 @@ func main() {
 		np = 1
 	}
 	c, _ := strconv.Atoi(vals["-c"])
+	slots = make([]slot, np)
+	slotSavePath = vals["--slot-save-path"]
 	ctl := os.Getenv("FAKELLAMA_CTL")
 	if ctl != "" {
 		f, err := os.OpenFile(filepath.Join(ctl, "starts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -388,10 +460,26 @@ func main() {
 		}
 		busy := exists("busy") || atomic.LoadInt32(&inflight) > 0
 		var s []map[string]any
+		slotMu.Lock()
 		for i := 0; i < np; i++ {
-			s = append(s, map[string]any{"id": i, "n_ctx": c / np, "is_processing": busy && i == 0})
+			m := map[string]any{"id": i, "n_ctx": c / np, "speculative": false, "is_processing": busy && i == 0}
+			if sl := slots[i]; sl.held {
+				m["id_task"] = sl.task
+				m["n_prompt_tokens"] = sl.tokens - sl.decoded
+				m["n_prompt_tokens_processed"] = 0
+				m["n_prompt_tokens_cache"] = 0
+				m["next_token"] = []map[string]any{{"has_next_token": false, "has_new_line": false, "n_remain": -1, "n_decoded": sl.decoded}}
+			}
+			s = append(s, m)
 		}
+		slotMu.Unlock()
 		js(w, s)
+	})
+	mux.HandleFunc("/slots/", func(w http.ResponseWriter, r *http.Request) {
+		if loading(w) {
+			return
+		}
+		slotAction(w, r, np, c/np, ctl, exists)
 	})
 	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
 		if !loading(w) {
@@ -427,6 +515,7 @@ func main() {
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
 		json.Unmarshal(raw, &body)
+		cacheN, promptN := account(raw, t, 5)
 		if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fl := w.(http.Flusher)
@@ -461,7 +550,9 @@ func main() {
 				time.Sleep(gap) // named moment: FAKELLAMA_STREAM_DELAY, the fake's pace between tokens
 			}
 			if os.Getenv("FAKELLAMA_TIMINGS") != "" { // the last chunk llama-server sends: finish, slot, timings
-				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"id_slot\":0,\"timings\":{\"cache_n\":3,\"prompt_n\":7,\"prompt_ms\":12.5,\"predicted_n\":5,\"predicted_ms\":100,\"predicted_per_second\":50}}\n\n")
+				tm := map[string]any{"cache_n": cacheN, "prompt_n": promptN, "prompt_ms": 12.5, "predicted_n": 5, "predicted_ms": 100, "predicted_per_second": 50}
+				last, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}, "id_slot": 0, "timings": tm})
+				fmt.Fprintf(w, "data: %s\n\n", last)
 				fl.Flush()
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
@@ -471,7 +562,7 @@ func main() {
 		if d, _ := time.ParseDuration(os.Getenv("FAKELLAMA_CHAT_DELAY")); d > 0 {
 			time.Sleep(d) // named moment: FAKELLAMA_CHAT_DELAY, how long the fake takes to answer
 		}
-		js(w, map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}})
+		js(w, map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}})
 	}
 	mux.HandleFunc("/v1/chat/completions", chat)
 	mux.HandleFunc("/completion", func(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +573,8 @@ func main() {
 		defer finish(t)
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
-		js(w, map[string]any{"content": "ready", "stop": true})
+		cacheN, promptN := account(raw, t, 5)
+		js(w, map[string]any{"content": "ready", "stop": true, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}})
 	})
 	addr := vals["--host"] + ":" + vals["--port"]
 	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,
@@ -533,4 +625,98 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// slotAction serves POST /slots/{id}?action=save|restore the way llama-server does with
+// --slot-save-path: the file is a header line and N*FAKELLAMA_SLOT_BYTES zero bytes.
+func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl string, exists func(string) bool) {
+	w.Header().Set("Content-Type", "application/json")
+	fail := func(code int, msg, typ string) {
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": msg, "type": typ}})
+	}
+	dir := slotSavePath
+	if dir == "" {
+		fail(501, "This server does not support slots action.", "not_supported_error")
+		return
+	}
+	if r.Method != http.MethodPost {
+		fail(405, "Method Not Allowed", "invalid_request_error")
+		return
+	}
+	action := r.URL.Query().Get("action")
+	if action != "save" && action != "restore" {
+		fail(400, "Invalid action", "invalid_request_error")
+		return
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/slots/"))
+	if err != nil || id < 0 || id >= np {
+		fail(400, "Invalid slot ID", "invalid_request_error")
+		return
+	}
+	var body struct {
+		Filename string `json:"filename"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	json.Unmarshal(raw, &body)
+	name := body.Filename
+	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		fail(400, "Invalid filename", "invalid_request_error")
+		return
+	}
+	logLine := func(f string, a ...any) {
+		if ctl == "" {
+			return
+		}
+		if lf, err := os.OpenFile(filepath.Join(ctl, "slots.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			fmt.Fprintf(lf, f+"\n", a...)
+			lf.Close()
+		}
+	}
+	path := filepath.Join(dir, name)
+	if action == "save" {
+		if exists("savefail") {
+			fail(500, "fake save failure", "server_error")
+			return
+		}
+		slotMu.Lock()
+		n := slots[id].tokens
+		slotMu.Unlock()
+		per, _ := strconv.Atoi(os.Getenv("FAKELLAMA_SLOT_BYTES"))
+		if per == 0 {
+			per = 16
+		}
+		data := append([]byte(fmt.Sprintf("fakeslot tokens=%d ctx=%d\n", n, ctxPer)), make([]byte, n*per)...)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			fail(500, err.Error(), "server_error")
+			return
+		}
+		logLine("save %d %s %d", id, name, n)
+		json.NewEncoder(w).Encode(map[string]any{"id_slot": id, "filename": name, "n_saved": n, "n_written": len(data), "timings": map[string]any{"save_ms": 0.5}})
+		return
+	}
+	if exists("restorefail") {
+		logLine("restore %d %s fail", id, name)
+		fail(500, "fake restore failure", "server_error")
+		return
+	}
+	data, err := os.ReadFile(path)
+	n, ctx := 0, 0
+	if err == nil {
+		line, _, _ := strings.Cut(string(data), "\n")
+		_, perr := fmt.Sscanf(line, "fakeslot tokens=%d ctx=%d", &n, &ctx)
+		if perr != nil {
+			err = perr
+		}
+	}
+	if err != nil || n < 0 || n > ctxPer {
+		logLine("restore %d %s fail", id, name)
+		fail(400, "Unable to restore slot: No available space in KV cache or invalid slot save file", "invalid_request_error")
+		return
+	}
+	slotMu.Lock()
+	slots[id].tokens = n
+	slotMu.Unlock()
+	logLine("restore %d %s ok", id, name)
+	json.NewEncoder(w).Encode(map[string]any{"id_slot": id, "filename": name, "n_restored": n, "n_read": len(data), "timings": map[string]any{"restore_ms": 0.5}})
 }

@@ -81,6 +81,7 @@ fsync and rename:
   "kv_type": "q4_0",
   "sampler_policy": "enforce",
   "streamer": "on",
+  "keep_context": "on",
   "listen": {
     "host": "127.0.0.1",
     "port": 47480,
@@ -472,6 +473,7 @@ llama-server -m <gguf> -ngl 999 [--n-cpu-moe N] -np <slots> -c <slots*ctx_per_sl
   --no-kv-unified  (independent slots: each one gets exactly ctx_per_slot)
   -ctk <kv> -ctv <kv> -fa on --jinja --reasoning off --cache-reuse 256 --metrics --slots
   --temp T --top-k K --top-p P --min-p M --repeat-penalty R --dry-multiplier 0   (the model's `official` sampler profile)
+  --slot-save-path <data>/contexts   (the prompt cache across a restart, §5 below)
   --host 127.0.0.1 --port <free port> -a <model id>
 ```
 
@@ -519,7 +521,8 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   The lines of one failed request are let go.
 - **Idle is exact:** every request reaches the model server through the engine's door (it
   listens on a private loopback port), so idle is the door's count of requests in flight
-  reaching zero. `/slots` is not read. Tok/s is read once from `/metrics` each time the count
+  reaching zero. `/slots` is not read for this (it is read once before a planned stop, to know
+  which slots to save: "The prompt cache across a restart" below). Tok/s is read once from `/metrics` each time the count
   returns to zero.
 - **Make room for the game:** the room is read when needed, never on a clock of its own: at each
   start, before a grow, on an out-of-memory line, when another program opens the engine's card
@@ -561,6 +564,74 @@ flags it does not know, as the hive's `ReadEngineHelp()` does.)
   ending and every byte of a response (the proxy calls `Heard`). When it fires, `/health` is
   asked once (3 s network timeout): no answer restarts the server, an answer puts it back. A
   quiet server with nothing in flight is never asked anything.
+- **The prompt cache across a restart** (`run/context.go`; docs/EVENTS.md §6): below.
+
+### The prompt cache across a restart (`run/context.go`)
+
+Every planned restart of llama-server (a shrink, a grow, a yield and its return, a sleep and a
+wake, a stop and a start, the restart after an install) would throw away what each slot has
+read, so the next reply pays the whole prefill again: for a game's long conversation, tens of
+thousands of tokens (a 32 000-token prompt is 65 s of prefill for Gemma 4 26B-A4B on a P40). The
+engine keeps it instead, with llama-server's own slot files.
+
+- **The files.** Every launch passes `--slot-save-path <data>/contexts` (the directory is the
+  engine's, made 0700; the flag is the engine's own, like `-c`; a build whose `--help` does not
+  list it runs without, and that is logged). Saved slots are `contexts/slot<i>-<pid>-<n>.bin`;
+  `contexts/index.json` (0600) records each one: `{slot, tokens, bytes, client, file, key}`.
+  The engine removes only the files its index names, by those names, in that directory.
+- **Save** before a planned stop of a healthy server, after the drain (no request in flight) and
+  before the stop: `GET /slots` says which slots hold tokens (`n_prompt_tokens` plus the
+  `next_token[].n_decoded` of a slot that has served; a slot laid back and not used since is
+  known from the lay-back, since llama-server says nothing of it), then one
+  `POST /slots/{i}?action=save {"filename": ...}` per slot (answer
+  `{id_slot, filename, n_saved, n_written, timings: {save_ms}}`; a slot with `n_saved` 0 is not
+  kept). Each call has a network timeout of 2 min (`SlotTimeout`). A save that fails is said and
+  that slot is not kept; the stop goes on. Nothing is saved: with `keep_context` off; with
+  requests still in flight (a drain cut short); before a crash restart, a hang restart, an
+  out-of-memory shrink (memory failures keep nothing), a KV-type change (nothing would fit) or a
+  model swap (the key differs).
+- **The context key.** A saved slot is laid back only into a server with the same model file
+  (its catalog sha256; for a custom file, which has none, its path, size and time), the same
+  llama build (the backend id and the sha256 of the archive installed under it, which names its
+  patch set with it) and the same cache type.
+- **Lay back** on the next start: once the new server answers `/health` and before the phase
+  says `ready` (the door holds requests until then, §7e), each kept slot whose key matches, whose
+  slot id exists in the new shape and whose tokens fit the new context per slot is restored
+  (`POST /slots/{i}?action=restore`, answer `{id_slot, filename, n_restored, n_read, timings:
+  {restore_ms}}`) and its file removed. Everything else is let go. A restore that fails is said,
+  its file removed, and the start goes on: a lay-back never fails a start. The next request that
+  continues the slot's conversation reads its prompt from the cache (`timings.cache_n` large,
+  `prompt_n` only the new turn). A client keeps its slot by sending `id_slot` (llama-server's
+  field); until clients own slots (a later slice) the engine keys a saved context by slot id.
+- **Letting go.** Saved files are removed when laid back; when the model, the build or the KV
+  type changes (on a KV change at once, else at the next start, by the key); at engine start
+  (what a dead engine left: a sleep followed by an engine restart is not laid back) and at engine
+  end; and when the disk runs short (an install's disk check lets kept contexts go first and
+  reads the free space again).
+- **Disk.** Before saving, the size is estimated from the sizing core's footprint of the running
+  model (full-attention cache per token, the sliding-window cache up to its window three times
+  over for the window and its checkpoints, the recurrent state, a header) and checked against
+  the free disk the way installs are (`plan.NeedOf` with the logs' room, the host's files and the
+  headroom); with too little, nothing is saved and that is said.
+- **A yield is urgent.** A game waits for the card while a yield saves. Measured on poe (P40,
+  llama.cpp b12680, q4_0 cache, 2 slots): Gemma 4 E2B, 3 043 tokens: save 17 ms, 10.6 MB, restore
+  10 ms; 31 961 tokens: save 71 ms, 61 MB, restore 64 ms. Gemma 4 26B-A4B IQ3_S, 31 961 tokens:
+  save 0.32 s, 362 MB, restore 0.24 s; the next turn read 31 949 tokens from the cache and
+  processed 21 (379 ms) where a cold server processed 31 970 (65.6 s). Through the engine itself (E2B,
+  1 x 32768): a 31 961-token slot saved at a sleep (61 MB), and the next turn, sent while asleep,
+  was held, woke the model, and was answered 2.8 s later with 31 949 tokens from the cache and 21
+  processed (the cold prompt took 18.7 s). A restore into a slot smaller than the saved tokens is
+  refused by llama-server (400), which is why the engine checks the context per slot first. About 1.1 GB/s, so a full
+  context of the models the engine serves is well under 2 s. **The rule:** `keep_context`
+  `on` (default) saves on a yield only when the estimate is at most `YieldSaveMaxMiB` (2048 MiB,
+  about 2 s at that speed; a dense model at f16 cache and a long context can pass it), else
+  nothing is saved and that is said; `always` saves on a yield whatever the size; `off` never
+  saves. Every other planned stop saves with `on` or `always`.
+- **Said.** The happening `context` (keyed by slot; `all` for a save that did not happen for any
+  slot): `{what: saved|laid_back|let_go|not_saved, slot, tokens, bytes, why}`. Status
+  `contexts` is `{slots, tokens, bytes, kept: [{slot, tokens, bytes, client?}]}` while slots are
+  kept (between a stop and the next start), null otherwise. The engine log has a `context:` line
+  for each.
 
 ## 6. Lifetime
 
@@ -788,7 +859,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off). `GET settings` shows `streamer`. `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer` and `keep_context`. `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid}` | adds a parent pid; **409** once the engine is stopping |
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
@@ -798,7 +869,9 @@ other timer: streams and long model calls run as long as the client keeps them.
 engine is shutting down; it wins over every other phase), `error`. `progress` is `{done_bytes, total_bytes,
 rate_bps, eta_s, step}` while downloading, else null. `shape` is `{slots, ctx_per_slot,
 n_cpu_moe, kv_type, vram_mib, vram_basis}`; `vram_basis` is `measured` where `vram_mib` was read
-from the running server, else `predicted`.
+from the running server, else `predicted`. `contexts` is the prompt cache kept across a restart:
+`{slots, tokens, bytes, kept: [{slot, tokens, bytes, client?}]}` while saved slots wait for the
+next start, else absent (§5, "The prompt cache across a restart").
 
 ### 7a. First run: a starter model, then the target
 

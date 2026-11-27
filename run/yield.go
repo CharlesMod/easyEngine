@@ -685,7 +685,6 @@ func (s *Supervisor) yieldNow(d yield.Decision) {
 		lc()
 	}
 	s.opMu.Lock()
-	s.stopServerLocked()
 	s.mu.Lock()
 	still := s.yieldInfo != nil
 	if still {
@@ -693,9 +692,10 @@ func (s *Supervisor) yieldNow(d yield.Decision) {
 		s.refreshLocked()
 	}
 	s.mu.Unlock()
-	if still {
+	if still { // said before the stop: a phase that says ready while the server is stopped is a lie
 		s.setPhase("yielded", "Paused while "+d.Reason+" runs")
 	}
+	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.logf("yield: unloaded in %s", s.cfg.Now().Sub(start).Round(time.Millisecond))
 }

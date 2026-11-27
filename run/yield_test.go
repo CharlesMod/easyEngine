@@ -248,7 +248,8 @@ func TestYieldToGameAndBack(t *testing.T) {
 	s := yieldSup(t, e, f, func(y *run.YieldConfig) { y.Every = time.Hour })
 	settled(t, s, f)
 	f.setLaunches(game)
-	testkit.WaitPhase(t, s, "yielded", 15*time.Second)
+	// the phase says yielded before the stop; the shape goes when the server has stopped
+	testkit.WaitFor(t, 15*time.Second, "yielded and unloaded", func() bool { st := s.Status(); return st.Phase == "yielded" && st.Shape == nil })
 	st := s.Status()
 	if st.Yield == nil || st.Yield.Kind != "game" || st.Yield.Reason != "AppId 999 (x)" || st.Yield.Draining || st.Shape != nil {
 		t.Fatalf("status %+v yield %+v", st, st.Yield)

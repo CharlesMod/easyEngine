@@ -687,6 +687,8 @@ func (s *Supervisor) routeLocked() Route {
 		return Route{Kind: "unavailable", Hold: true, Message: "Loading model"}
 	case "starting", "loading":
 		return Route{Kind: "unavailable", Hold: true, Message: "Loading model"}
+	case "stopping":
+		return Route{Kind: "unavailable", Message: "The engine is stopping"}
 	case "error":
 		return Route{Kind: "unavailable", Message: "Model server error: " + s.message}
 	}
@@ -820,6 +822,9 @@ func (s *Supervisor) Shutdown() {
 	}
 	s.stopAgent()
 	s.opMu.Lock()
+	// said before the stop: a request that arrives now is answered at once, never proxied to a
+	// server being stopped, and the held ones end (api answers "stopping" when the hub closes)
+	s.setPhase("stopping", "Stopping")
 	s.stopServerLocked()
 	s.opMu.Unlock()
 	s.stop()
@@ -870,17 +875,18 @@ func (s *Supervisor) Stop() error {
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	local := s.Status().Mode == "local"
+	_, installed := s.resolveInstall()
+	if local && installed { // said before the stop: no request is proxied to a server being stopped
+		s.setPhase("sleeping", "Stopped")
+	}
 	s.stopServerLocked()
 	s.mu.Lock()
 	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
 	s.refreshLocked()
 	s.mu.Unlock()
-	if s.Status().Mode == "local" {
-		if _, ok := s.resolveInstall(); ok {
-			s.setPhase("sleeping", "Stopped")
-		} else if !s.customMissingPhase() {
-			s.setPhase("not_installed", "No model installed")
-		}
+	if local && !installed && !s.customMissingPhase() {
+		s.setPhase("not_installed", "No model installed")
 	}
 	return nil
 }
@@ -899,8 +905,9 @@ func (s *Supervisor) Sleep() error {
 	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
-	s.stopServerLocked()
+	// said before the stop: a request that arrives during it is held, and wakes the model again
 	s.setPhase("sleeping", "Model unloaded")
+	s.stopServerLocked()
 	return nil
 }
 

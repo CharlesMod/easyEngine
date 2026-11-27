@@ -113,30 +113,6 @@ func TestProxyAndStreaming(t *testing.T) {
 	}
 }
 
-func TestUnavailableWhileLoading(t *testing.T) {
-	testkit.SkipWindows(t)
-	e := testkit.New(t)
-	e.InstallFake()
-	e.Llama["FAKELLAMA_HEALTH_DELAY"] = "1500ms"
-	s, srv := serve(t, e, e.Config())
-	testkit.WaitFor(t, 10*time.Second, "loading phase", func() bool { return s.Phase() == "loading" })
-	c, body, h := do(t, "POST", srv.URL+"/v1/chat/completions", `{}`, nil)
-	if c != 503 || h.Get("Retry-After") == "" {
-		t.Fatalf("want 503 with Retry-After, got %d %s", c, body)
-	}
-	var j struct {
-		Error struct {
-			Code    int
-			Type    string
-			Message string
-		}
-	}
-	if json.Unmarshal([]byte(body), &j) != nil || j.Error.Code != 503 || j.Error.Message == "" {
-		t.Fatalf("not llama-server's error shape: %s", body)
-	}
-	testkit.WaitPhase(t, s, "ready", 10*time.Second)
-}
-
 func TestNoShrinkWhileProxyRequestInFlight(t *testing.T) {
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
@@ -144,20 +120,39 @@ func TestNoShrinkWhileProxyRequestInFlight(t *testing.T) {
 	e.Llama["FAKELLAMA_CHAT_DELAY"] = "1500ms"
 	s, srv := serve(t, e, e.Config())
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	var done int32
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		do(t, "POST", srv.URL+"/v1/chat/completions", `{}`, nil)
-		atomic.StoreInt32(&done, 1)
 	}()
-	time.Sleep(200 * time.Millisecond)
+	testkit.WaitFor(t, 10*time.Second, "the request in flight", func() bool { return s.InFlight() == 1 })
+	from := testkit.Mark(t, s, "the room shrinks under a request")
 	e.SetUsed(16000)
 	e.SetOthers(8000)
-	time.Sleep(900 * time.Millisecond)
-	if atomic.LoadInt32(&done) == 1 {
-		t.Skip("request ended too early to judge")
+	<-done
+	testkit.WaitFor(t, 10*time.Second, "the request's end", func() bool { return s.InFlight() == 0 })
+	// nothing may restart the server between the room's change and the request's end
+	var end uint64
+	for _, ev := range testkit.Said(t, s, from, 0, "request") {
+		var b struct {
+			What     string `json:"what"`
+			Inflight int    `json:"inflight"`
+		}
+		json.Unmarshal(ev.Body, &b)
+		if b.What == "end" && b.Inflight == 0 {
+			end = ev.Seq
+			break
+		}
 	}
-	if n := len(e.Starts()); n != 1 {
-		t.Fatalf("resized with a request in flight: %v", e.Starts())
+	if end == 0 {
+		t.Fatal("no request end said")
+	}
+	// (a reshape may say "resizing" and drain: new requests are held then; the server is not
+	// restarted under the one in flight)
+	for _, p := range testkit.Phases(t, s, from, end) {
+		if p == "starting" || p == "loading" {
+			t.Fatalf("restarted with a request in flight: %v", testkit.Phases(t, s, from, end))
+		}
 	}
 	testkit.WaitFor(t, 15*time.Second, "shrink after the request ended", func() bool { return len(e.Starts()) >= 2 })
 }

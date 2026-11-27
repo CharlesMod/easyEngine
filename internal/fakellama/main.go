@@ -31,6 +31,7 @@
 //	             print the CUDA out-of-memory lines (the server survives)
 //	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
 //	  loadfail   while present, every start fails while loading with a non-memory error
+//	  healthy    written (with the pid) when /health turns 200
 //
 // It says the lines a real llama-server says, in the same order (run/testdata/ready-*.txt): once
 // the model is loaded and it listens, "llama_server: model loaded", "llama_server: listening on
@@ -481,6 +482,9 @@ func main() {
 	}
 	becomeReady := func() {
 		isReady.Store(true)
+		if ctl != "" { // a test hears that /health answers 200 now (a word, not a poll)
+			os.WriteFile(filepath.Join(ctl, "healthy"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
 		switch readyLines {
 		case "none":
 			say("srv  llama_server: model loaded", "srv  update_slots: all slots are idle")

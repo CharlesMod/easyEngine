@@ -14,6 +14,8 @@ func (fp Footprint) kvAt(slots, ctx int) float64       { return raw(fp).kvAt(slo
 func (fp Footprint) vram(slots, ctx, n int) float64    { return raw(fp).vram(slots, ctx, n) }
 func (fp Footprint) largest(slots, ctx, n int) float64 { return raw(fp).largest(slots, ctx, n) }
 func (fp Footprint) need(s Shape) float64              { return raw(fp).need(s) }
+func (fp Footprint) allHost(slots, ctx int) float64    { return raw(fp).allHost(slots, ctx) }
+func (fp Footprint) cardHost(n int) float64            { return raw(fp).cardHost(n) }
 func (fp Footprint) shape(w Wants, slots, ctx, n int, cpuOnly bool) Shape {
 	return raw(fp).shape(w, slots, ctx, n, cpuOnly)
 }

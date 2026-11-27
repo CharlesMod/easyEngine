@@ -26,6 +26,15 @@ func unavailable(w http.ResponseWriter, code int, typ, msg string) {
 	json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "type": typ, "message": msg}})
 }
 
+// yieldedReply answers while the card is yielded to another program: 503, a string code
+// "yielded" (clients tell it from "loading" by that), and a longer Retry-After.
+func yieldedReply(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "10")
+	w.WriteHeader(503)
+	json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "yielded", "type": "unavailable_error", "message": msg}})
+}
+
 // proxy forwards every non-/engine path to llama-server (local) or, in external
 // mode, /v1/* to the player's endpoint with its key.
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +43,10 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	rt := a.S.Route()
 	switch rt.Kind {
 	case "unavailable":
+		if rt.Code == "yielded" {
+			yieldedReply(w, rt.Message)
+			return
+		}
 		unavailable(w, 503, "unavailable_error", rt.Message)
 		return
 	case "external":

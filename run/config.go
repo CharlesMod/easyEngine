@@ -42,6 +42,9 @@ type Profile struct {
 	// example the agent's call log: its cap times the copies it keeps). Every disk check counts
 	// it in full, so a setup never fills the disk the host still writes to. 0 = none declared.
 	HostFilesMiB int `json:"host_files_mib,omitempty"`
+	// YieldExcept is the launcher app ids (Steam's) that never make the engine yield the card
+	// under serve --yield-to-games: the supported host itself.
+	YieldExcept []string `json:"yield_except,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.
@@ -157,6 +160,9 @@ type Config struct {
 	DrainMax     time.Duration   // default 2 min: longest wait for replies before a shrink that cannot wait for idle
 	DrainMinMiB  int             // default 256: a held shortfall this large shrinks without waiting for idle
 	OOMHold      time.Duration   // default 60s: out-of-memory lines in two ticks this close are a shrink signal
+
+	// Yield, when set, gives the card to other programs that want it (run/yield.go).
+	Yield *YieldConfig
 }
 
 func (c *Config) defaults() {
@@ -213,6 +219,9 @@ func (c *Config) defaults() {
 	dur(&c.CrashQuick, 2*time.Minute)
 	dur(&c.DrainMax, 2*time.Minute)
 	dur(&c.OOMHold, 60*time.Second)
+	if c.Yield != nil {
+		c.Yield.defaults()
+	}
 	if c.CrashSteps <= 0 {
 		c.CrashSteps = 3
 	}

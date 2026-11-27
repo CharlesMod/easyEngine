@@ -104,6 +104,9 @@ type Status struct {
 	// Recovery is the crash and failed-start record while the engine recovers (null when there
 	// is none): run/recover.go, docs/ENGINE.md section 5.
 	Recovery *RecoveryInfo `json:"recovery"`
+	// Yield is set while the card is yielded to another program (phase "yielded"), or while
+	// replies drain before that: run/yield.go, docs/ENGINE.md section 6b.
+	Yield *YieldInfo `json:"yield"`
 }
 
 // Parent is a watched parent process.
@@ -127,6 +130,7 @@ type Settings struct {
 // Route tells the proxy where a request goes.
 type Route struct {
 	Kind    string // local | external | unavailable
+	Code    string // for unavailable: "yielded" while the card is yielded, else empty
 	URL     string // base URL (no trailing slash); for external it includes any /v1
 	Key     string
 	Message string
@@ -197,7 +201,11 @@ type Supervisor struct {
 	opMu sync.Mutex
 	srv  *server
 	ours ourPID // srv's pid, for readers that do not hold opMu
-	gpu  gpuState
+	// launching is the llama-server pid from its launch on (ours is set only once healthy);
+	// yieldInfo is set while the card is yielded (run/yield.go). yieldInfo is under mu.
+	launching ourPID
+	yieldInfo *YieldInfo
+	gpu       gpuState
 
 	agent agentMgr
 	wg    sync.WaitGroup
@@ -304,6 +312,10 @@ func (s *Supervisor) Status() Status {
 	st.Sampler = s.samplerLocked()
 	s.customStatusLocked(&st)
 	st.Previous = s.previousLocked()
+	if s.yieldInfo != nil {
+		y := *s.yieldInfo
+		st.Yield = &y
+	}
 	if s.gpu.sum != nil {
 		g := *s.gpu.sum
 		st.GPU = &g
@@ -549,6 +561,9 @@ func (s *Supervisor) Route() Route {
 	if s.st.Mode == "external" {
 		return Route{Kind: "external", URL: strings.TrimRight(s.st.External.BaseURL, "/"), Key: s.st.External.APIKey}
 	}
+	if y := s.yieldInfo; y != nil {
+		return Route{Kind: "unavailable", Code: "yielded", Message: "Paused while " + y.Reason + " runs"}
+	}
 	switch s.phase {
 	case "ready":
 		return Route{Kind: "local", URL: s.llamaURL}
@@ -598,6 +613,10 @@ func (s *Supervisor) Run() {
 	}
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.watchdog() }()
+	if s.cfg.Yield != nil {
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); s.yieldLoop() }()
+	}
 }
 
 // settle picks the resting phase when nothing is running.
@@ -654,6 +673,9 @@ func (s *Supervisor) Start() error {
 	if !local {
 		return nil
 	}
+	if s.yielded() != nil {
+		return ErrYielded
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.srv != nil && !s.srv.proc.Exited() {
@@ -674,6 +696,9 @@ func (s *Supervisor) Stop() error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.stopServerLocked()
+	s.mu.Lock()
+	s.yieldInfo = nil // a person's stop ends a yield; their start brings the watch back
+	s.mu.Unlock()
 	if s.Status().Mode == "local" {
 		if _, ok := s.resolveInstall(); ok {
 			s.setPhase("sleeping", "Stopped")
@@ -690,7 +715,7 @@ func (s *Supervisor) Sleep() error {
 	lc := s.loadCancel
 	local := s.st.Mode == "local"
 	s.mu.Unlock()
-	if !local {
+	if !local || s.yielded() != nil {
 		return nil
 	}
 	if lc != nil {
@@ -715,6 +740,7 @@ func (s *Supervisor) stopServerLocked() {
 	srv := s.srv
 	s.srv = nil
 	s.ours.set(0)
+	s.launching.set(0)
 	if srv == nil {
 		return
 	}

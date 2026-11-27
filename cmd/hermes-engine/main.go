@@ -104,6 +104,14 @@ func cmdServe(args []string, setup bool) int {
 	linger := fs.Duration("linger", 0, "keep running this long after the last parent exits")
 	var parents pidList
 	fs.Var(&parents, "parent-pid", "game pid to watch (repeatable)")
+	yieldOn := fs.Bool("yield-to-games", false, "unload the model while another program wants the card (a launcher game, a new GPU user), load again after")
+	yieldExcept := fs.String("yield-except", "", "comma-separated launcher app ids that never make the engine yield (the supported host's)")
+	yieldIgnore := fs.String("yield-ignore", "", "comma-separated process names that never make the engine yield")
+	yieldFloor := fs.Int("yield-floor-mib", 128, "MiB an already-running program may grow on the card before the engine yields")
+	yieldMin := fs.Int("yield-min-mib", 0, "MiB a new program must hold to make the engine yield by memory alone (0: any)")
+	yieldGrace := fs.Duration("yield-grace", 15*time.Second, "after a game exits, wait this long before loading again")
+	yieldSteady := fs.Duration("yield-steady", 60*time.Second, "load again beside a non-game program once its use has held this long")
+	yieldStrict := fs.Bool("yield-strict", false, "stay unloaded until every program that made the engine yield has exited")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -119,7 +127,13 @@ func cmdServe(args []string, setup bool) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var yc *run.YieldConfig
+	if *yieldOn {
+		yc = &run.YieldConfig{Except: splitList(*yieldExcept), Ignore: splitList(*yieldIgnore), MinNewMiB: *yieldMin}
+		yc.Policy.Floor, yc.Policy.Grace, yc.Policy.Steady, yc.Policy.Strict = *yieldFloor, *yieldGrace, *yieldSteady, *yieldStrict
+	}
 	o := app.Options{
+		Yield:       yc,
 		ProfilePath: *profile, ParentPIDs: parents, Host: *host, Port: *port,
 		Linger: *linger, LingerSet: lingerSet, Version: version,
 		DetachStdio: !setup,
@@ -144,6 +158,17 @@ func cmdServe(args []string, setup bool) int {
 		return 0
 	}
 	return 0
+}
+
+// splitList splits a comma-separated flag value, dropping empty items.
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func openBrowser(url string) {

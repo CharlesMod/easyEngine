@@ -26,14 +26,25 @@ func gpuNode(link string) bool {
 type linuxOS struct {
 	root string
 	ino  int // inotify fd, -1 when unavailable
+	seen map[int]seenProc
+	now  func() time.Time
 }
+
+// seenProc caches what a pid's argv said, so a scan reads only new pids' cmdline. A pid is
+// read again while it is young: a launcher forks, then execs the game's wrapper.
+type seenProc struct {
+	first  time.Time
+	launch *Launch
+}
+
+const youngProc = 2 * time.Second
 
 // NewOS watches the real machine. On Linux, device opens wake Wait through inotify IN_OPEN
 // on /dev/nvidia<N>, /dev/dri/renderD* and /dev/dri/card*.
 func NewOS() OS { return newLinuxOS("/proc", "/dev") }
 
 func newLinuxOS(root, dev string) *linuxOS {
-	o := &linuxOS{root: root, ino: -1}
+	o := &linuxOS{root: root, ino: -1, seen: map[int]seenProc{}, now: time.Now}
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		return o
@@ -111,17 +122,37 @@ func (o *linuxOS) pids() []int {
 	return out
 }
 
+// Launches is cheap enough for every 250 ms: one readdir of /proc, and cmdline reads only
+// for pids that are new or young.
 func (o *linuxOS) Launches() []Launch {
+	now := o.now()
+	live := map[int]bool{}
 	var out []Launch
 	for _, pid := range o.pids() {
-		b, err := os.ReadFile(filepath.Join(o.root, strconv.Itoa(pid), "cmdline"))
-		if err != nil || len(b) == 0 {
-			continue
+		live[pid] = true
+		sp, ok := o.seen[pid]
+		if !ok {
+			sp.first = now
 		}
-		argv := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-		if l, ok := MatchArgv(argv); ok {
-			l.PID = pid
-			out = append(out, l)
+		if !ok || now.Sub(sp.first) < youngProc {
+			sp.launch = nil
+			b, err := os.ReadFile(filepath.Join(o.root, strconv.Itoa(pid), "cmdline"))
+			if err == nil && len(b) > 0 {
+				argv := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+				if l, ok := MatchArgv(argv); ok {
+					l.PID = pid
+					sp.launch = &l
+				}
+			}
+			o.seen[pid] = sp
+		}
+		if sp.launch != nil {
+			out = append(out, *sp.launch)
+		}
+	}
+	for pid := range o.seen {
+		if !live[pid] {
+			delete(o.seen, pid)
 		}
 	}
 	return out

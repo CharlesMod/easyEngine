@@ -43,6 +43,16 @@ func (t *Tracker) Reset(cur []Use) {
 	t.known = true
 }
 
+// Pending says whether a newcomer has been seen once and waits for its second read.
+func (t *Tracker) Pending() bool {
+	for _, n := range t.seen {
+		if n == 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // Baselined says whether Reset has run.
 func (t *Tracker) Baselined() bool { return t.known }
 

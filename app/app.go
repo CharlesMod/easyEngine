@@ -37,6 +37,9 @@ type Options struct {
 	Version     string
 	DetachStdio bool // serve mode: stdio goes to logs/engine-stdio.log (capped), never to the inherited pipes
 	Configure   func(*run.Config)
+	// Yield, when set, makes the engine yield the card to other programs (serve --yield-to-games);
+	// the profile's yield_except ids are added to it.
+	Yield *run.YieldConfig
 	// Started is called once the engine listens (not when it attached to another).
 	Started func(port int)
 }
@@ -193,6 +196,11 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	}
 	w := lifecycle.NewWatcher()
 	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs}
+	if o.Yield != nil {
+		y := *o.Yield
+		y.Except = append(append([]string{}, y.Except...), prof.YieldExcept...)
+		cfg.Yield = &y
+	}
 	if o.Configure != nil {
 		o.Configure(&cfg)
 	}

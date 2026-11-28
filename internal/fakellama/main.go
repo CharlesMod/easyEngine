@@ -80,6 +80,7 @@ var withValue = map[string]bool{
 	"--slot-save-path": true,
 	"-ub":              true, "--ubatch-size": true, "--top-n-sigma": true, "--spec-type": true,
 	"--cache-ram": true, "-cram": true,
+	"-mm": true, "--mmproj": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 
@@ -128,6 +129,7 @@ func helpText(hidden map[string]bool) string {
 		"-cram, --cache-ram N           RAM prompt cache size in MiB (FAKELLAMA_CACHE_RAM: listed)",
 		"--top-nsigma, --top-n-sigma N  top-n-sigma sampling",
 		"--spec-type TYPE               speculative decoding type",
+		"-mm,   --mmproj FILE           path to a multimodal projector file (FAKELLAMA_HIDE=--mmproj: unknown)",
 	}
 	for _, l := range lines {
 		skip := strings.Contains(l, "--cache-ram") && os.Getenv("FAKELLAMA_CACHE_RAM") == ""
@@ -347,6 +349,32 @@ func main() {
 	}
 	fmt.Println("srv  llama_server: initializing ...")
 	fmt.Println("fakellama: loading model", vals["-m"])
+	// --mmproj: the projector file must be there (a launch never names a file it has not got);
+	// FAKELLAMA_MMPROJ_OOM (or <ctl>/mmproj_oom) runs out of memory loading it
+	mmproj := vals["--mmproj"]
+	if mmproj == "" {
+		mmproj = vals["-mm"]
+	}
+	if mmproj != "" {
+		if _, err := os.Stat(mmproj); err != nil {
+			fmt.Printf("clip_model_loader: failed to open %s\n", mmproj)
+			os.Exit(1)
+		}
+		oom := os.Getenv("FAKELLAMA_MMPROJ_OOM") != ""
+		if ctl != "" {
+			if _, err := os.Stat(filepath.Join(ctl, "mmproj_oom")); err == nil {
+				oom = true
+			}
+		}
+		if oom {
+			fmt.Println("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1296.00 MiB on device 0: cudaMalloc failed: out of memory")
+			fmt.Println("alloc_tensor_range: failed to allocate CUDA0 buffer of size 1358954496")
+			fmt.Println("clip_init: failed to load the vision model")
+			os.Exit(1)
+		}
+		fmt.Println("srv    load_model: loaded multimodal model,", mmproj)
+		fmt.Println("srv    load_model: cache_reuse is not supported by multimodal, it will be disabled")
+	}
 	if ctl != "" {
 		if _, err := os.Stat(filepath.Join(ctl, "loadfail")); err == nil {
 			fmt.Println("llama_model_load: error loading model: tensor 'blk.0.attn_q.weight' data is not within the file bounds")
@@ -373,6 +401,10 @@ func main() {
 		base, _ := strconv.ParseFloat(os.Getenv("FAKELLAMA_VRAM_BASE_MIB"), 64)
 		per, _ := strconv.ParseFloat(os.Getenv("FAKELLAMA_VRAM_PER_TOKEN"), 64)
 		mib := int(base + per*float64(c))
+		if mmproj != "" { // the projector's load on the card (FAKELLAMA_MMPROJ_MIB)
+			pm, _ := strconv.Atoi(os.Getenv("FAKELLAMA_MMPROJ_MIB"))
+			mib += pm
+		}
 		os.WriteFile(filepath.Join(ctl, fmt.Sprintf("vram.%d", os.Getpid())), []byte(strconv.Itoa(mib)), 0o644)
 	}
 	delay, _ := time.ParseDuration(os.Getenv("FAKELLAMA_HEALTH_DELAY"))

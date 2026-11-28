@@ -10,28 +10,58 @@
 //     text is refused by length before any byte of it is decoded.
 //   - MaxBytes = 8 MiB of decoded file. Checked from the base64 length
 //     before the decode buffer is allocated.
-//   - MaxPixels = 16 MiPixel (16.7 MP), read from the header with
-//     image.DecodeConfig before any pixel is decoded. A 16 MP image
-//     decodes to at most 64 MiB of RGBA (4 bytes a pixel), which is the
-//     most memory the full decode may ask for; the downscaled copy is
-//     small beside it.
+//   - MaxPixels = 16 MiPixel (4096 x 4096), read from the header with
+//     image.DecodeConfig before any pixel is decoded. Measured (below), the
+//     worst allowed kind at this limit allocates about 93 MiB in one
+//     Prepare, under the 120 MiB ceiling, so the limit stays at 16 Mi.
 //   - MaxSide = 8192 pixels on either side, so a one-pixel-high strip of
 //     absurd length is refused even though its pixel count is small.
 //
 // Only PNG and JPEG are accepted: the format is sniffed from the magic
 // bytes, only the png and jpeg decoders are linked into this package, and
-// GIF, WebP, BMP and anything else is refused. The image is decoded in full
-// and re-encoded (PNG in, PNG out; JPEG in, JPEG out at quality 90), so the
-// model never sees the caller's bytes and all metadata (EXIF, text chunks,
-// ICC profiles, trailing data) is dropped by the re-encode.
+// GIF, WebP, BMP and anything else is refused. Before any decode, the file's
+// own structure is walked (structure.go; rules there) and refused with
+// image_format unless it is baseline 8-bit JPEG (SOF0, 1 or 3 components, at
+// most 3 scans, no byte after EOI) or non-interlaced 8-bit non-animated PNG
+// (colour type 0, 2, 3, 4 or 6, no byte after IEND, bounded chunk counts).
+// Progressive, CMYK, 16-bit, Adam7 and APNG inputs, whose decode cost the file
+// size does not bound, never reach a decoder. Every type the allowed inputs
+// decode to (YCbCr in all six subsample ratios, Gray, RGBA, NRGBA, Paletted)
+// has a typed scaler; any other type is image_format. The image is decoded in
+// full and re-encoded (PNG in, PNG out; JPEG in, JPEG out at quality 90), so
+// the model never sees the caller's bytes and all metadata is dropped.
+//
+// Prepare takes a context and asks it before the decode, after it, after the
+// scale and after the encode; a done context is image_cancelled. The caller
+// checks between images. No timer is used.
+//
+// Resource measurements (TestResourceBoundsAtPixelLimit; go1.27, one core
+// used, GC off so TotalAlloc bounds the live peak from above). Each file is
+// 4096 x 4096 and noise is sized to just fit Default.MaxBytes (5-7 MiB files),
+// which is the densest data a caller can send. Time is the whole Prepare
+// (decode, scale, encode); the decode is most of it.
+//
+//	kind            file MiB  edge 1024        edge 2048
+//	png-rgb         6.4       76 MiB  0.29 s   90 MiB  0.43 s
+//	png-rgba        6.9       77 MiB  0.33 s   93 MiB  0.56 s  (worst heap)
+//	png-gray        6.2       28 MiB  0.18 s   44 MiB  0.34 s
+//	png-palette     5.3       29 MiB  0.15 s   48 MiB  0.42 s
+//	jpeg-420        6.6       35 MiB  0.28 s   54 MiB  0.41 s
+//	jpeg-444        7.1       60 MiB  0.45 s   79 MiB  0.58 s  (worst time)
+//	jpeg-gray       6.8       27 MiB  0.20 s   46 MiB  0.30 s
+//	png-rgba flat   0.4       69 MiB  0.13 s   81 MiB  0.17 s
+//
+// The test fails if any kind allocates over 112 MiB. The heap figure includes
+// the 8 MiB decoded-file buffer and the full decoded image; the caller's
+// base64 string (up to 11 MiB) is held outside it.
 package lookimg
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	"image/png"
 	"strings"
@@ -49,13 +79,17 @@ type Limits struct {
 var Default = Limits{MaxBase64: 11 << 20, MaxBytes: 8 << 20, MaxPixels: 16 << 20, MaxSide: 8192}
 
 // Error is a refusal with a stable Code: image_too_large, image_bad,
-// image_format or image_too_many_pixels.
+// image_format, image_too_many_pixels or image_cancelled.
 type Error struct{ Code, Msg string }
 
 func (e *Error) Error() string { return e.Code + ": " + e.Msg }
 
 func fail(code, format string, a ...any) *Error {
 	return &Error{Code: code, Msg: fmt.Sprintf(format, a...)}
+}
+
+func cancelled() *Error {
+	return fail("image_cancelled", "the request ended before the image was prepared")
 }
 
 // Result is a prepared image: the re-encoded bytes, their MIME type, the
@@ -81,7 +115,7 @@ var dataPrefixes = []string{"data:image/png;base64,", "data:image/jpeg;base64,"}
 // aspect kept, each side at least 1) and re-encodes it. Re-encoding drops
 // all metadata (EXIF, text chunks, profiles). The caller's bytes are never
 // returned. A panic inside a decoder is recovered and reported as image_bad.
-func Prepare(b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
+func Prepare(ctx context.Context, b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res, perr = Result{}, fail("image_bad", "image could not be decoded")
@@ -118,6 +152,14 @@ func Prepare(b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
 	default:
 		return Result{}, fail("image_format", "only PNG and JPEG images are accepted")
 	}
+	if want == "png" {
+		e = checkPNG(raw)
+	} else {
+		e = checkJPEG(raw)
+	}
+	if e != nil {
+		return Result{}, e
+	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
 		return Result{}, fail("image_bad", "image header could not be read")
@@ -135,17 +177,29 @@ func Prepare(b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
 	if int64(w)*int64(h) > int64(lim.MaxPixels) {
 		return Result{}, fail("image_too_many_pixels", "image is %dx%d, pixel limit %d", w, h, lim.MaxPixels)
 	}
+	if ctx.Err() != nil {
+		return Result{}, cancelled()
+	}
 	src, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return Result{}, fail("image_bad", "image could not be decoded")
 	}
 	raw = nil
+	if ctx.Err() != nil {
+		return Result{}, cancelled()
+	}
 	if b := src.Bounds(); b.Dx() != w || b.Dy() != h {
 		return Result{}, fail("image_bad", "image size differs from its header")
 	}
 	dw, dh := fit(w, h, longEdge)
-	dst := scale(src, dw, dh)
+	dst, e := scale(src, dw, dh)
 	src = nil
+	if e != nil {
+		return Result{}, e
+	}
+	if ctx.Err() != nil {
+		return Result{}, cancelled()
+	}
 	var out bytes.Buffer
 	if want == "png" {
 		err = png.Encode(&out, dst)
@@ -154,6 +208,9 @@ func Prepare(b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
 	}
 	if err != nil {
 		return Result{}, fail("image_bad", "image could not be encoded")
+	}
+	if ctx.Err() != nil {
+		return Result{}, cancelled()
 	}
 	return Result{Data: out.Bytes(), MIME: mime, W: dw, H: dh, SrcW: w, SrcH: h}, nil
 }
@@ -186,77 +243,4 @@ func fit(w, h, long int) (int, int) {
 		return long, max(1, int(int64(h)*int64(long)/int64(w)))
 	}
 	return max(1, int(int64(w)*int64(long)/int64(h))), long
-}
-
-// scale box-filters src into a new dw x dh RGBA (dw <= source width,
-// dh <= source height). Averaging is done on premultiplied values, so alpha
-// stays straight when the PNG encoder un-premultiplies.
-func scale(src image.Image, dw, dh int) *image.RGBA {
-	b := src.Bounds()
-	sw, sh := b.Dx(), b.Dy()
-	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
-	px := pixelReader(src)
-	sum := make([]uint64, dw*4)
-	for dy := 0; dy < dh; dy++ {
-		y0, y1 := dy*sh/dh, (dy+1)*sh/dh
-		for i := range sum {
-			sum[i] = 0
-		}
-		for y := y0; y < y1; y++ {
-			sy := b.Min.Y + y
-			for dx := 0; dx < dw; dx++ {
-				x0, x1 := dx*sw/dw, (dx+1)*sw/dw
-				s := sum[dx*4 : dx*4+4 : dx*4+4]
-				for x := x0; x < x1; x++ {
-					r, g, bl, a := px(b.Min.X+x, sy)
-					s[0] += uint64(r)
-					s[1] += uint64(g)
-					s[2] += uint64(bl)
-					s[3] += uint64(a)
-				}
-			}
-		}
-		rows := uint64(y1 - y0)
-		for dx := 0; dx < dw; dx++ {
-			n := rows * uint64((dx+1)*sw/dw-dx*sw/dw)
-			s := sum[dx*4 : dx*4+4]
-			o := dst.PixOffset(dx, dy)
-			dst.Pix[o+0] = uint8((s[0]/n + 128) / 257)
-			dst.Pix[o+1] = uint8((s[1]/n + 128) / 257)
-			dst.Pix[o+2] = uint8((s[2]/n + 128) / 257)
-			dst.Pix[o+3] = uint8((s[3]/n + 128) / 257)
-		}
-	}
-	return dst
-}
-
-// pixelReader returns a reader of premultiplied 16-bit RGBA, with a fast
-// path for the common concrete types and At() for the rest.
-func pixelReader(img image.Image) func(x, y int) (r, g, b, a uint32) {
-	switch m := img.(type) {
-	case *image.YCbCr:
-		return func(x, y int) (uint32, uint32, uint32, uint32) {
-			yy := m.Y[m.YOffset(x, y)]
-			ci := m.COffset(x, y)
-			r, g, b := color.YCbCrToRGB(yy, m.Cb[ci], m.Cr[ci])
-			return uint32(r) * 0x101, uint32(g) * 0x101, uint32(b) * 0x101, 0xffff
-		}
-	case *image.RGBA:
-		return func(x, y int) (uint32, uint32, uint32, uint32) {
-			p := m.Pix[m.PixOffset(x, y):]
-			return uint32(p[0]) * 0x101, uint32(p[1]) * 0x101, uint32(p[2]) * 0x101, uint32(p[3]) * 0x101
-		}
-	case *image.NRGBA:
-		return func(x, y int) (uint32, uint32, uint32, uint32) {
-			p := m.Pix[m.PixOffset(x, y):]
-			a := uint32(p[3]) * 0x101
-			return uint32(p[0]) * 0x101 * a / 0xffff, uint32(p[1]) * 0x101 * a / 0xffff, uint32(p[2]) * 0x101 * a / 0xffff, a
-		}
-	case *image.Gray:
-		return func(x, y int) (uint32, uint32, uint32, uint32) {
-			v := uint32(m.Pix[m.PixOffset(x, y)]) * 0x101
-			return v, v, v, 0xffff
-		}
-	}
-	return func(x, y int) (uint32, uint32, uint32, uint32) { return img.At(x, y).RGBA() }
 }

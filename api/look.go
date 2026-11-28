@@ -338,7 +338,7 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 	content := make([]map[string]any, 0, 2*len(q.images)+1)
 	builtSize := 0
 	for i, im := range q.images {
-		res, ie := lookimg.Prepare(im.data, edge, lookimg.Default)
+		res, ie := lookimg.Prepare(r.Context(), im.data, edge, lookimg.Default)
 		q.images[i].data = "" // each caller image is let go once it is built
 		if ie != nil {
 			clientFail(w, &run.ClientError{Status: 400, Code: ie.Code, Msg: fmt.Sprintf("images[%d]: %s", i, ie.Msg), Extra: map[string]any{"image": i}})

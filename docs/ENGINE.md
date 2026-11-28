@@ -1555,15 +1555,27 @@ the first NDJSON line):
   start that serves it), a stale shape's reshape (that start). A client with no slots in the
   running model and nothing coming for it (its budget spent, its floor short, no room beside the
   others) is answered at once, 503 `no_room` with the why.
-- **Restart budget.** Every restart of the model server is one of: a local caller's want (its
-  attach, change, leave or under-served request), the engine's own reasons (a load, the person's
-  change, a yield, memory, a crash), or a remote identity's attach or change of wants or options,
-  charged to it: 4 in the engine's life (`restarts_left` in its answer and held lines). No
-  sequence of acts by remote clients alone restarts the model uncharged. A **return** (the same
-  key again) is free only when it is served from its own standing range, with no restart; a return
-  that needs a restart (its range was reshaped away, or the model stopped meanwhile) is charged as
-  an attach is. Leaves and revokes are never charged and never restart by themselves; the master
-  key from another machine is not budgeted. With the budget
+- **Restart budget.** The budget limits how often a remote client can make a **running** model
+  server stop and start (other callers lose their caches and their time), not ordinary use.
+  Every restart of a running model server is one of: a local caller's want (its attach, change,
+  leave or under-served request), the engine's own reasons (a load, the person's change, a yield,
+  memory, a crash), or a remote identity's attach or change of wants or options, charged to it: 4
+  per **waking period** (`restarts_left` in its answer and held lines; every `--open` address
+  shares one). **A start from down is never charged**: with no model server running (never
+  started, unloaded by the linger, asleep, stopped, yielded), an attach, a return or a change of
+  wants is folded into the wants and costs nothing; the next start (a request wakes the model)
+  takes them. A **return** (the same key again) while the model runs is free when it is served
+  from its own standing range; one that needs a restart is charged as an attach is. Leaves and
+  revokes are never charged and never restart by themselves. **The budget is whole again** when
+  the model server stops for the engine's own reason or the person's: the linger's unload or a
+  sleep asked from this machine, the person's stop, a yield of the card. The stop is the event; no
+  clock. Never by a stop a remote client could cause: a sleep or stop asked from another machine, a
+  crash, an out-of-memory walk or a failed start (after its reshape or any other), a reshape's own
+  stop. Within one waking period, restarts of a running server caused by remote clients alone never
+  exceed what they were charged. An attachment that comes while a start is loading is folded in by
+  a grow once the model is up, and that grow is charged (else each start's loading window would let
+  one more uncharged restart in). The master key from another machine is not budgeted.
+  With the budget
   spent a change is not made (`why: restart_budget_spent`): the attachment keeps what it has, or,
   with nothing, its requests get 503 `no_room` until a start that comes for another reason.
 - **Floors and ceilings.** A remote client's ctx floor never raises the others': it is clamped to

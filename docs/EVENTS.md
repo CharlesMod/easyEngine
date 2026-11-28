@@ -141,9 +141,12 @@ one budget), never counted against a local caller's. None stating any: the profi
   model to stop for another reason, or for a local caller the stale shape under-serves (whose
   request is held while it reshapes). Another local leave reshapes, when idle, only if that gives
   someone something; a remote leave never reshapes by itself (a waiting attachment's own reshape is
-  charged to it). Every restart is a local caller's want, the engine's own reason, or charged to
-  the remote identity whose attach or change caused it, 4 in the engine's life: a return is free
-  only when served from its own standing range. A remote attach is never served from another
+  charged to it). Every restart of a running server is a local caller's want, the engine's own reason, or
+  charged to the remote identity whose attach or change caused it, 4 per waking period: a start
+  from down is never charged (an attach, return or change while no server runs is folded into the
+  next start), and a linger unload, a sleep asked from this machine, the person's stop or a yield
+  makes every budget whole again (never a stop a remote client could cause). A return while the
+  model runs is free only when served from its own standing range. A remote attach is never served from another
   client's vacant range, nor a remote caller with no attachment sent to one. Nothing is held
   without an event that ends the hold: a client with nothing coming is answered 503 at once.
 - **Slots belong to clients.** The engine decides whose every slot-touching request is: the

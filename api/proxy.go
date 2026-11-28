@@ -67,8 +67,23 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	// a body the engine must look at (a JSON POST the door confines or rewrites) is read whole
 	// before the door: a client that sends slowly holds no slot, no count in flight and no drain.
 	// Every other body streams through as it comes.
-	if bufferedBody(r) && !a.readBody(w, r, local) {
+	// A caller from another machine may put no media into a request (api/media.go): its POST
+	// bodies are all read whole here, by the same bounded read, and scanned.
+	scan := !local && r.Method == http.MethodPost
+	if !local {
+		if why := mediaRefusal(r); why != "" {
+			clientFail(w, mediaRefused(why))
+			return
+		}
+	}
+	if (bufferedBody(r) || scan) && !a.readBody(w, r, local) {
 		return
+	}
+	if scan {
+		if found, why := mediaIn(bodyOf(r)); found {
+			clientFail(w, mediaRefused(why))
+			return
+		}
 	}
 	q := run.DoorAsk{ReqID: id, Att: att, Identity: identity(r), Local: local, Touch: touchOf(r)}
 	rt, door, done := a.S.EnterAs(q)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/lifecycle"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
@@ -130,12 +131,14 @@ type Config struct {
 	Sense func(ctx context.Context, ours []int, host int) gpusense.Picture
 	// Holders, when set, replaces the scan of who holds the card's device nodes (pid -> name) that
 	// the room and yield watches compare at each open word (run/holders.go); a test sets it.
-	Holders  func() map[int]string
-	Measure  func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
-	Seed     func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
-	Group    *lifecycle.Group
-	HTTP     *http.Client
-	Now      func() time.Time
+	Holders func() map[int]string
+	Measure func(ctx context.Context, pid int) (int, error) // VRAM MiB used by our llama-server
+	Seed    func(m catalog.Model, modelPath, kv string) (fit.Footprint, error)
+	Group   *lifecycle.Group
+	HTTP    *http.Client
+	Now     func() time.Time
+	// ExitsOf is the word of a pid's end (host.ExitsOf); a test stands in a system that gives none.
+	ExitsOf  func(pid int, token string) (<-chan struct{}, func(), error)
 	DiskFree func(dir string) (int, error) // free MiB under dir; nil: the real filesystem
 
 	ExtraEnv    []string // appended to llama-server's environment (tests)
@@ -213,6 +216,9 @@ func (c *Config) defaults() {
 	}
 	if c.Now == nil {
 		c.Now = time.Now
+	}
+	if c.ExitsOf == nil {
+		c.ExitsOf = host.ExitsOf
 	}
 	if c.Version == "" {
 		c.Version = "dev"

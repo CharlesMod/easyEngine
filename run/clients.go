@@ -894,7 +894,7 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		if err != nil && !errors.Is(err, host.ErrNoEvent) {
 			return AttachView{}, nil, cerr(400, "bad_request", "no such process")
 		}
-		ended, stopWatch, err = host.ExitsOf(req.Pid, st)
+		ended, stopWatch, err = s.cfg.ExitsOf(req.Pid, st)
 		switch {
 		case errors.Is(err, host.ErrNotThatProcess):
 			return AttachView{}, nil, cerr(400, "bad_request", "no such process")

@@ -23,7 +23,8 @@
 //	FAKELLAMA_SLOT_BYTES       bytes a saved slot file holds per token (default 16)
 //	FAKELLAMA_ID_SLOT          set: every reply says the slot it used (id_slot in the JSON reply, in
 //	                           every streamed chunk and in the timings chunk)
-//	(every completion request body is saved to <ctl>/lastbody.json)
+//	(every completion request body is saved to <ctl>/lastbody.json, every /slots/{id} action
+//	asked is logged to <ctl>/slotacts.log; /infill answers as /completion)
 //	FAKELLAMA_DEVICES          text printed by --list-devices (default "CUDA0: Fake GPU"); ";" separates lines
 //	FAKELLAMA_DEVICES_PINNED   what --list-devices prints when CUDA_VISIBLE_DEVICES is set (default: the
 //	                           first listed device as CUDA0; "none" prints no device)
@@ -494,6 +495,12 @@ func main() {
 		if loading(w) {
 			return
 		}
+		if ctl != "" { // every slot action asked is logged: <ctl>/slotacts.log, "<path>?<query>"
+			if f, err := os.OpenFile(filepath.Join(ctl, "slotacts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				fmt.Fprintf(f, "%s?%s\n", r.URL.Path, r.URL.RawQuery)
+				f.Close()
+			}
+		}
 		slotAction(w, r, np, c/np, ctl, exists)
 	})
 	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
@@ -594,7 +601,7 @@ func main() {
 		js(w, reply)
 	}
 	mux.HandleFunc("/v1/chat/completions", chat)
-	mux.HandleFunc("/completion", func(w http.ResponseWriter, r *http.Request) {
+	completion := func(w http.ResponseWriter, r *http.Request) {
 		if loading(w) {
 			return
 		}
@@ -608,7 +615,9 @@ func main() {
 			reply["id_slot"] = slot
 		}
 		js(w, reply)
-	})
+	}
+	mux.HandleFunc("/completion", completion)
+	mux.HandleFunc("/infill", completion)
 	addr := vals["--host"] + ":" + vals["--port"]
 	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,
 	// so the engine's proxy tests can check it neither leaks nor lets CORS through.

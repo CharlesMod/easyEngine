@@ -222,9 +222,10 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request) bool {
 	// network timeout: a request body that sends nothing for d between two reads is cut
 	arm := func() { _ = rc.SetReadDeadline(time.Now().Add(d)) }
 	body, err := io.ReadAll(&silentBody{r: http.MaxBytesReader(w, r.Body, maxSamplerBody), arm: arm})
-	_ = rc.SetReadDeadline(time.Time{})
-	r.Body.Close()
 	if err != nil {
+		// the deadline stays passed: the server must not wait for the rest of the body before it
+		// answers (net/http reads an unread body before a reply), and the connection ends after
+		w.Header().Set("Connection", "close")
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			clientFail(w, &run.ClientError{Status: 413, Code: "body_too_large", Msg: fmt.Sprintf("the request body is larger than %d MiB", maxSamplerBody>>20)})
@@ -233,6 +234,8 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request) bool {
 		clientFail(w, &run.ClientError{Status: 400, Code: "body_unread", Msg: "the request body did not arrive: " + err.Error()})
 		return false
 	}
+	_ = rc.SetReadDeadline(time.Time{})
+	r.Body.Close()
 	setBody(r, body)
 	return true
 }

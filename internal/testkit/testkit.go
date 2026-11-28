@@ -422,3 +422,60 @@ func SkipWindows(t testing.TB) {
 		t.Skip("needs a POSIX shell")
 	}
 }
+
+// ProjectorSum is the sha256 (hex) of a fake projector's content: the catalog entry of a test
+// names it, as a real one names the real file's.
+func ProjectorSum(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// PutProjector writes body as the projector file p names in models/ (hand placed, as a person
+// copies a file in). With verified it also writes state.json's record that an earlier life of the
+// engine hashed it (size, mtime, sha256), so a start already trusts it; call it before the
+// supervisor starts. Without, the engine hashes the file itself in the background.
+func (e *Env) PutProjector(p *catalog.Projector, body []byte, verified bool) string {
+	e.T.Helper()
+	path := filepath.Join(e.Data, "models", p.File)
+	must(e.T, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(e.T, os.WriteFile(path, body, 0o644))
+	if !verified {
+		return path
+	}
+	st, err := os.Stat(path)
+	must(e.T, err)
+	cur := map[string]json.RawMessage{}
+	if b, err := os.ReadFile(filepath.Join(e.Data, "state.json")); err == nil {
+		must(e.T, json.Unmarshal(b, &cur))
+	}
+	recs := map[string]run.ProjRecord{}
+	if raw, ok := cur["projectors"]; ok {
+		must(e.T, json.Unmarshal(raw, &recs))
+	}
+	recs[p.File] = run.ProjRecord{Size: st.Size(), MTimeNS: st.ModTime().UnixNano(), SHA256: ProjectorSum(body)}
+	raw, err := json.Marshal(recs)
+	must(e.T, err)
+	cur["projectors"] = raw
+	out, err := json.Marshal(cur)
+	must(e.T, err)
+	must(e.T, os.WriteFile(filepath.Join(e.Data, "state.json"), out, 0o644))
+	return path
+}
+
+// WaitProjectorVerified waits for the engine to have written down that it verified file's
+// sha256 (state.json's "projectors"): the fact a hand placed file waits on before it is loaded.
+func (e *Env) WaitProjectorVerified(file string) {
+	e.T.Helper()
+	statePath := filepath.Join(e.Data, "state.json")
+	e.WatchFile(statePath)
+	WaitFor(e.T, 20*time.Second, "the engine to verify "+file, func() bool {
+		b, err := os.ReadFile(statePath)
+		if err != nil {
+			return false
+		}
+		var st struct {
+			Projectors map[string]run.ProjRecord `json:"projectors"`
+		}
+		return json.Unmarshal(b, &st) == nil && st.Projectors[file].SHA256 != ""
+	})
+}

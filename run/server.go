@@ -250,9 +250,14 @@ type launchResult struct {
 // runShape loads a shape: one measured retry on a load OOM, then step down.
 func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) error {
 	bare := false // the one retry without the clients' extra_args was made
+	badWhy := ""  // a start with the projector failed for a reason that is not memory: the text-only retry follows
 	for attempt := 0; attempt < 8; attempt++ {
 		res := s.launch(ctx, lc, shape)
 		if res.ok {
+			if badWhy != "" {
+				// text came up without the projector: it is the projector that does not load
+				s.projectorFailedToLoad(lc.in, badWhy)
+			}
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -262,6 +267,14 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 			// it exited while starting with a client's extra_args: once more at once without them
 			// (told not taken: the model server did not start with them)
 			bare = true
+			attempt--
+			continue
+		}
+		if !res.oom && badWhy == "" && s.visionTrying() {
+			// any other failed start that carried --mmproj (exited while starting, load timeout,
+			// any error): once more at once without it; text first
+			badWhy = lastWords(res.err.Error())
+			s.dropVision("the vision projector failed to load: " + badWhy)
 			attempt--
 			continue
 		}

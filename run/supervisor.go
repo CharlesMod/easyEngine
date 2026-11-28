@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -232,10 +233,10 @@ type server struct {
 // Supervisor owns the children and the state.
 type Supervisor struct {
 	envOnce sync.Once // the dropped LLAMA_ARG_* names are logged once per engine life
-	cfg  Config
-	dir  string
-	root context.Context
-	stop context.CancelFunc
+	cfg     Config
+	dir     string
+	root    context.Context
+	stop    context.CancelFunc
 
 	log *lifecycle.LogSink
 
@@ -545,6 +546,7 @@ func (s *Supervisor) save() {
 	s.mu.Lock()
 	st := s.st
 	st.Book.Entries = copyBook(s.st.Book.Entries)
+	st.Projectors = maps.Clone(s.st.Projectors)
 	s.mu.Unlock()
 	s.sayModel()
 	s.wakeMind(func(*causes) {}) // a settings change (the KV type) is looked at by the reactor
@@ -1158,6 +1160,9 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	visionChanged := in.Vision != nil && *in.Vision != s.vis.setting
 	if visionChanged {
 		s.vis.setting = *in.Vision
+		if s.vis.setting {
+			s.visionAskedAgainLocked() // a person asks for vision again: a projector that failed is tried once more
+		}
 	}
 	s.mu.Unlock()
 	if persist {

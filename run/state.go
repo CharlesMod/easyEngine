@@ -53,6 +53,10 @@ type State struct {
 	Book       fit.Book `json:"book"`
 	// Previous is the catalog id of the model a switch replaced (its file is kept; run/switch.go).
 	Previous string `json:"previous,omitempty"`
+	// Projectors are the vision projector files the engine verified (by file name): it downloaded
+	// them (the download checks the sha256) or hashed them itself. Only these are loaded, and only
+	// these are deleted with their model (run/vision.go).
+	Projectors map[string]ProjRecord `json:"projectors,omitempty"`
 }
 
 func (s *State) defaults() {

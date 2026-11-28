@@ -8,8 +8,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,12 +31,10 @@ func lookEnvE(t *testing.T, pre func(*testkit.Env), mut func(*run.Config), wait 
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
-	e.Cat.Models[0].Projector = &catalog.Projector{File: visionProjFile, URL: "http://invalid.example/mm1", SHA256: strings.Repeat("ab", 32),
+	e.Cat.Models[0].Projector = &catalog.Projector{File: visionProjFile, URL: "http://invalid.example/mm1", SHA256: testkit.ProjectorSum(visionProjBody()),
 		Size: visionProjSize, LoadMiB: 100, Detail: catalog.Detail{Low: 64, High: 128, Max: 256},
 		ChatTemplateKwargs: map[string]json.RawMessage{"enable_thinking": json.RawMessage("false")}}
-	if err := os.WriteFile(filepath.Join(e.Data, "models", visionProjFile), bytes.Repeat([]byte{1}, visionProjSize), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	e.PutProjector(e.Cat.Models[0].Projector, visionProjBody(), true)
 	if pre != nil {
 		pre(e)
 	}

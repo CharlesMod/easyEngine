@@ -248,7 +248,9 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 			freed += st.Size()
 		}
 	}
-	if proj != nil && !use[proj.File] && !use[proj.File+".part"] && !projectorShared(cat, catID, proj.File) {
+	// only a projector file the engine put there or verified for this very projector (its record
+	// has the same sha256): never a file another model or the person owns under that name
+	if proj != nil && s.projectorOwned(proj) && !use[proj.File] && !use[proj.File+".part"] && !projectorShared(cat, catID, proj.File) {
 		for _, f := range []string{proj.File, proj.File + ".part"} {
 			pp := filepath.Join(s.dir, "models", f)
 			if st, err := os.Lstat(pp); err == nil && st.Mode().IsRegular() && os.Remove(pp) == nil {
@@ -256,6 +258,7 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 				s.logf("deleted the vision projector %s of model %s", f, catID)
 			}
 		}
+		s.forgetProjector(proj.File)
 	}
 	s.mu.Lock()
 	if catID == "" {

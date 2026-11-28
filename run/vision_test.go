@@ -49,11 +49,16 @@ func newVis(t *testing.T, loadMiB int) *visEnv {
 	return v
 }
 
+// put places the projector as one the engine verified in an earlier life (before the start).
 func (v *visEnv) put(t *testing.T) {
 	t.Helper()
-	if err := os.WriteFile(v.file, v.proj, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	v.e.PutProjector(v.p, v.proj, true)
+}
+
+// putHand places the projector by hand, unverified: the engine hashes it itself.
+func (v *visEnv) putHand(t *testing.T) {
+	t.Helper()
+	v.e.PutProjector(v.p, v.proj, false)
 }
 
 func (v *visEnv) start(t *testing.T, mod func(*run.Config)) *run.Supervisor {
@@ -391,8 +396,8 @@ func TestVisionStorage(t *testing.T) {
 	p2 := *v.p
 	p2.File = "m2-mmproj.gguf"
 	other("m2", &p2)
-	os.WriteFile(filepath.Join(v.e.Data, "models", p2.File), v.proj, 0o644)
-	other("m3", v.p) // shares m1's projector
+	v.e.PutProjector(&p2, v.proj, true) // the engine verified it
+	other("m3", v.p)                    // shares m1's projector
 	s := v.start(t, nil)
 	var listed int
 	for _, m := range s.Storage(true).Models {

@@ -115,7 +115,7 @@ func (s *Supervisor) customStatusLocked(st *Status) {
 		c := s.st.Custom
 		st.Model, st.ModelName = customID+":"+c.Name, c.Name
 	} else if m, ok := s.selectedModelLocked(); ok {
-		st.ModelName = m.Name
+		st.ModelName, st.ModelCodename, st.ModelCodenameFull = m.Name, m.Codename, m.CodenameFull
 	}
 	if c := s.st.Custom; c != nil {
 		fi, err := os.Stat(c.Path)

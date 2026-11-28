@@ -126,7 +126,8 @@ func (s *Supervisor) Storage(refresh bool) StorageInfo {
 	return info
 }
 
-// modelUse says which files in models/ are not to be touched: the selected local model, the
+// modelUse says which files in models/ are not to be touched: the selected local model (and the
+// tier serving for it under a step), the
 // target of a running upgrade, and (while an install job runs) any partial download.
 func (s *Supervisor) modelUse() (inUse map[string]bool, anyPartial bool) {
 	inUse = map[string]bool{}
@@ -138,8 +139,10 @@ func (s *Supervisor) modelUse() (inUse map[string]bool, anyPartial bool) {
 		return
 	}
 	if s.st.Mode != "external" && s.st.Model != "" {
-		if m, ok := cat.Model(s.st.Model); ok {
-			inUse[m.File] = true
+		for _, id := range []string{s.st.Model, s.servedIDLocked()} { // a tier step serves another file (tiers.go)
+			if m, ok := cat.Model(id); ok {
+				inUse[m.File] = true
+			}
 		}
 	}
 	if s.upg != nil && s.upg.activeState() {

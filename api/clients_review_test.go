@@ -75,7 +75,9 @@ func as(n int, extra ...map[string]string) map[string]string {
 	return h
 }
 
-func tok(n int) map[string]string { return map[string]string{"Authorization": "Bearer tok-" + strconv.Itoa(n)} }
+func tok(n int) map[string]string {
+	return map[string]string{"Authorization": "Bearer tok-" + strconv.Itoa(n)}
+}
 
 // growRemote attaches a held remote client and waits until the engine gives it n slots.
 func growRemote(t *testing.T, e *testkit.Env, s *run.Supervisor, rs *httptest.Server, n int, name string, slots int) *held {

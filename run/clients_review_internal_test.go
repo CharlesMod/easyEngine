@@ -141,7 +141,7 @@ func TestTakeSlotLeastRecentlyUsedAndAtomic(t *testing.T) {
 		t.Fatalf("first picks %d %d", e1, e2)
 	}
 	r1()
-	r1() // a release is once
+	r1()                                       // a release is once
 	if e, r := s.TakeSlot(slots, -1); e != 5 { // free and never used
 		t.Fatalf("third pick %d", e)
 	} else {

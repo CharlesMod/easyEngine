@@ -113,11 +113,15 @@ the engine by a client, with its profile, keyed by (identity, name). The `--prof
   (`host.ExitsOf`). Any caller may hold its attach (`hold: true`): the POST's response stays open
   as NDJSON and the attachment leaves when that connection ends; a peer that vanished is found by
   TCP keepalive on the listener (the network timeout) and by a write that fails. `DELETE
-  attach/{id}` detaches. No lease, no clock.
+  attach/{id}` detaches; a revoked paired token detaches all its client's attachments at once
+  (`{"end":"revoked"}`). No lease, no clock.
 - **Wants.** The attachments' merged: slots summed, min slots summed, the largest ctx and floor
-  (llama-server gives every slot one ctx, so the largest floor is everyone's). None stating any:
-  the profile (the base, else the defaults), exactly as before. A merge the fit refuses even at
-  the floor leaves the latest attachment out (unserved, said with why) until the next start.
+  (llama-server gives every slot one ctx, so the largest floor is everyone's), a remote client's
+  floor clamped to the local attachments' and the base's (it never raises theirs; a shape below
+  its own floor leaves it unserved, never a reshape's cause). None stating any: the profile (the
+  base, else the defaults), exactly as before. A merge the fit refuses even at the floor leaves
+  one attachment out (remote before local, later before earlier, never the base; unserved, said
+  with why) until the next start.
 - **The running mind's slot map changes only at a start.** Each attachment gets a range (each its
   want when all fit, else its min slots, then the rest in order). One that leaves is said gone and
   counts for nothing in the next merge, but its range stays, **vacant**, until the next start;
@@ -125,21 +129,31 @@ the engine by a client, with its profile, keyed by (identity, name). The `--prof
   (`resumed`, the cache in it); an attach of a key that stands replaces its presence
   (`replaced`, the old held stream ends `{"end":"replaced"}`); otherwise vacant slots serve a new
   attachment when they suffice, the running ctx is at least its floor and its options change
-  nothing. Only otherwise does the mind grow: a drain (requests held at the door, those in flight
-  finish, never cut), then a start with the new merge. A leave reshapes, when idle, only if that
+  nothing. Only otherwise does the mind grow. A local caller's grow drains (requests held at the
+  door, those in flight finish or are cut when the named moment `DrainMax` comes, each stream with
+  its terminal event), then a start with the new merge; a remote caller's waits for the door's
+  next empty moment (the `idle` cause), never a drain. A leave reshapes, when idle, only if that
   gives someone something (an unserved one served, an option handed over, more ctx to one below
-  its max).
-- **Slots belong to clients.** A request naming its attachment (`X-Easy-Client`) has `id_slot` in
-  its own numbering mapped to its engine slot, the reply's mapped back (a JSON reply whole, an
-  event stream line by line); absent or -1 is its own free slot; outside its count is a 400.
-  Anonymous requests are the base's when the base and another attachment hold slots; else as
-  before. Saved contexts are keyed by the attachment's key and its own slot number, and laid
-  back into the slot that key has after a start that renumbered; a key with no standing
-  attachment at the lay-back is let go.
+  its max) or when the last client with wants left a shape that is not the base's. Each remote
+  identity may cause 4 restarts in the engine's life; then its changes wait for a start that comes
+  for another reason (`restart_budget_spent`).
+- **Slots belong to clients.** The engine decides whose every slot-touching request is: the
+  attachment it names (of the caller's own identity), else a remote caller's one attachment with
+  slots, else the commons (the base's range, or the slots nobody owns), else 409 `attach_required`
+  for a remote caller (a local one passes). A request's slot work is read from llama-server's own
+  routes; a path that cannot be held to one range is refused to a remote caller while another
+  client holds slots. A confined body that is not exactly one JSON object is refused (fail
+  closed). `id_slot` in its own numbering is mapped to its engine slot, the reply's mapped back;
+  absent or -1 takes its least recently used free slot (pick and mark one step). Bodies are read
+  before the door, each read under a network timeout on silence. Saved contexts are keyed by the
+  attachment's key and its own slot number, and laid back into the slot that key has after a
+  start that renumbered; a key with no standing attachment at the lay-back is let go, and a slot
+  no client owned goes back only into the same unowned number.
 - **Launch options** (`server`: `ubatch`, `reasoning`, a local client's `extra_args`): the first in
   order to state one holds it, a later different value is told `not_taken` (409 when it marked the
   option `required`); each is checked against the installed build's `--help` and never passed
-  blind. Engine-owned flags are refused in every spelling the help gives. One agent: the base's,
+  blind (no readable help: `extra_args` are not taken). A server that exits while starting with
+  clients' `extra_args` is started once more at once without them (told not taken). Engine-owned flags are refused in every spelling the help gives. One agent: the base's,
   else the first attachment that brings one. The model stays the person's selection; a client's
   `models` is advice.
 - **Facts**: `attachment` (keyed), `wants` (with `unserved` and `vacant`), `client` gains

@@ -61,6 +61,7 @@ package main
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -207,7 +208,9 @@ var (
 	ram   []string
 )
 
-// promptText is a request body's prompt text: the prompt, then every message's text content.
+// promptText is a request body's prompt text: the prompt, then every message's text content; a
+// content array gives its text parts and, for each image part, "<image " and a digest of its url
+// ">" (so a prompt with an image is cached and probed like any other).
 func promptText(raw []byte) string {
 	var b struct {
 		Prompt   any `json:"prompt"`
@@ -221,8 +224,23 @@ func promptText(raw []byte) string {
 		t.WriteString(p)
 	}
 	for _, m := range b.Messages {
-		if c, ok := m.Content.(string); ok {
+		switch c := m.Content.(type) {
+		case string:
 			t.WriteString(c)
+		case []any:
+			for _, x := range c {
+				part, _ := x.(map[string]any)
+				switch part["type"] {
+				case "text":
+					s, _ := part["text"].(string)
+					t.WriteString(s)
+				case "image_url":
+					iu, _ := part["image_url"].(map[string]any)
+					u, _ := iu["url"].(string)
+					sum := sha256.Sum256([]byte(u))
+					fmt.Fprintf(&t, "<image %x>", sum[:8])
+				}
+			}
 		}
 	}
 	return t.String()
@@ -230,23 +248,7 @@ func promptText(raw []byte) string {
 
 // promptTokens is the fake's token count of a request body: ceil(bytes of prompt text / 4).
 func promptTokens(raw []byte) int {
-	var b struct {
-		Prompt   any `json:"prompt"`
-		Messages []struct {
-			Content any `json:"content"`
-		} `json:"messages"`
-	}
-	json.Unmarshal(raw, &b)
-	n := 0
-	if p, ok := b.Prompt.(string); ok {
-		n += len(p)
-	}
-	for _, m := range b.Messages {
-		if c, ok := m.Content.(string); ok {
-			n += len(c)
-		}
-	}
-	return (n + 3) / 4
+	return (len(promptText(raw)) + 3) / 4
 }
 
 // account books a completion request on its slot and returns what the answer's timings say.

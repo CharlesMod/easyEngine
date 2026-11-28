@@ -157,3 +157,36 @@ func attID(t *testing.T, s *run.Supervisor, who, name string) string {
 	t.Fatalf("%s has no attachment %q", who, name)
 	return ""
 }
+
+// A remote client's grow waits for the door's empty moment and never drains: proved by the
+// reactor's own pass (React runs it in the test), not by a clock. With a reply in flight the pass
+// leaves the phase ready, starts nothing and keeps the plan; a local caller's grow in the same
+// place begins a drain at once. Once the reply ends, the next pass grows for the remote client.
+func TestRemoteGrowWaitsForIdleByTheReactor(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	end := s.Begin() // a reply in flight
+	v, _ := clAttach(t, s, remoteReq("client-1", "r", 6))
+	if v.Slots.Why != "waiting_for_idle" || !v.Slots.Pending {
+		t.Fatalf("not waiting for idle: %+v", v.Slots)
+	}
+	n := len(e.Starts())
+	_, g := s.PlansNow()
+	s.React()
+	if p, g2 := s.PlansNow(); s.Phase() != "ready" || len(e.Starts()) != n || p != 1 || g2 != g {
+		t.Fatalf("the pass with a reply in flight: phase %s, starts %d (from %d), plans %d", s.Phase(), len(e.Starts()), n, p)
+	}
+	end() // the door's empty moment
+	settle(t, s)
+	if got, _ := s.ClientView(v.Attachment); got.Slots.Given != 6 || len(e.Starts()) != n+1 {
+		t.Fatalf("after the reply: %+v, starts %d (from %d)", got.Slots, len(e.Starts()), n)
+	}
+	// the contrast: a local caller's grow with a reply in flight drains at once
+	end = s.Begin()
+	defer end()
+	clAttach(t, s, clReq("l", nil, true, clProf(6, 8192, 4096)))
+	s.React()
+	if s.Phase() != "resizing" {
+		t.Fatalf("a local grow with a reply in flight: phase %s, want a drain (resizing)", s.Phase())
+	}
+}

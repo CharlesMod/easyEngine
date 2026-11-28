@@ -514,10 +514,8 @@ func TestRemoteGrowWaitsForIdle(t *testing.T) {
 	if sl["pending"] != true || sl["why"] != "waiting_for_idle" {
 		t.Fatalf("not told it waits for idle: %v", sl)
 	}
-	// well past DrainMax the stream still runs: a remote grow never drains
-	time.Sleep(3 * 300 * time.Millisecond) // named moment: three DrainMax pass before the gate opens
-	s.Nudge("test")                        // the reactor looks again
-	testkit.Mark(t, s, "past DrainMax")
+	// that the reactor never drains for it is proved by its own pass in
+	// run.TestRemoteGrowWaitsForIdleByTheReactor; here the stream runs to its end uncut
 	for i := 1; i <= 4; i++ {
 		if len(e.Starts()) != n0 || s.Phase() != "ready" {
 			t.Fatalf("the engine was restarted or drained for a remote client with a reply in flight (phase %s)", s.Phase())

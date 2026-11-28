@@ -177,12 +177,15 @@ func finish(t int32) {
 	say(l...)
 }
 
-// slot is one slot's token state; the fake holds a token count, never tokens.
+// slot is one slot's token state: a token count, and the prompt text it last held (so a cache
+// hit is a common prefix, as llama-server's is: a prompt another caller never sent hits nothing).
+// A restored slot holds a count with no text: any prompt as long hits it, as before.
 type slot struct {
-	tokens  int  // tokens the slot holds now
-	decoded int  // predicted tokens of the last answer
-	held    bool // has held a task
+	tokens  int    // tokens the slot holds now
+	decoded int    // predicted tokens of the last answer
+	held    bool   // has held a task
 	task    int32
+	text    string // the prompt text it last held ("" unknown: restored, or never used)
 }
 
 var (
@@ -190,6 +193,27 @@ var (
 	slots        []slot
 	slotSavePath string // --slot-save-path
 )
+
+// promptText is a request body's prompt text: the prompt, then every message's text content.
+func promptText(raw []byte) string {
+	var b struct {
+		Prompt   any `json:"prompt"`
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(raw, &b)
+	var t strings.Builder
+	if p, ok := b.Prompt.(string); ok {
+		t.WriteString(p)
+	}
+	for _, m := range b.Messages {
+		if c, ok := m.Content.(string); ok {
+			t.WriteString(c)
+		}
+	}
+	return t.String()
+}
 
 // promptTokens is the fake's token count of a request body: ceil(bytes of prompt text / 4).
 func promptTokens(raw []byte) int {
@@ -228,12 +252,24 @@ func account(raw []byte, task int32, predicted int) (cacheN, promptN, id int) {
 		id = 0
 	}
 	sl := &slots[id]
-	nt := promptTokens(raw)
-	if sl.tokens > 0 && nt >= sl.tokens {
+	nt, text := promptTokens(raw), promptText(raw)
+	switch {
+	case sl.text != "": // a hit is the common prefix of what the slot holds and the new prompt
+		p := 0
+		for p < len(sl.text) && p < len(text) && sl.text[p] == text[p] {
+			p++
+		}
+		cacheN = min(p/4, sl.tokens)
+		if p == len(sl.text) && nt >= sl.tokens { // the whole held prompt (and its answer) again
+			cacheN = sl.tokens
+		}
+		promptN = nt - cacheN
+	case sl.tokens > 0 && nt >= sl.tokens:
 		cacheN, promptN = sl.tokens, nt-sl.tokens
-	} else {
+	default:
 		promptN = nt
 	}
+	sl.text = text
 	sl.tokens = nt + predicted
 	sl.decoded = predicted
 	sl.held = true
@@ -754,13 +790,27 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 		return
 	}
 	action := r.URL.Query().Get("action")
-	if action != "save" && action != "restore" {
+	if action != "save" && action != "restore" && action != "erase" {
 		fail(400, "Invalid action", "invalid_request_error")
 		return
 	}
 	id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/slots/"))
 	if err != nil || id < 0 || id >= np {
 		fail(400, "Invalid slot ID", "invalid_request_error")
+		return
+	}
+	if action == "erase" { // as llama-server's: the slot's tokens and its cache are cleared
+		slotMu.Lock()
+		n := slots[id].tokens
+		slots[id] = slot{}
+		slotMu.Unlock()
+		if ctl != "" {
+			if lf, err := os.OpenFile(filepath.Join(ctl, "slots.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				fmt.Fprintf(lf, "erase %d\n", id)
+				lf.Close()
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id_slot": id, "n_erased": n})
 		return
 	}
 	var body struct {

@@ -30,6 +30,7 @@ type PairedStatus struct {
 	ModelNote      string          `json:"model_note,omitempty"`
 	Sampler        run.SamplerInfo `json:"sampler"`
 	ModelName      string          `json:"model_name"`
+	ModelCodename  string          `json:"model_codename"`
 	ModelParams    int64           `json:"model_params"`
 	ModelSizeClass string          `json:"model_size_class"`
 	Held           int             `json:"held"`
@@ -40,7 +41,7 @@ type PairedStatus struct {
 var (
 	StatusKept = []string{"version", "api", "mode", "phase", "message", "progress", "model", "backend",
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
-		"model_note", "sampler", "model_name", "model_params", "model_size_class", "held"}
+		"model_note", "sampler", "model_name", "model_codename", "model_params", "model_size_class", "held"}
 	StatusRemoved = []string{
 		"port",       // the control API's own port
 		"server_url", // the local model server's URL and port
@@ -73,7 +74,7 @@ func PairedStatusOf(st run.Status) PairedStatus {
 		Progress: st.Progress, Model: st.Model, Backend: st.Backend, Shape: st.Shape, TokS: st.TokS,
 		ModelTier: st.ModelTier, ModelStage: st.ModelStage, KVType: st.KVType, Restarts: st.Restarts,
 		ModelFallback: st.ModelFallback, ModelNote: st.ModelNote, Sampler: st.Sampler,
-		ModelName: st.ModelName, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
+		ModelName: st.ModelName, ModelCodename: st.ModelCodename, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
 		Held: st.Held,
 	}
 }

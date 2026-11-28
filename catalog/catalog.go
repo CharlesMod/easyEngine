@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/CharlesMod/easyEngine/core/fit"
 
@@ -61,8 +63,14 @@ type LlamaCpp struct {
 func PatchedTag(tag string) bool { return strings.Contains(tag, "-easy") }
 
 type Model struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Codename is the tier's short display name (Flashlight, Lantern, Campfire, Bonfire), shown
+	// before Name where it is set. Plain text (checkCodename); empty in an older catalog.
+	Codename string `json:"codename,omitempty"`
+	// OptIn marks a model a person picks: nothing chooses it by itself (the recommendation, the
+	// first-run starter, the tier step-down). Once selected it serves like any other model.
+	OptIn   bool   `json:"opt_in,omitempty"`
 	File    string `json:"file"`
 	URL     string `json:"url"` // empty: import-only
 	SHA256  string `json:"sha256"`
@@ -297,8 +305,45 @@ func (c *Catalog) validate() error {
 		if err := checkDownload("model", m.ID, m.URL, m.SHA256, m.Size); err != nil {
 			return err
 		}
+		if err := checkCodename(m.ID, m.Codename); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// MaxCodename is the longest code name, in characters.
+const MaxCodename = 24
+
+// checkCodename holds a code name to short plain text: letters, digits, spaces and . - ' only,
+// no leading or trailing space. It is shown on a page, in a tray and in a game's own text.
+func checkCodename(id, v string) error {
+	if v == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(v) > MaxCodename || strings.TrimSpace(v) != v {
+		return fmt.Errorf("model %q: codename %q is not short plain text (at most %d characters, no leading or trailing space)", id, v, MaxCodename)
+	}
+	for _, r := range v {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune(" .-'", r) {
+			return fmt.Errorf("model %q: codename %q is not short plain text (letters, digits, spaces and . - ' only)", id, v)
+		}
+	}
+	return nil
+}
+
+// Label is the model's display name: the code name, then the model's name, where a code name is
+// set ("Campfire (Gemma 4 26B RP)"); else the name; else the id.
+func (m Model) Label() string {
+	switch {
+	case m.Codename != "" && m.Name != "":
+		return m.Codename + " (" + m.Name + ")"
+	case m.Codename != "":
+		return m.Codename
+	case m.Name != "":
+		return m.Name
+	}
+	return m.ID
 }
 
 var reported sync.Map // override-problem notes already logged

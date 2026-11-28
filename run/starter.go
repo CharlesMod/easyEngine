@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/CharlesMod/easyEngine/catalog"
@@ -53,13 +54,15 @@ func (u *upgrade) activeState() bool {
 
 // UpgradeInfo is status.upgrade.
 type UpgradeInfo struct {
-	Target     string    `json:"target"`
-	TargetName string    `json:"target_name"`
-	State      string    `json:"state"`
-	Progress   *Progress `json:"progress"`
-	Error      string    `json:"error,omitempty"`
-	Attempt    int       `json:"attempt"`
-	RetryInS   int       `json:"retry_in_s,omitempty"` // always 0 (omitted): there is no retry cadence
+	Target     string `json:"target"`
+	TargetName string `json:"target_name"`
+	// TargetCodename is the target tier's code name; "" when it has none.
+	TargetCodename string    `json:"target_codename"`
+	State          string    `json:"state"`
+	Progress       *Progress `json:"progress"`
+	Error          string    `json:"error,omitempty"`
+	Attempt        int       `json:"attempt"`
+	RetryInS       int       `json:"retry_in_s,omitempty"` // always 0 (omitted): there is no retry cadence
 	// Switch is true when the user switched models (the current one is not a starter).
 	Switch bool `json:"switch,omitempty"`
 }
@@ -76,7 +79,7 @@ func (s *Supervisor) stagingLocked(st *Status) {
 	if u == nil {
 		return
 	}
-	info := &UpgradeInfo{Switch: u.switching, Target: u.target.ID, TargetName: u.target.Name, State: u.state, Error: u.err, Attempt: u.attempt}
+	info := &UpgradeInfo{Switch: u.switching, Target: u.target.ID, TargetName: u.target.Name, TargetCodename: u.target.Codename, State: u.state, Error: u.err, Attempt: u.attempt}
 	if u.progress != nil {
 		p := *u.progress
 		info.Progress = &p
@@ -117,7 +120,7 @@ func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw p
 	var best *catalog.Model
 	for _, v := range res.Models {
 		m, ok := cat.Model(v.ID)
-		if !ok || m.ID == target.ID || m.URL == "" || v.Fits == "no" || m.Fallback {
+		if !ok || m.ID == target.ID || m.URL == "" || v.Fits == "no" || m.Fallback || m.OptIn {
 			continue
 		}
 		if m.Size*starterRatio > target.Size {
@@ -132,7 +135,7 @@ func (s *Supervisor) pickStarter(ctx context.Context, cat *catalog.Catalog, hw p
 		return nil
 	}
 	// The starter stays on disk while the target downloads: both must fit, with the rest.
-	if err := s.checkNeed(s.setupNeed(cat, hw, "", *best, target), best.Name+" first, then "+target.Name); err != nil {
+	if err := s.checkNeed(s.setupNeed(cat, hw, "", *best, target), best.Label()+" first, then "+target.Label()); err != nil {
 		s.logf("no starter: %v", err)
 		return nil
 	}
@@ -399,6 +402,13 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 		return
 	}
 	err := s.startLocked()
+	s.mu.Lock()
+	if t := s.steppedLocked(); t != nil && err == nil {
+		// the card cannot hold the target whole: a lower tier serves for it, and the starter (which
+		// that tier may be) is kept; the swap has failed
+		err = errors.New(t.note)
+	}
+	s.mu.Unlock()
 	if err == nil && s.yielded() != nil {
 		// the card was yielded before the target could load: the yield's end starts the selected
 		// model (resumeYield), and the swap is judged by how that start ends
@@ -437,7 +447,7 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	if err != nil {
 		msg = err.Error()
 	}
-	s.addError("swap to %s failed (%s): back on the starter", target.Name, msg)
+	s.addError("swap to %s failed (%s): back on the starter", target.Label(), msg)
 	s.mu.Lock()
 	s.st.Model, s.st.Target = starterID, target.ID
 	s.mu.Unlock()

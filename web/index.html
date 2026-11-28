@@ -190,11 +190,14 @@ function loadHW(refresh){
   return call('GET','hardware'+(refresh?'?refresh=1':'')).then(renderHW).catch(function(){renderHW(null)});
 }
 
+// label is a model's display name: the code name first, the model's name second, where it has one.
+function label(code,name){return code?code+' ('+name+')':name}
 function modelCard(m,isRec,busy){
   var c=el('div','model'+(isRec?' rec':''));
   var h=el('div','mhead');
-  h.appendChild(el('span','mname',m.name||m.id));
+  h.appendChild(el('span','mname',label(m.codename,m.name||m.id)));
   if(isRec)h.appendChild(el('span','chip info','recommended'));
+  if(m.opt_in)h.appendChild(el('span','chip info','opt-in'));
   var f=m.fits||'no';
   h.appendChild(el('span','chip '+f,f==='yes'?'fits':f==='tight'?'tight fit':'does not fit'));
   if(m.installed)h.appendChild(el('span','chip info','installed'));
@@ -254,7 +257,7 @@ function render(){
   $('mLocal').className=ext?'':'on';$('mExt').className=ext?'on':'';
   $('local').classList.toggle('hide',ext);$('ext').classList.toggle('hide',!ext);
   var s=st.shape;
-  $('shape').textContent=s?(s.slots+' x '+Math.round(s.ctx_per_slot/1024)+'k, '+(s.kv_type||st.kv_type||'?')+', '+(s.n_cpu_moe||0)+' experts on CPU, '+fmtMiB(s.vram_mib)+' VRAM'):(st.model?'Model: '+st.model:'No model running');
+  $('shape').textContent=s?(s.slots+' x '+Math.round(s.ctx_per_slot/1024)+'k, '+(s.kv_type||st.kv_type||'?')+', '+(s.n_cpu_moe||0)+' experts on CPU, '+fmtMiB(s.vram_mib)+' VRAM'):(st.model?'Model: '+label(st.model_codename,st.model_name||st.model):'No model running');
   var p=st.progress;
   $('prog').classList.toggle('hide',!p);
   $('bCancel').classList.toggle('hide',!p);
@@ -268,7 +271,7 @@ function render(){
   if(ua){
     var q=u.progress,uc=q&&q.total_bytes>0?Math.min(100,q.done_bytes*100/q.total_bytes):0;
     var lab={queued:'queued behind the starter model',downloading:'downloading',retrying:'failed, retrying',no_space:'not enough disk space, staying on the smaller model',swapping:'switching over',cancelled:'cancelled (install it again to resume)',failed:'would not load, staying on the smaller model'}[u.state]||u.state;
-    $('utit').textContent='Full model '+(u.target_name||u.target)+': '+lab+(u.retry_in_s?' (retry in '+u.retry_in_s+' s)':'')+(u.error?' - '+u.error:'');
+    $('utit').textContent='Full model '+label(u.target_codename,u.target_name||u.target)+': '+lab+(u.retry_in_s?' (retry in '+u.retry_in_s+' s)':'')+(u.error?' - '+u.error:'');
     $('ubar').style.width=uc.toFixed(1)+'%';
     $('utxt').textContent=q?fmtB(q.done_bytes)+' / '+fmtB(q.total_bytes)+' ('+uc.toFixed(0)+'%)  '+(q.rate_bps!=null?(q.rate_bps/1048576).toFixed(1)+' MB/s':'')+'  ETA '+fmtEta(q.eta_s):'';
   }

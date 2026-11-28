@@ -148,7 +148,11 @@ and it shows in status `errors[]`. Since version 8 every llama.cpp, cudart and u
 `unpacked_size`: gencatalog downloads the archive, unpacks it with the engine's own unpacker and
 counts every file rounded up to 4 KiB plus 4 KiB per directory (`-cache` keeps the archives and
 counts for reruns). `agent_runtime` lists the measured disk of the agent's setup per OS
-(`tools/gencatalog/runtime.json`, measured by a real install; see §7c).
+(`tools/gencatalog/runtime.json`, measured by a real install; see §7c). A model's size and
+sha256 are its LFS record at the repo's pinned commit; where the repo publishes a `SHA256SUMS`
+that names the file, the two must agree or gencatalog stops. `go run ./tools/gencatalog
+-models-only -out catalog/catalog.json` touches no GitHub: it rebuilds only `models` from
+Hugging Face and keeps `llama`, `uv` and `agent_runtime` as they are in the file.
 
 ```json
 {
@@ -166,7 +170,7 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
   },
   "uv": [{"os": "linux", "arch": "amd64", "url": "...", "sha256": "...", "size": 0}],
   "models": [
-    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP",
+    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP", "codename": "Campfire",
      "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
      "sha256": "595eddca...", "size": 10001779136,
@@ -178,6 +182,40 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
 }
 ```
 
+- **Tiers and code names.** The default models are a ladder of tiers, each with a `codename`
+  (optional, short plain text: at most 24 characters, letters, digits, spaces and `.` `-` `'`
+  only, no leading or trailing space; checked by `catalog.Parse`). Where a model has one, every
+  place that shows the model shows the code name first and the model's name second ("Campfire
+  (Gemma 4 26B RP)": the setup page, the tray, the download and swap messages); a catalog without
+  code names reads as before and shows the name alone.
+
+  | Code name | Model | Catalog id | Picked by |
+  |---|---|---|---|
+  | Flashlight | Gemma 4 E2B (fallback) | `gemma4-e2b-q4km` | the ladder, last resort |
+  | Lantern | Gemma 4 E4B RP | `gemma4-e4b-rp-q40` | the ladder; the usual first-run starter |
+  | Campfire | Gemma 4 26B RP (MoE) | `gemma4-rp-maxxed-q3kxl` | the ladder; the pick on a 16 GB card |
+  | Bonfire | Qwen3.8 27B ASCII-Condensed Heretic Q3_K_XL (dense, not RP) | to come | a person only (`opt_in`) |
+
+- **Opt-in.** `opt_in: true` marks a model a person picks: nothing chooses it by itself. The
+  plan never makes it `recommended` (on a card or CPU-only), the first run never takes it as a
+  starter, and the tier step-down below never steps to it. It is selected through the usual
+  `POST install` / switch, and then serves like any other model; the plan lists it with
+  `opt_in: true`.
+- **Dense, never split.** `moe: false` (and, once the file is on disk, a header with no expert
+  tensors) is a dense model: the sizing core never lays any of its layers off the card
+  (`fit.Choose` moves only MoE expert layers to RAM), so a dense model either fits the card whole
+  or does not fit (`limit: dense_never_split` in the plan). **Tier step-down** (`run/tiers.go`):
+  when the selected catalog model would not fit this card even with nothing else on it, the
+  engine serves the best installed catalog model below it (highest `quality` under the
+  selected one's) that is not opt-in and fits the room now, and says so: `GET status` `model`,
+  `model_name` and `model_codename` are the tier that serves, `model_fallback` is true and
+  `model_note` names both ("Bonfire (...) is selected, but it does not fit this card whole, and a
+  dense model is never split between the card and RAM: Campfire (Gemma 4 26B RP) serves
+  instead."). The selection (`state.json` `model`) stays the person's; every start tries it
+  first again, so a bigger card serves it. When the model would fit the empty card and only other
+  programs hold the room, nothing steps down: the engine waits for the card as before (phase
+  `error`, "this model does not fit"). With no installed tier below that fits, it waits too. A
+  first-run swap to a target that steps down counts as a failed swap: the starter stays.
 - **Fallback.** `fallback: true` marks a model kept only as a last resort (today gemma4-e2b-q4km);
   `fallback_note` is a one-sentence, game-agnostic description of what to expect. The ladder is
   gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback. The flag is carried into the plan
@@ -940,7 +978,7 @@ fields removed (`api.PairedStatus`, copied field by field, so a field added to t
 stays hidden until it is classified; a test fails until it is). Kept: `version`, `api`, `mode`,
 `phase`, `message` (blank in the `error` and `yielded` phases), `progress`, `model`, `backend`,
 `shape`, `tok_s`, `model_tier`, `model_stage`, `kv_type`, `restarts`, `model_fallback`,
-`model_note`, `sampler`, `model_name`, `model_params`, `model_size_class`, `held`. Removed:
+`model_note`, `sampler`, `model_name`, `model_codename`, `model_params`, `model_size_class`, `held`. Removed:
 `port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `upgrade`,
 `contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield`, `build` (paths, pids, the local
 model server's address, error texts, other clients, host program detail). Everything else needs
@@ -968,11 +1006,11 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
 | `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
 | `GET hello`, `POST pair`, `GET`/`DELETE pair/{id}`, `GET pairing`, `POST pairing/answer` | who this engine is, and pairing a client on the network (§7f); the first four need no token |
-| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_name, model_codename, model_params, model_size_class}`; `model_name` is the human name of the model that serves and `model_codename` its tier's code name (§3; `""` when it has none, as for a custom file); after a tier step-down (§3) both, and `model`, are the tier that serves; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, limit, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu, device}` (`gpu` is the `GPUReport` the verdicts were made around; `device` the adapter pin of §4a); `limit`, on a "no", names what stops the model, and `why` says it in words with the figures: `vram` (the card, for an MoE model even with every expert layer in system RAM, or a model kept whole), `ram` (system RAM: a CPU-only run, the expert layers the card cannot hold, or a GPU that borrows system memory), `disk` (the download), `dense_never_split` (a dense model too big for the card: dense models are never split between card and RAM), `vram_block` (no single free block large enough), `kv_type` (an unknown cache type), `model` (the header lacks what the planner needs); the custom file's check carries the same `limit`; `disk_need_bytes` is 0 for an installed model, else what setting it up still needs from the current state (§7c), with `disk_need` `{steps: [{what, peak_bytes, keep_bytes}], peak_bytes, logs_bytes, host_bytes, headroom_bytes, total_bytes}` saying what needs it; the plan's disk verdict uses the same count against the free space read at the time of the request; `disk_free_bytes` is -1 when unknown |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, codename, opt_in, size, fits: "yes"\|"tight"\|"no", why, limit, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu, device}` (`gpu` is the `GPUReport` the verdicts were made around; `device` the adapter pin of §4a); `limit`, on a "no", names what stops the model, and `why` says it in words with the figures: `vram` (the card, for an MoE model even with every expert layer in system RAM, or a model kept whole), `ram` (system RAM: a CPU-only run, the expert layers the card cannot hold, or a GPU that borrows system memory), `disk` (the download), `dense_never_split` (a dense model too big for the card: dense models are never split between card and RAM), `vram_block` (no single free block large enough), `kv_type` (an unknown cache type), `model` (the header lacks what the planner needs); the custom file's check carries the same `limit`; `disk_need_bytes` is 0 for an installed model, else what setting it up still needs from the current state (§7c), with `disk_need` `{steps: [{what, peak_bytes, keep_bytes}], peak_bytes, logs_bytes, host_bytes, headroom_bytes, total_bytes}` saying what needs it; the plan's disk verdict uses the same count against the free space read at the time of the request; `disk_free_bytes` is -1 when unknown |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
 | `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |
@@ -1039,7 +1077,7 @@ Status fields (all in `GET status`; `null` or `""` when nothing is staged):
 |---|---|
 | `model_tier` | `"starter"`: the answering model is a stand-in, show "simpler speech while the full model downloads"; `"full"`: the chosen model; `""`: external mode or no model |
 | `model_stage` | `""` (no staging), `starter_downloading`, `target_downloading`, `target_retrying`, `target_no_space`, `swapping`, `starter_serving` (upgrade cancelled or the target would not load), `target_serving` (the swap finished this run) |
-| `upgrade` | `{target, target_name, state, progress, error, attempt, retry_in_s}`; `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
+| `upgrade` | `{target, target_name, target_codename, state, progress, error, attempt, retry_in_s}` (`target_codename` is the target tier's code name, `""` when it has none); `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
 | `model_fallback`, `model_note` | also set while `model_tier` is `starter` (the starter's own `fallback_note`, else a generic sentence), the same warning idea as for a fallback model |
 
 ### 7b. Storage, removing downloads, switching models
@@ -1107,7 +1145,7 @@ min_p 0) as both `official` and `rp`. The calibration book keys on `custom-<hash
 instead of a sha256.
 
 Status: `custom` is `{path, name, size, missing, params, size_class}` or null; `model` is `"custom:<name>"` while it
-serves; `model_name` is the human name of the selected model (the catalog name, or the file name).
+serves; `model_name` is the human name of the model that serves (the catalog name, or the file name), `model_codename` its tier's code name (`""` for a custom file).
 `GET plan` gains `custom` (a `CustomCheck` of the current file, or null).
 
 Size class: status has top-level `model_params` (int64, total parameters, 0 unknown) and
@@ -1258,13 +1296,14 @@ host, origin and preflight rules of the gate still apply). 200:
 
 ```json
 {"name":"den-pc","engine":"easy-engine","api":1,"version":"0.4.0","engine_id":"9f2c...32 hex",
- "model_name":"Gemma 4 26B","model_id":"gemma-4-26b","phase":"ready","card":"NVIDIA GeForce RTX 4080",
+ "model_name":"Gemma 4 26B RP","model_codename":"Campfire","model_id":"gemma4-rp-maxxed-q3kxl","phase":"ready","card":"NVIDIA GeForce RTX 4080",
  "pairing":true,"token_required":true}
 ```
 
 `name` is the `name` setting or the host name; `engine_id` is a stable random id made once and
-kept in `<data dir>/engine-id`; `model_name` the human name of the selected model (its id when it
-has none); `model_id` its catalog id (`""` when none is selected, or when a custom GGUF serves,
+kept in `<data dir>/engine-id`; `model_name` the human name of the model that serves (its id when it
+has none); `model_codename` its tier's code name (§3; `""` when it has none, a custom file or an
+older catalog), shown before the name; `model_id` its catalog id (`""` when none is selected, or when a custom GGUF serves,
 which has no catalog id); `card` the adapter the engine uses ("" before the first reading, or on CPU);
 `pairing` is true only on a non-loopback listener with tokens in force; `token_required` the same
 condition without the pairer. With an `Authorization: Bearer` header the engine checks: a valid

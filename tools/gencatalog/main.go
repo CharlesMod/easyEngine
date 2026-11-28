@@ -14,6 +14,11 @@
 // again; -measured-only re-attaches measured.json and runtime.json to an existing catalog with no
 // network. Each asset gets unpacked_size: the archive is unpacked, every regular file is counted
 // rounded up to 4 KiB, plus 4 KiB per directory (the root too) and per symlink.
+//
+// -models-only touches no GitHub: it re-reads -out, keeps its llama, uv and agent_runtime parts
+// exactly, rebuilds the models from Hugging Face and writes it back:
+//
+//	go run ./tools/gencatalog -models-only -out catalog/catalog.json
 package main
 
 import (
@@ -122,6 +127,16 @@ type client struct {
 	log   func(string, ...any)
 	api   string // GitHub API base; "" = https://api.github.com (tests point it at a fake server)
 	cache string // archive and unpacked-size cache dir; "" = no unpacked sizes (offline tests)
+	hf    string // Hugging Face base; "" = https://huggingface.co (tests point it at a fake server)
+}
+
+const defaultHF = "https://huggingface.co"
+
+func (c *client) hfBase() string {
+	if c.hf != "" {
+		return c.hf
+	}
+	return defaultHF
 }
 
 const block = 4096
@@ -601,15 +616,17 @@ type hfEntry struct {
 
 type modelSpec struct {
 	id, name, repo, file, chat, notes, fallbackNote string
-	moe, useMain, fallback                          bool // useMain: url says resolve/main (the keeper's own repo)
+	codename                                        string // short display name of the tier
+	optIn                                           bool   // never auto-picked
+	moe, useMain, fallback                          bool   // useMain: url says resolve/main (the keeper's own repo)
 	quality                                         int
 }
 
 var modelSpecs = []modelSpec{
 	// The keeper's rp build of E4B (QAT-exact Q4_0, refusals removed, vocabulary pruned); replaced stock E4B Q4_K_M on 2026-11-25.
-	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP", codename: "Lantern", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
 		useMain: true, quality: 60, chat: "gemma4"},
-	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
+	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", codename: "Flashlight", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
 		fallback: true, fallbackNote: "Smallest model: expect repeated lines and weaker understanding of what was said."},
 }
 
@@ -617,7 +634,7 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 	var info struct {
 		SHA string `json:"sha"`
 	}
-	if err := c.getJSON("https://huggingface.co/api/models/"+sp.repo, &info); err != nil {
+	if err := c.getJSON(c.hfBase()+"/api/models/"+sp.repo, &info); err != nil {
 		return catalog.Model{}, err
 	}
 	if info.SHA == "" {
@@ -625,8 +642,14 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 	}
 	var tree []hfEntry
 	// the tree is listed at the pinned commit so the url, size and hash describe one revision
-	if err := c.getJSON("https://huggingface.co/api/models/"+sp.repo+"/tree/"+info.SHA+"?limit=1000", &tree); err != nil {
+	if err := c.getJSON(c.hfBase()+"/api/models/"+sp.repo+"/tree/"+info.SHA+"?limit=1000", &tree); err != nil {
 		return catalog.Model{}, err
+	}
+	hasSums := false
+	for _, e := range tree {
+		if e.Path == "SHA256SUMS" {
+			hasSums = true
+		}
 	}
 	for _, e := range tree {
 		if e.Path != sp.file {
@@ -639,13 +662,18 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 		if size == 0 {
 			size = e.Size
 		}
+		if hasSums {
+			if err := c.checkSums(sp, info.SHA, e.LFS.OID); err != nil {
+				return catalog.Model{}, err
+			}
+		}
 		rev := info.SHA
 		if sp.useMain {
 			rev = "main"
 		}
 		return catalog.Model{
-			ID: sp.id, Name: sp.name, File: sp.file,
-			URL:    "https://huggingface.co/" + sp.repo + "/resolve/" + rev + "/" + url.PathEscape(sp.file),
+			ID: sp.id, Name: sp.name, Codename: sp.codename, OptIn: sp.optIn, File: sp.file,
+			URL:    c.hfBase() + "/" + sp.repo + "/resolve/" + rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size, MoE: sp.moe, Quality: sp.quality, Chat: sp.chat, Notes: sp.notes,
 			Fallback: sp.fallback, FallbackNote: sp.fallbackNote,
 		}, nil
@@ -653,7 +681,35 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 	return catalog.Model{}, fmt.Errorf("%s: file %s not in the repo", sp.repo, sp.file)
 }
 
-var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
+// checkSums fetches SHA256SUMS at the pinned commit; when it names the model file, the hash there
+// must equal the LFS oid. A file it does not name is left to the LFS oid.
+func (c *client) checkSums(sp modelSpec, sha, oid string) error {
+	resp, err := c.get(c.hfBase() + "/" + sp.repo + "/resolve/" + sha + "/SHA256SUMS")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) != 2 || len(f[0]) != 64 {
+			continue
+		}
+		if strings.TrimPrefix(f[1], "*") != sp.file {
+			continue
+		}
+		if !strings.EqualFold(f[0], oid) {
+			return fmt.Errorf("%s/%s: SHA256SUMS says %s but the LFS oid is %s", sp.repo, sp.file, strings.ToLower(f[0]), strings.ToLower(oid))
+		}
+		return nil
+	}
+	return nil
+}
+
+var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", codename: "Campfire", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
 	moe: true, useMain: true, quality: 100, chat: "gemma4", notes: "reference model"}
 
 func main() {
@@ -669,12 +725,31 @@ func main() {
 	uvTag := flag.String("uv-tag", "", "pin a uv release tag instead of the latest")
 	cacheDir := flag.String("cache", filepath.Join(os.Getenv("HOME"), ".cache", "gencatalog"), "archive and unpacked-size cache")
 	version := flag.Int("version", 1, "catalog version to write")
+	modelsOnly := flag.Bool("models-only", false, "no GitHub: re-read -out, keep its llama, uv and agent_runtime parts, rebuild the models from Hugging Face and write it back (-version if given, else the file's)")
 	measuredOnly := flag.Bool("measured-only", false, "no network: re-read -out, attach tools/gencatalog/measured.json and write it back with -version")
 	flag.Parse()
 
 	logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, "gencatalog: "+f+"\n", a...) }
 	if *measuredOnly {
 		if err := refreshMeasured(*out, *version); err != nil {
+			fmt.Fprintln(os.Stderr, "gencatalog:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *modelsOnly {
+		explicit := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "version" {
+				explicit = true
+			}
+		})
+		v := 0
+		if explicit {
+			v = *version
+		}
+		c := &client{http: &http.Client{Timeout: 5 * time.Minute}, log: logf}
+		if err := refreshModels(c, *out, v); err != nil {
 			fmt.Fprintln(os.Stderr, "gencatalog:", err)
 			os.Exit(1)
 		}
@@ -708,6 +783,71 @@ func main() {
 	}
 }
 
+// buildModels builds the model list from Hugging Face (the reference model first, then modelSpecs)
+// and attaches measured.json and the samplers. With refFallback, a reference model that is not on
+// Hugging Face yet becomes an import-only entry sized from refPath; without it that is an error.
+func buildModels(c *client, refPath string, refFallback bool) ([]catalog.Model, error) {
+	refModel, err := c.hfModel(refSpec)
+	switch {
+	case err != nil && !refFallback:
+		return nil, fmt.Errorf("reference model: %w", err)
+	case err != nil:
+		c.log("WARNING: reference model not on Hugging Face yet (%v); writing it import-only", err)
+		st, serr := os.Stat(refPath)
+		if serr != nil {
+			return nil, fmt.Errorf("reference model is not on Hugging Face (%v) and the local file is missing: %w", err, serr)
+		}
+		refModel = catalog.Model{ID: refID, Name: refSpec.name, Codename: refSpec.codename, File: refFile, SHA256: refSHA256, Size: st.Size(),
+			MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only"}
+	case refModel.SHA256 != refSHA256:
+		return nil, fmt.Errorf("reference model on Hugging Face has sha256 %s, expected %s", refModel.SHA256, refSHA256)
+	}
+	models := []catalog.Model{refModel}
+	for _, sp := range modelSpecs {
+		m, err := c.hfModel(sp)
+		if err != nil {
+			return nil, err
+		}
+		c.log("model %s %d bytes", m.ID, m.Size)
+		models = append(models, m)
+	}
+	measured, err := loadMeasured(measuredJSON)
+	if err != nil {
+		return nil, err
+	}
+	if un := applyMeasured(models, measured); len(un) > 0 {
+		c.log("WARNING: measured.json has footprints for models not in the catalog: %v", un)
+	}
+	if un := applySamplers(models); len(un) > 0 {
+		return nil, fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
+	}
+	return models, nil
+}
+
+// refreshModels rebuilds only the models of an existing catalog file from Hugging Face; llama, uv
+// and agent_runtime stay as read. version 0 keeps the file's version.
+func refreshModels(c *client, out string, version int) error {
+	b, err := os.ReadFile(out)
+	if err != nil {
+		return err
+	}
+	cat, err := catalog.Parse(b)
+	if err != nil {
+		return err
+	}
+	if cat.Models, err = buildModels(c, "", false); err != nil {
+		return err
+	}
+	if version > 0 {
+		cat.Version = version
+	}
+	if err := writeCatalog(out, cat); err != nil {
+		return err
+	}
+	c.log("wrote %s", out)
+	return nil
+}
+
 func run(c *client, repo, stockRepo, out, pin, stockTag, uvTag string, minAge time.Duration, refPath string, version int) error {
 	if err := validRepo(repo); err != nil {
 		return err
@@ -739,42 +879,15 @@ func run(c *client, repo, stockRepo, out, pin, stockTag, uvTag string, minAge ti
 	if err != nil {
 		return err
 	}
-	refModel, err := c.hfModel(refSpec)
-	switch {
-	case err != nil:
-		c.log("WARNING: reference model not on Hugging Face yet (%v); writing it import-only", err)
-		st, serr := os.Stat(refPath)
-		if serr != nil {
-			return fmt.Errorf("reference model is not on Hugging Face (%v) and the local file is missing: %w", err, serr)
-		}
-		refModel = catalog.Model{ID: refID, Name: refSpec.name, File: refFile, SHA256: refSHA256, Size: st.Size(),
-			MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only"}
-	case refModel.SHA256 != refSHA256:
-		return fmt.Errorf("reference model on Hugging Face has sha256 %s, expected %s", refModel.SHA256, refSHA256)
+	models, err := buildModels(c, refPath, true)
+	if err != nil {
+		return err
 	}
 	cat := catalog.Catalog{
 		Version: version,
 		Llama:   rungs,
 		UV:      ua,
-		Models:  []catalog.Model{refModel},
-	}
-	for _, sp := range modelSpecs {
-		m, err := c.hfModel(sp)
-		if err != nil {
-			return err
-		}
-		c.log("model %s %d bytes", m.ID, m.Size)
-		cat.Models = append(cat.Models, m)
-	}
-	measured, err := loadMeasured(measuredJSON)
-	if err != nil {
-		return err
-	}
-	if un := applyMeasured(cat.Models, measured); len(un) > 0 {
-		c.log("WARNING: measured.json has footprints for models not in the catalog: %v", un)
-	}
-	if un := applySamplers(cat.Models); len(un) > 0 {
-		return fmt.Errorf("no sampler spec for models %v (add them to samplerSpecs)", un)
+		Models:  models,
 	}
 	if cat.AgentRuntime, err = loadRuntime(runtimeJSON); err != nil {
 		return err

@@ -53,9 +53,13 @@ func Seed(info gguf.Info, kvType string) (fit.Footprint, error) {
 type Verdict struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Fits string `json:"fits"` // yes | tight | no
-	Why  string `json:"why"`
+	// Codename is the tier's code name, shown before Name ("" when the catalog has none).
+	Codename string `json:"codename"`
+	// OptIn: a person picks this model; it is never Recommended.
+	OptIn bool   `json:"opt_in,omitempty"`
+	Size  int64  `json:"size"`
+	Fits  string `json:"fits"` // yes | tight | no
+	Why   string `json:"why"`
 	// Limit is what stops a "no" model, one of the Limit* codes ("" when it fits). Why says it
 	// in words; front ends may key on Limit.
 	Limit      string    `json:"limit,omitempty"`
@@ -152,7 +156,7 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 	res.Device = &pin
 	bestYes, bestTight := -1, -1
 	for _, m := range c.Models {
-		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
+		v := Verdict{ID: m.ID, Name: m.Name, Codename: m.Codename, OptIn: m.OptIn, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
 		if installed != nil {
 			v.Installed = installed(m)
 		}
@@ -194,8 +198,8 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 			v.Fits, v.Why = verdictFor(fp, sh, w)
 		}
 		res.Models = append(res.Models, v)
-		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
-			continue // cannot be recommended: no fit, or not installable from here
+		if v.Fits == "no" || (!v.Installed && v.ImportOnly) || v.OptIn {
+			continue // cannot be recommended: no fit, not installable from here, or a person's pick
 		}
 		if v.Fits == "yes" && (bestYes < 0 || m.Quality > c.Models[bestYes].Quality) {
 			bestYes = len(res.Models) - 1
@@ -227,7 +231,7 @@ func cpuOnlyPick(vs []Verdict, room fit.Room) string {
 	_, free, _ := room.Budget() // RoomFor's room: every field read
 	best, bestComfy := -1, -1
 	for i, v := range vs {
-		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
+		if v.Fits == "no" || (!v.Installed && v.ImportOnly) || v.OptIn {
 			continue
 		}
 		if best < 0 || v.Size < vs[best].Size {

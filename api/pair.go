@@ -23,7 +23,8 @@ type Hello struct {
 	Version       string `json:"version"`
 	EngineID      string `json:"engine_id"`
 	ModelName     string `json:"model_name"`
-	ModelID       string `json:"model_id"` // the selected model's catalog id; "" when none (or a custom file)
+	ModelCodename string `json:"model_codename"` // the tier's code name (Campfire); "" when it has none
+	ModelID       string `json:"model_id"`       // the selected model's catalog id; "" when none (or a custom file)
 	Phase         string `json:"phase"`
 	Card          string `json:"card"`
 	Pairing       bool   `json:"pairing"`
@@ -106,7 +107,7 @@ func (a *API) hello(r *http.Request) Hello {
 	}
 	if a.S != nil {
 		st := a.S.Status()
-		h.Version, h.Phase, h.ModelName = st.Version, st.Phase, st.ModelName
+		h.Version, h.Phase, h.ModelName, h.ModelCodename = st.Version, st.Phase, st.ModelName, st.ModelCodename
 		if h.ModelName == "" {
 			h.ModelName = st.Model
 		}

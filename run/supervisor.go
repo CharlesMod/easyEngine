@@ -96,8 +96,11 @@ type Status struct {
 	Contexts *ContextsInfo `json:"contexts,omitempty"`
 	// ModelName is the human name of the selected model; Custom is the user's own GGUF file
 	// (nil when none is set). While it serves, Model is "custom:<name>".
-	ModelName string      `json:"model_name"`
-	Custom    *CustomInfo `json:"custom"`
+	ModelName string `json:"model_name"`
+	// ModelCodename is the catalog tier's code name (Flashlight, Lantern, Campfire, Bonfire), shown
+	// before ModelName; "" for a model without one (a custom file, an older catalog).
+	ModelCodename string      `json:"model_codename"`
+	Custom        *CustomInfo `json:"custom"`
 	// ModelParams is the total parameter count of the served custom file (0 unknown);
 	// ModelSizeClass is "small" (< 8e9), "large" or "" (custom.go).
 	ModelParams    int64  `json:"model_params"`
@@ -212,6 +215,7 @@ type Supervisor struct {
 	jobRunning  bool
 	jobCancel   context.CancelFunc
 	loadCancel  context.CancelFunc
+	step        *tierStep // tiers.go: the lower tier serving for a selected model the card cannot hold
 	waking      bool
 	restarts    int
 	hw          *probe.Hardware
@@ -443,6 +447,7 @@ func (s *Supervisor) Status() Status {
 	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
 	s.customStatusLocked(&st)
+	s.tierStatusLocked(&st)
 	st.Previous = s.previousLocked()
 	if s.yieldInfo != nil {
 		y := *s.yieldInfo
@@ -645,7 +650,7 @@ type install struct {
 
 func (s *Supervisor) resolveInstall() (install, bool) {
 	s.mu.Lock()
-	id, be, tag := s.st.Model, s.st.Backend, s.st.Build
+	id, be, tag := s.servedIDLocked(), s.st.Backend, s.st.Build
 	s.mu.Unlock()
 	if id == "" || be == "" {
 		return install{}, false

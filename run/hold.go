@@ -21,7 +21,9 @@ const APIVersion = 1
 // id is the request's id (X-Request-Id), said in the request begin and end so a client pairs
 // them; end takes what the streamer read of the reply (nil for one it did not read).
 func (s *Supervisor) Enter(id string) (Route, func(*RequestEnd)) {
+	s.idleSeen.arrive(true) // the engine's own door (no caller named): this machine
 	s.mu.Lock()
+
 	defer s.mu.Unlock()
 	rt := s.routeLocked()
 	if rt.Hold {

@@ -234,19 +234,21 @@ type Supervisor struct {
 	userStopped bool
 	sleepReason string // status sleep_reason: why the phase is sleeping ("" when it is not)
 	idleMoment  idleMoment
-	jobRunning  bool
-	jobCancel   context.CancelFunc
-	loadCancel  context.CancelFunc
-	step        *tierStep // tiers.go: the lower tier serving for a selected model the card cannot hold
-	noStepFor   string    // a swap to this id is being judged: its start never steps (starter.go)
-	waking      bool
-	restarts    int
-	hw          *probe.Hardware
-	cat         *catalog.Catalog
-	retryable   bool
-	rec         recovery
-	reshape     bool
-	tokS        float64
+	idleSeen    idleSeen // the door's arrivals and the attachments' leaves, local or not (idle.go)
+
+	jobRunning bool
+	jobCancel  context.CancelFunc
+	loadCancel context.CancelFunc
+	step       *tierStep // tiers.go: the lower tier serving for a selected model the card cannot hold
+	noStepFor  string    // a swap to this id is being judged: its start never steps (starter.go)
+	waking     bool
+	restarts   int
+	hw         *probe.Hardware
+	cat        *catalog.Catalog
+	retryable  bool
+	rec        recovery
+	reshape    bool
+	tokS       float64
 
 	// hub is what the supervisor says (run/book.go); poke wakes the mind's reactor and door is
 	// the count of requests in flight with what it arms (run/mind.go); card is the room, the

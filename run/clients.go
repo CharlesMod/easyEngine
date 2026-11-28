@@ -1497,6 +1497,7 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 	}
 	r.list = slices.Delete(r.list, idx, idx+1)
 	delete(r.excl, a.id)
+	s.idleSeen.leave(a.local) // the idle rule's word: whose leave (idle.go)
 	if m := r.run; m != nil {
 		for _, e := range a.slots {
 			if e < len(m.owner) && m.owner[e] == a.id {
@@ -1828,8 +1829,10 @@ func (s *Supervisor) underServedLocked() bool {
 // EnterAs is Enter for a request whose attachment and touch the door has read. A request whose
 // attachment waits for its slots is held like one the model is on its way up for.
 func (s *Supervisor) EnterAs(q DoorAsk) (Route, ClientDoor, func(*RequestEnd)) {
+	s.idleSeen.arrive(q.Local) // held or not: a request at the door (the idle rule, idle.go)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	rt := s.routeLocked()
 	if rt.Hold {
 		return rt, ClientDoor{}, nil

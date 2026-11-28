@@ -1,6 +1,7 @@
 package run
 
 import (
+	"sync/atomic"
 	"time"
 )
 
@@ -8,10 +9,46 @@ import (
 // sleeping, and the idle fact the rule's named moment is said by. The rule itself, which knows
 // the app's parents and attachments, is app/idle.go; it puts the model to sleep with SleepIdle.
 
+// RemoteIdleFloor is the least quiet before an idle sleep that follows a remote client's leave
+// or requests from other machines only: max(idle_sleep_s, RemoteIdleFloor). With linger_s or
+// idle_sleep_s 0, a remote identity could otherwise load and unload the model as often as it
+// liked (a start from down is free, an idle sleep is the engine's own stop), and a local caller
+// would pay a reload each time. Local leaves and local requests keep the exact settings.
+const RemoteIdleFloor = 60 * time.Second
+
+// idleSeen counts what the idle rule asks of the clients' side: requests that came to the door
+// (held or not) and attachments that left, and of each how many were not from this machine (the
+// attachment's own local flag, the request's DoorAsk.Local: decided by the api, never a header).
+type idleSeen struct {
+	arrivals, remoteArrivals atomic.Uint64
+	leaves, remoteLeaves     atomic.Uint64
+}
+
+func (c *idleSeen) arrive(local bool) {
+	if !local {
+		c.remoteArrivals.Add(1)
+	}
+	c.arrivals.Add(1)
+}
+
+func (c *idleSeen) leave(local bool) {
+	if !local {
+		c.remoteLeaves.Add(1)
+	}
+	c.leaves.Add(1)
+}
+
+// IdleSeen is the door's arrivals and the attachments' leaves so far, each with how many were
+// remote; the idle rule compares them between looks.
+func (s *Supervisor) IdleSeen() (arrivals, remoteArrivals, leaves, remoteLeaves uint64) {
+	c := &s.idleSeen
+	return c.arrivals.Load(), c.remoteArrivals.Load(), c.leaves.Load(), c.remoteLeaves.Load()
+}
+
 // idleMoment is the idle rule's named moment as the rule last said it.
 type idleMoment struct {
 	armed bool
-	why   string // linger | idle_sleep
+	why   string // <delay>/<cause>: linger/local_leave, idle_sleep/remote_requests, ...
 	delay time.Duration
 }
 

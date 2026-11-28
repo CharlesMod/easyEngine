@@ -465,6 +465,11 @@ func (s *Supervisor) layBack(srv *server, base string) {
 				continue
 			}
 			c.Slot = e
+		} else if !s.unownedSlot(c.Slot) {
+			// a slot no client owned goes back only into the same number when no client owns that
+			// one now: never into a client's slot
+			s.dropFile(c, "that slot belongs to a client now")
+			continue
 		}
 		switch {
 		case c.Key != srv.ctxKey:

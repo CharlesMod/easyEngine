@@ -25,10 +25,33 @@ const (
 	maxAttachRemote = 64 << 10 // a remote client's: input from the network
 )
 
+// forwardHeaders say a request came through a proxy on someone's behalf: such a request is never
+// local, whatever its peer address (a header can only take privilege away, never give it).
+var forwardHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Via"}
+
+func forwarded(r *http.Request) bool {
+	for _, k := range forwardHeaders {
+		if _, ok := r.Header[k]; ok {
+			return true
+		}
+	}
+	for k := range r.Header {
+		if strings.HasPrefix(k, "Tailscale-") {
+			return true
+		}
+	}
+	return false
+}
+
 // localCaller is a request from this machine: a loopback peer whose gate client is the loopback
-// listener, the setup page, an open listener or the master token. Every paired token is remote
-// (it names a client on another machine), whatever address it comes from.
+// listener, the setup page, an open listener or the master token, and that carries no forwarding
+// header (Forwarded, X-Forwarded-*, X-Real-IP, Via, Tailscale-*). Every paired token is remote (it
+// names a client on another machine), whatever address it comes from. A forwarder on this machine
+// that adds no such header (ssh -L, socat) makes its callers local: docs/ENGINE.md section 7g.
 func localCaller(r *http.Request) bool {
+	if forwarded(r) {
+		return false
+	}
 	h, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return false
@@ -54,15 +77,25 @@ func localCaller(r *http.Request) bool {
 }
 
 // identity is who an attach or a proxied request is from: "loopback" for a local caller, else
-// the gate's client id (a paired token's id, "master", "open").
+// the gate's client id: a paired token's id, or, for the callers with no id of their own, the
+// address they come from ("open@<ip>" on an --open listener, "master@<ip>" for the master token
+// from off the machine), so two of them are two clients.
 func identity(r *http.Request) string {
 	if localCaller(r) {
 		return "loopback"
 	}
-	if id := ClientID(r.Context()); id != "" {
-		return id
+	id := ClientID(r.Context())
+	switch id {
+	case "":
+		return "unknown"
+	case ClientOpen, tokens.MasterID:
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+		return id + "@" + ip
 	}
-	return "unknown"
+	return id
 }
 
 func clientFail(w http.ResponseWriter, e *run.ClientError) {
@@ -116,19 +149,20 @@ func (a *API) attach(w http.ResponseWriter, r *http.Request) {
 		fail(w, 501, "attach not available")
 		return
 	}
+	if in.Pid > 0 && local && a.Attach != nil {
+		// the pid is a parent as before (serve ends with its parents; the app counts it). It is
+		// made a parent first, so a failure here touches no attachment (a standing one of the same
+		// key stays as it was); a pid the attach then refuses stays a parent, as the old wire's.
+		if err := a.Attach(in.Pid); err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+	}
 	v, hold, ce := a.S.AttachClient(run.AttachRequest{Pid: in.Pid, Name: in.Name, Hold: in.Hold, Profile: in.Profile,
 		Identity: identity(r), Local: local})
 	if ce != nil {
 		clientFail(w, ce)
 		return
-	}
-	if in.Pid > 0 && a.Attach != nil {
-		// the pid is a parent as before (serve ends with its parents; the app counts it)
-		if err := a.Attach(in.Pid); err != nil {
-			a.S.Detach(v.Attachment, "loopback")
-			fail(w, 400, err.Error())
-			return
-		}
 	}
 	if a.Present != nil {
 		a.Present()

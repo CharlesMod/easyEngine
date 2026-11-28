@@ -2,60 +2,36 @@ package api
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"strings"
 	"testing"
 )
 
-func testToEngine(c int) (int, error) {
-	if c > 3 {
-		return 0, errors.New("slot out of range")
-	}
-	return c + 10, nil
-}
-
-func TestSlotRequestMapping(t *testing.T) {
-	pick := func() int { return 7 }
-	cases := []struct{ name, in, want string }{
-		{"present", `{"id_slot":2,"prompt":"hi"}`, `{"id_slot":12,"prompt":"hi"}`},
-		{"absent", `{"prompt":"hi"}`, `{"id_slot":7,"prompt":"hi"}`},
-		{"minus one", `{"id_slot":-1,"prompt":"hi"}`, `{"id_slot":7,"prompt":"hi"}`},
-		{"null", `{"id_slot":null}`, `{"id_slot":7}`},
-	}
-	for _, c := range cases {
-		out, ch, err := mapRequestSlot([]byte(c.in), testToEngine, pick)
-		if err != nil || !ch || string(out) != c.want {
-			t.Errorf("%s: got %s %v %v", c.name, out, ch, err)
+func TestOneObjectFailsClosed(t *testing.T) {
+	deep := strings.Repeat(`{"a":`, maxJSONDepth+1) + `1` + strings.Repeat(`}`, maxJSONDepth+1)
+	for _, in := range []string{``, `  `, `nope`, `[1,2]`, `"x"`, `null`, `1`, `{"a":1} {"b":2}`, `{"a":1}x`,
+		"\xEF\xBB\xBF{\"id_slot\":0}", deep, `{"a":`} {
+		if obj, why := oneObject([]byte(in)); why == "" || obj != nil {
+			t.Errorf("%.40q: taken (%v)", in, obj)
 		}
 	}
-	for _, in := range []string{`{"id_slot":"1"}`, `{"id_slot":1.5}`, `{"id_slot":-2}`} {
-		_, _, err := mapRequestSlot([]byte(in), testToEngine, pick)
-		var se *SlotError
-		if !errors.As(err, &se) || se.Msg != "id_slot must be an integer" {
-			t.Errorf("%s: err %v", in, err)
-		}
-	}
-	if _, _, err := mapRequestSlot([]byte(`{"id_slot":9}`), testToEngine, pick); err == nil || err.Error() != "slot out of range" {
-		t.Errorf("out of range: %v", err)
-	}
-	for _, in := range []string{``, `nope`, `[1,2]`, `"x"`, `null`} {
-		out, ch, err := mapRequestSlot([]byte(in), testToEngine, pick)
-		if ch || err != nil || string(out) != in {
-			t.Errorf("non-object %q: %s %v %v", in, out, ch, err)
+	ok := strings.Repeat(`[`, maxJSONDepth-1) + strings.Repeat(`]`, maxJSONDepth-1)
+	for _, in := range []string{`{}`, ` {"id_slot":1} `, `{"s":"[[[[{{{{\"]]"}`, `{"x":` + ok + `}`} {
+		if _, why := oneObject([]byte(in)); why != "" {
+			t.Errorf("%.40q refused: %s", in, why)
 		}
 	}
 }
 
-func TestSlotRequestKeepsOtherValues(t *testing.T) {
-	in := `{"messages":[{"role":"user","content":"aé  b"}],"temperature":0.70,"id_slot":1,"big":12345678901234567890}`
-	out, _, err := mapRequestSlot([]byte(in), testToEngine, func() int { return 0 })
-	if err != nil {
-		t.Fatal(err)
+func TestSlotDigits(t *testing.T) {
+	for _, in := range []string{"", "1x", " 1", "+1", "-1", "1 ", "0x1", "１", "1234567"} {
+		if _, ok := slotDigits(in); ok {
+			t.Errorf("%q taken", in)
+		}
 	}
-	for _, frag := range []string{`"messages":[{"role":"user","content":"aé  b"}]`, `"temperature":0.70`, `"big":12345678901234567890`, `"id_slot":11`} {
-		if !strings.Contains(string(out), frag) {
-			t.Errorf("missing %s in %s", frag, out)
+	for in, want := range map[string]int{"0": 0, "7": 7, "012": 12} {
+		if n, ok := slotDigits(in); !ok || n != want {
+			t.Errorf("%q: %d %v", in, n, ok)
 		}
 	}
 }

@@ -139,6 +139,9 @@ var ownedFlagNames = []string{
 	"--image-min-tokens", "--image-max-tokens", "--mtmd-batch-max-tokens", "--video-fps",
 	"--video-timestamp-interval", "--draft", "--draft-n", "--draft-max", "--draft-min", "--draft-n-min",
 	"--draft-p-split", "--draft-p-min", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft",
+	// Flags that write a file, or read a cache file another run wrote: the lookup caches (-lcd is
+	// written as the server runs), and the long forms of the log and save paths above.
+	"-lcs", "-lcd", "--lookup-cache-static", "--lookup-cache-dynamic",
 }
 
 var ownedSet = func() map[string]bool {
@@ -152,13 +155,15 @@ var ownedSet = func() map[string]bool {
 // allowedPathFlags take a local file path but are fine for a local client to
 // pass: they read a file the client already has and cannot move the server.
 var allowedPathFlags = []string{"--grammar-file", "-jf", "--chat-template-file", "--lora", "--lora-scaled",
-	"--control-vector", "--control-vector-scaled", "-lcs", "-lcd", "--tts-lang"}
+	"--control-vector", "--control-vector-scaled", "--tts-lang"}
 
 // normFlag lower-cases long names (llama-server's --Foo is not a thing we want
-// to let slip past a check); single-dash names stay case-sensitive (-C is not -c).
+// to let slip past a check) and spells their underscores as dashes, as llama-server does before
+// it matches a "--" argument (common/arg.cpp: "--ctx_size" is "--ctx-size"); single-dash names
+// stay as they are (-C is not -c).
 func normFlag(name string) string {
 	if strings.HasPrefix(name, "--") {
-		return strings.ToLower(name)
+		return strings.ReplaceAll(strings.ToLower(name), "_", "-")
 	}
 	return name
 }

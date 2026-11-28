@@ -7,49 +7,9 @@ import (
 	"strconv"
 )
 
-// SlotError is a request whose "id_slot" is not usable; the caller answers 400 with Msg.
-type SlotError struct{ Msg string }
-
-func (e *SlotError) Error() string { return e.Msg }
-
 func slotInt(raw json.RawMessage) (int, bool) {
 	n, err := strconv.Atoi(string(bytes.TrimSpace(raw)))
 	return n, err == nil
-}
-
-// mapRequestSlot rewrites the top-level "id_slot" of a JSON object request body from the
-// client's numbering to the engine's. A missing, null or -1 id_slot gets pick(). A body that
-// is not a JSON object is returned unchanged.
-func mapRequestSlot(body []byte, toEngine func(client int) (int, error), pick func() int) (out []byte, changed bool, err error) {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(body, &obj) != nil || obj == nil {
-		return body, false, nil
-	}
-	set := func(n int) { obj["id_slot"] = json.RawMessage(strconv.Itoa(n)) }
-	raw, ok := obj["id_slot"]
-	switch {
-	case !ok || string(bytes.TrimSpace(raw)) == "null":
-		set(pick())
-	default:
-		n, isInt := slotInt(raw)
-		if !isInt || n < -1 {
-			return body, false, &SlotError{Msg: "id_slot must be an integer"}
-		}
-		if n == -1 {
-			set(pick())
-			break
-		}
-		e, err := toEngine(n)
-		if err != nil {
-			return body, false, err
-		}
-		set(e)
-	}
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return body, false, err
-	}
-	return b, true, nil
 }
 
 // mapSlotObject rewrites id_slot in one JSON object; false when nothing changed.

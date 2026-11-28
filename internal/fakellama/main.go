@@ -15,6 +15,7 @@
 //	FAKELLAMA_BYTES_PER_TOKEN  buffer bytes per ctx token for that message (default 52428)
 //	FAKELLAMA_VRAM_BASE_MIB / FAKELLAMA_VRAM_PER_TOKEN  fake VRAM = base + per_token * ctx
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
+//	FAKELLAMA_DIE_ON           a flag the server takes but exits on while starting
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
 //	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
@@ -324,6 +325,14 @@ func main() {
 		if err == nil {
 			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), strings.Join(args, " "))
 			f.Close()
+		}
+	}
+	// FAKELLAMA_DIE_ON: a flag this build takes but dies on while starting (a client's extra_args
+	// the model server does not start with)
+	if die := os.Getenv("FAKELLAMA_DIE_ON"); die != "" {
+		if _, ok := vals[die]; ok {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to start\n", die)
+			os.Exit(1)
 		}
 	}
 	fmt.Println("srv  llama_server: initializing ...")

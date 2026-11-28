@@ -258,7 +258,7 @@ type drain struct {
 	to  fit.Shape
 	why string
 	// rechoose: the drain is for the clients (run/clients.go): the shape is chosen afresh from
-	// the merged wants once the replies end, and no DrainMax cuts them (cancel nil, never late).
+	// the merged wants once the replies end, or DrainMax comes and cuts them.
 	rechoose bool
 	late     atomic.Bool
 	cancel   func() bool
@@ -277,24 +277,31 @@ func (s *Supervisor) startDrain(srv *server, to fit.Shape, why string) {
 }
 
 // startClientDrain holds new requests and waits for the replies in flight to end, then reshapes
-// for the clients (rechoose). There is no DrainMax: a client's reply is never cut for another.
+// for the clients (rechoose). Only a local caller's grow drains (run/mind.go); DrainMax bounds
+// it as it bounds a shrink: once it comes the replies still running are cut, each stream with its
+// terminal event, so one client's long reply cannot hold the engine for the others.
 func (s *Supervisor) startClientDrain(srv *server, why string) {
-	srv.drain = &drain{why: why, rechoose: true}
+	d := &drain{why: why, rechoose: true}
+	// named moment: DrainMax, the longest a client's grow waits for the replies in flight
+	d.cancel = host.Moment(s.cfg.DrainMax, func() {
+		d.late.Store(true)
+		s.wakeMind(func(c *causes) { c.drain = true })
+	})
+	srv.drain = d
 	s.logf("%s: finishing the replies in flight, then a new shape; new requests wait", why)
 	s.setPhase("resizing", "Making room for a client: finishing replies")
 }
 
 // rechoose stops the model and starts it again with the shape chosen from the clients' merged
 // wants: the contexts are kept across it (run/context.go), the door holds requests meanwhile.
-func (s *Supervisor) rechoose(ctx context.Context, srv *server, why string) {
+// late: DrainMax came with replies still running; they are cut by the stop.
+func (s *Supervisor) rechoose(ctx context.Context, srv *server, why string, late bool) {
 	s.setPhase("resizing", "Reshaping for the clients")
-	if s.inflightNow() != 0 { // a request slipped in before the phase: looked at again when idle
+	if !late && s.inflightNow() != 0 { // a request slipped in before the phase: looked at again when idle
 		s.setPhase("ready", "Ready")
 		return
 	}
-	s.clients.mu.Lock()
-	s.clients.reclient = 0
-	s.clients.mu.Unlock()
+	s.countRestartCauses()
 	s.logf("clients: %s: reshaping", why)
 	s.countRestart()
 	s.keepContexts(why, false)

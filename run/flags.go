@@ -15,12 +15,12 @@ import (
 	"github.com/CharlesMod/easyEngine/core/fit"
 )
 
-var helpCache sync.Map // bin path -> *Help (nil when the help could not be read)
+var helpCache sync.Map // bin path -> *Help (a help that could not be read is not kept: read again next time)
 
 var flagRe = regexp.MustCompile(`(?:^|[\s,\[|(])(--?[A-Za-z][A-Za-z0-9_-]*)`)
 
 // helpOf runs `llama-server --help` once per binary and parses it. nil means the
-// help could not be read (keep every flag).
+// help could not be read (keep every flag); that is not kept, so the next launch reads it again.
 func helpOf(bin string, env []string) *Help {
 	if v, ok := helpCache.Load(bin); ok {
 		h, _ := v.(*Help)
@@ -36,7 +36,9 @@ func helpOf(bin string, env []string) *Help {
 	if len(out) > 0 {
 		h = ParseHelp(string(out))
 	}
-	helpCache.Store(bin, h)
+	if h != nil {
+		helpCache.Store(bin, h)
+	}
 	return h
 }
 

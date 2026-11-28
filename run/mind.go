@@ -548,7 +548,7 @@ func (s *Supervisor) react() {
 			s.addError("replies still running after %s: making room now (%s)", s.cfg.DrainMax, dr.why)
 		}
 		if dr.rechoose {
-			s.rechoose(ctx, srv, dr.why)
+			s.rechoose(ctx, srv, dr.why, !idle)
 			return
 		}
 		s.shrink(ctx, srv, dr.to)
@@ -565,21 +565,22 @@ func (s *Supervisor) react() {
 		s.reload(ctx, srv, "KV type changed")
 		return
 	}
-	// 2b. the clients changed (run/clients.go): an attach the running mind cannot serve grows it
-	// once the replies in flight end (new requests wait at the door, nothing fails); a leave
-	// that gives someone something reshapes when idle
+	// 2b. the clients changed (run/clients.go): an attach the running mind cannot serve grows it;
+	// a local caller's grow drains (new requests wait at the door, the replies in flight end or
+	// DrainMax cuts them), a remote one's waits for the door's next empty moment; a leave that
+	// gives someone something reshapes when idle
 	s.clients.mu.Lock()
-	rc := s.clients.reclient
+	rc, local := s.clients.reclient, s.clients.reLocal
 	s.clients.mu.Unlock()
 	switch {
 	case rc == 2 && idle:
-		s.rechoose(ctx, srv, "a client needs room")
+		s.rechoose(ctx, srv, "a client needs room", false)
 		return
-	case rc == 2:
+	case rc == 2 && local:
 		s.startClientDrain(srv, "a client needs room")
 		return
 	case rc == 1 && idle:
-		s.rechoose(ctx, srv, "a client left")
+		s.rechoose(ctx, srv, "a client left", false)
 		return
 	}
 	// 3. make room for the game: the held reading of the room (the reserve is measured, never

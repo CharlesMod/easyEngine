@@ -147,15 +147,24 @@ func (s *Supervisor) startLocked() error {
 		return s.failStart(err, true)
 	}
 	shape, err := fit.Choose(lc.fp, room, w)
-	for err != nil && errors.Is(err, fit.ErrTooBig) {
-		// the clients' merged wants do not fit even at the floor: the latest client is left out
-		// (unserved, said) until the next start; the first ones keep what they had
-		if _, ok := s.dropLatest(); !ok {
-			break
+	for {
+		switch {
+		case err != nil && errors.Is(err, fit.ErrTooBig):
+			// the clients' merged wants do not fit even at the floor: one client is left out
+			// (unserved, said) until the next start: remote before local, later before earlier
+			if _, ok := s.dropLatest(); !ok {
+				goto chosen
+			}
+		case err == nil && s.floorShort(shape.CtxPerSlot):
+			// a remote client whose floor the shape does not reach is left out: its slots are not
+			// sized for nothing
+		default:
+			goto chosen
 		}
 		w = s.wantsFor(lc.key)
 		shape, err = fit.Choose(lc.fp, room, w)
 	}
+chosen:
 	if err != nil { // another app may be holding the card: look again slowly, never give up for good
 		return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
 	}
@@ -216,10 +225,13 @@ type launchResult struct {
 	oom      bool
 	failedMB int
 	err      error
+	exited   bool      // the server exited while starting (not out of memory)
+	opts     launchSet // the clients' options it launched with
 }
 
 // runShape loads a shape: one measured retry on a load OOM, then step down.
 func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) error {
+	bare := false // the one retry without the clients' extra_args was made
 	for attempt := 0; attempt < 8; attempt++ {
 		res := s.launch(ctx, lc, shape)
 		if res.ok {
@@ -227,6 +239,13 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if !res.oom && res.exited && !bare && s.startFailedWith(res.opts) {
+			// it exited while starting with a client's extra_args: once more at once without them
+			// (told not taken: the model server did not start with them)
+			bare = true
+			attempt--
+			continue
 		}
 		if !res.oom {
 			return s.failStart(res.err, true)
@@ -387,7 +406,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		case <-proc.Done():
 			tail := proc.Tail()
 			oom, mb := ParseOOM(tail)
-			return launchResult{oom: oom, failedMB: mb, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
+			return launchResult{oom: oom, failedMB: mb, exited: true, opts: opts, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-ask:
 			if !s.healthy(url) {
 				continue

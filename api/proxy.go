@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -47,12 +48,18 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	id := requestID(r)
 	w.Header().Set(RequestIDHeader, id)
-	att, who := strings.TrimSpace(r.Header.Get(ClientHeader)), identity(r)
+	att := strings.TrimSpace(r.Header.Get(ClientHeader))
 	r.Header.Del(ClientHeader) // the engine's word, not the model server's
 	if len(att) > 64 {
 		att = "-" // no attachment has such an id: answered as unknown
 	}
-	rt, door, done := a.S.EnterAs(id, att, who)
+	// the body is read whole before the door: a client that sends slowly holds no slot, no count
+	// in flight and no drain
+	if !a.readBody(w, r) {
+		return
+	}
+	q := run.DoorAsk{ReqID: id, Att: att, Identity: identity(r), Local: localCaller(r), Touch: touchOf(r)}
+	rt, door, done := a.S.EnterAs(q)
 	if door.Err != nil && !rt.Hold {
 		clientFail(w, door.Err)
 		return
@@ -73,7 +80,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var ok bool
-		if rt, door, done, ok = a.hold(r, id, att, who); !ok {
+		if rt, door, done, ok = a.hold(r, q); !ok {
 			return // the client went away while held
 		}
 		if door.Err != nil {
@@ -167,16 +174,22 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		if !a.applySampler(w, r, door.ID) {
 			return
 		}
-		if len(door.Slots) > 0 {
-			cs, es, ok := a.mapClientRequest(w, r, door.Slots)
+		if door.Slots != nil { // confined (run.ClientDoor): one slot of its range, no other
+			cs, es, release, ok := a.confine(w, r, door)
 			if !ok {
 				return
 			}
+			defer release()
 			if es >= 0 {
-				clientSlot, engineSlot = &cs, &es
-				defer a.S.Busy(es)()
+				engineSlot = &es
+				if cs >= 0 {
+					clientSlot = &cs
+				}
 			}
-			engineSlots = door.Slots
+			if door.Own {
+				engineSlots = door.Slots        // its numbers in the reply are mapped back
+				r.Header.Del("Accept-Encoding") // a compressed reply could not be mapped
+			}
 		}
 		modify := dropCORS
 		if engineSlots != nil {
@@ -198,6 +211,17 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 		forward(w, r, rp, a.fwd(false, id).with(sw).slots(engineSlots).ending(&sum))
 	}
+}
+
+// touchOf is what a proxied request does with slots, from the path table (paths.go).
+func touchOf(r *http.Request) run.Touch {
+	switch classify(r.Method, r.URL.Path) {
+	case pathFree:
+		return run.TouchNone
+	case pathSlot, pathSlotID:
+		return run.TouchSlot
+	}
+	return run.TouchUnconfinable
 }
 
 // slotFiles is true for llama-server's slot save and restore (POST /slots/{id}?action=save|restore).
@@ -228,7 +252,7 @@ var holdOn = []string{"phase", "model", "yield", "upgrade", "attachment", "wants
 // context) or the engine's end. The held request is counted (Supervisor.Hold: the door fact, the
 // resident app's linger), never in flight. It answers the route to forward by and the end of its
 // count in flight; ok is false when the client went away while held.
-func (a *API) hold(r *http.Request, id, att, who string) (rt run.Route, door run.ClientDoor, end func(*run.RequestEnd), ok bool) {
+func (a *API) hold(r *http.Request, q run.DoorAsk) (rt run.Route, door run.ClientDoor, end func(*run.RequestEnd), ok bool) {
 	hub := a.S.Hub()
 	wk, err := hub.Wake(holdOn...)
 	if err != nil { // a book without the names: answer as before the hold
@@ -238,7 +262,7 @@ func (a *API) hold(r *http.Request, id, att, who string) (rt run.Route, door run
 	release := a.S.Hold()
 	defer release()
 	for {
-		if rt, door, end = a.S.EnterAs(id, att, who); !rt.Hold {
+		if rt, door, end = a.S.EnterAs(q); !rt.Hold {
 			if end == nil {
 				end = func(*run.RequestEnd) {}
 			}
@@ -294,6 +318,13 @@ func dropCORS(resp *http.Response) error {
 func badGateway(w http.ResponseWriter, r *http.Request, err error) {
 	if r.Context().Err() != nil {
 		return // the client went away
+	}
+	var big replyTooLarge
+	if errors.As(err, &big) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "reply_too_large", "type": "bad_gateway", "message": big.Error()}})
+		return
 	}
 	unavailable(w, 502, "bad_gateway", fmt.Sprintf("upstream: %v", err))
 }

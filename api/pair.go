@@ -262,6 +262,14 @@ func (a *API) ForgetRevoked() {
 	if !ok || a.S == nil || a.S.Hub() == nil {
 		return
 	}
+	// a revoked token's attachments end at once: held streams end with {"end":"revoked"}, slots
+	// go vacant, the facts say them gone (only a paired token's id is asked about)
+	a.S.DetachRevoked(func(id string) bool {
+		if id == "loopback" || id == "unknown" || id == "engine" || strings.Contains(id, "@") {
+			return true
+		}
+		return v.Valid(id)
+	})
 	a.seen.Range(func(k, _ any) bool {
 		id := k.(string)
 		if !v.Valid(id) {

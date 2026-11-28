@@ -779,17 +779,31 @@ func TestNAboveOneNotOffered(t *testing.T) {
 	_, rs, _ := remoteSrv(t, s)
 	growRemote(t, e, s, rs, 1, "a", 2)
 	before := upstreamBytes(t, e)
-	for _, body := range []string{`{"n":2,"messages":[]}`, `{"n_cmpl":3,"messages":[]}`, `{"n":"2","messages":[]}`, `{"n":1.5,"messages":[]}`} {
+	// every value that is not the literal 1: the model server casts to int32 (-4294967294 and
+	// 4294967297 wrap to 2 and 1, -4294967292 to 4), so the token is judged, not a number
+	for _, v := range []string{`2`, `-4294967294`, `-4294967292`, `4294967297`, `1e0`, `1.0`, `1e400`, `"1"`, `true`, `[1]`, `1.5`, `0`, `-0`, `{}`} {
+		for _, k := range []string{"n", "n_cmpl"} {
+			body := `{"` + k + `":` + v + `,"messages":[]}`
+			c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
+			if c != 400 || codeOf(b) != "n_not_offered" {
+				t.Fatalf("%s: %d %s", body, c, b)
+			}
+		}
+	}
+	// a key given twice is refused whichever value comes last (two readers may keep different ones)
+	for _, body := range []string{`{"n":1,"n":2,"messages":[]}`, `{"n":2,"n":1,"messages":[]}`, `{"n_cmpl":1,"n_cmpl":-4294967294,"messages":[]}`, `{"n":1,"\u006e":2,"messages":[]}`, `{"id_slot":0,"id_slot":1,"messages":[]}`} {
 		c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
-		if c != 400 || codeOf(b) != "n_not_offered" {
+		if c != 400 || !strings.Contains(b, "twice") {
 			t.Fatalf("%s: %d %s", body, c, b)
 		}
 	}
 	if upstreamBytes(t, e) != before {
 		t.Fatal("a refused n reached the model server")
 	}
-	if c, b, _ := do(t, "POST", rs.URL+"/v1/completions", `{"n":1,"prompt":"x"}`, as(1)); c == 400 {
-		t.Fatalf("n 1: %d %s", c, b)
+	for _, body := range []string{`{"n":1,"messages":[]}`, `{"n_cmpl":null,"messages":[]}`, `{"n": 1 ,"messages":[]}`} {
+		if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1)); c != 200 {
+			t.Fatalf("%s: %d %s", body, c, b)
+		}
 	}
 }
 

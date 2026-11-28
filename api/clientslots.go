@@ -74,7 +74,50 @@ func oneObject(body []byte) (map[string]json.RawMessage, string) {
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		return nil, "the request body must be exactly one JSON object"
 	}
+	if k, dup := duplicateKey(body); dup {
+		// two readers may keep different ones of the two (the door one, the model server the
+		// other): refused, never guessed
+		return nil, fmt.Sprintf("the request body gives the key %q twice", k)
+	}
 	return obj, ""
+}
+
+// duplicateKey is a key the body's top-level object gives more than once (keys compared as
+// decoded, so "n" and "\u006e" are one key, as llama-server's parser reads them).
+func duplicateKey(body []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		k, _ := t.(string)
+		if seen[k] {
+			return k, true
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// oneCompletion: a confined body's n / n_cmpl is absent, null or exactly the literal 1. The model
+// server reads it as int32 by a plain cast (server-schema.cpp:621-634, nlohmann json.hpp:5203-5236):
+// -4294967294 becomes 2, 1.9 becomes 1, true becomes 1; so the raw token is judged, never a number
+// decoded from it.
+func oneCompletion(raw json.RawMessage) bool {
+	switch string(bytes.TrimSpace(raw)) {
+	case "1", "null":
+		return true
+	}
+	return false
 }
 
 // slotDigits is a /slots/{id} id when confined: ASCII digits only (llama-server reads " 1", "+1"
@@ -154,13 +197,10 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	// over them (server-schema.cpp:64-67, server-task.h:329 "child tasks cannot specify slot",
 	// server-context.cpp:3008-3016, :4726-4745): never in a confined request
 	for _, k := range []string{"n", "n_cmpl"} {
-		if raw, has := obj[k]; has {
-			var n float64
-			if json.Unmarshal(raw, &n) != nil || n > 1 {
-				clientFail(w, &run.ClientError{Status: 400, Code: "n_not_offered",
-					Msg: k + " above 1 runs completions on slots that are not this request's: ask for one completion per request"})
-				return 0, -1, nil, false
-			}
+		if raw, has := obj[k]; has && !oneCompletion(raw) {
+			clientFail(w, &run.ClientError{Status: 400, Code: "n_not_offered",
+				Msg: k + " must be absent, null or exactly 1 here: more runs completions on slots that are not this request's; ask for one completion per request"})
+			return 0, -1, nil, false
 		}
 	}
 	want := -1

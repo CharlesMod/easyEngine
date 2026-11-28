@@ -137,7 +137,7 @@ var ownedFlagNames = []string{
 	// model in a later version; a draft model is not sized): every projector, media and draft flag.
 	"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto", "--mmproj-offload", "--no-mmproj-offload",
 	"--image-min-tokens", "--image-max-tokens", "--mtmd-batch-max-tokens", "--video-fps",
-	"--video-timestamp-interval", "--draft", "--draft-n", "--draft-max", "--draft-min", "--draft-n-min",
+	"--video-timestamp-interval", "--image", "--audio", "--video", "--draft", "--draft-n", "--draft-max", "--draft-min", "--draft-n-min",
 	"--draft-p-split", "--draft-p-min", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft",
 	// Flags that write a file, or read a cache file another run wrote: the lookup caches (-lcd is
 	// written as the server runs), and the long forms of the log and save paths above.

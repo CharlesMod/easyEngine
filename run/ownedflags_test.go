@@ -185,3 +185,51 @@ func TestCheckExtraArgsCases(t *testing.T) {
 		}
 	}
 }
+
+// Every projector and media flag of the recorded help is the engine's: a client's extra_args never
+// carries one (flag_owned), and the parent environment's spellings of them never reach the child.
+func TestMediaFlagsAreOwned(t *testing.T) {
+	_, h := fixtureHelp(t)
+	flags := []string{"-mm", "--mmproj", "-mmu", "--mmproj-url", "--mmproj-auto", "--no-mmproj", "--no-mmproj-auto",
+		"--mmproj-offload", "--no-mmproj-offload", "-mmdev", "--mmproj-device", "--image-min-tokens",
+		"--image-max-tokens", "--mtmd-batch-max-tokens", "--video-fps", "--video-timestamp-interval",
+		"--video-ffmpeg-dir", "--media-path", "--media-allow-private-urls", "--vision-gemma-4b-default",
+		"--vision-gemma-12b-default", "--image", "--audio", "--video"}
+	for _, f := range flags {
+		if !h.Has(f) {
+			continue // not in this help (the server's help leaves --image/--audio/--video out): owned by name below
+		}
+		if _, err := CheckExtraArgs([]string{f}, h); err == nil || err.Code != "flag_owned" {
+			t.Errorf("%s with the help: %v", f, err)
+		}
+	}
+	for _, f := range flags { // and with no help at all, and as --flag=value
+		if _, err := CheckExtraArgs([]string{f + "=x"}, nil); err == nil || err.Code != "flag_owned" {
+			t.Errorf("%s without a help: %v", f, err)
+		}
+	}
+}
+
+func TestLlamaEnvDropsMediaVariables(t *testing.T) {
+	for _, k := range mediaEnv {
+		t.Setenv(k, "x")
+	}
+	t.Setenv("LLAMA_ARG_CTX_SIZE", "keep")
+	env := llamaEnv("/bin/llama-server", []string{"LLAMA_ARG_MMPROJ=engine"})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	for _, k := range mediaEnv {
+		if k == "LLAMA_ARG_MMPROJ" {
+			continue
+		}
+		if _, ok := got[k]; ok {
+			t.Errorf("%s reached the child", k)
+		}
+	}
+	if got["LLAMA_ARG_MMPROJ"] != "engine" || got["LLAMA_ARG_CTX_SIZE"] != "keep" {
+		t.Errorf("the engine's own extra or an unrelated variable was lost: %v", got["LLAMA_ARG_MMPROJ"])
+	}
+}

@@ -1717,6 +1717,37 @@ to 4 KiB) were 5192 MB against 5218 MB counted, and the cudart step's sampled pe
 its count; free space on that system disk moved by up to 300 MB either way during a run from
 other programs (remote-desktop traces, a WSL disk), which is what the headroom is for there.
 
+#### Media from remote callers
+
+A caller from another machine (`localCaller` false: a real non-local peer, or any forwarding
+header) may put no image, audio, video or file into a request. Every such POST body is read whole
+(the same bounded read as a slot body: 16 MiB, 8 at once) and scanned; a request with media is
+answered `400 images_not_offered` before the door, and nothing reaches llama-server. A local
+caller's body passes byte for byte. What is refused, and why:
+
+- Content parts and blocks whose `type` is `image_url`, `input_image`, `input_audio`, `input_video`,
+  `video_url`, `image`, `audio`, `video`, `file`, `input_file`, `media_marker` or `document`
+  (chat, Anthropic `/v1/messages` including images inside a `tool_result`, Responses): llama-server
+  fetches an `https` URL itself (SSRF reach, 10 MB) and decodes `data:` URIs.
+- Keys `image_url`, `input_audio`, `input_video`, `video_url`, `multimodal_data`, `image_data`,
+  `image`, `images`, `audio`, `video`, `files` with any non-null value (native `/completion` takes
+  raw base64 under `multimodal_data`; `/v1/embeddings`, `/rerank` and `/v1/systemone` take the rest).
+- Anywhere, any string holding `<__media` (llama-server's media marker, fixed or per-process
+  random) or starting with `data:image/`, `data:audio/` or `data:video/`.
+- `multipart/form-data` bodies, `/v1/audio/transcriptions`, `/audio/transcriptions`, and
+  `/v1/realtime`, `/realtime` (any method), and bodies with a `Content-Encoding` (the HTTP layer
+  of llama-server might inflate what the engine could not read).
+
+Not looked into: the subtrees under `tools`, `functions`, `response_format`, `json_schema` and
+`grammar` (definitions the template renders, where a schema may name a property `image`), apart from
+the marker and data-URI strings above. A body that is not JSON, or nests deeper than 64, is left to
+the existing handling (llama-server refuses it), except that a marker in its bytes still refuses.
+The check is on the request's shape, not on a header the caller sets. The projector and media
+flags (`--mmproj*`, `--image*`, `--video*`, `--audio`, `--media-*`, the vision presets) are owned
+(`flag_owned`), and the parent environment's `LLAMA_ARG_MMPROJ*`, `MTMD_BACKEND_DEVICE`,
+`LLAMA_ARG_IMAGE_*`, `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS`, `LLAMA_ARG_MEDIA_ALLOW_PRIVATE_URLS` and
+`LLAMA_MEDIA_MARKER` are stripped from the model server's environment.
+
 ## 8. Game profile
 
 Written by the game's mod, passed with `--profile`. Game-agnostic fields only:

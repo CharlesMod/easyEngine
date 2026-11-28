@@ -72,6 +72,16 @@ type Info struct {
 	// StateBytesPerSlot is the recurrent state (f32) of every linear-attention/SSM layer for one
 	// slot. It does not grow with context.
 	StateBytesPerSlot int64
+	// BlockBytes is the bytes of the tensors of each repeating block (named blk.N.*), len ==
+	// NLayer: what moving block N off the card moves (llama.cpp -ngl moves whole blocks). A tensor
+	// that llama.cpp places with a block but names without one (Gemma 4's per_layer_model_proj, kept
+	// with block 0) is not counted in any. nil where NLayer is 0. Since core v0.1.5 (untagged).
+	BlockBytes []int64
+	// OutputBytes is the output head that goes to the card with any block (llama.cpp's output
+	// layer): output.weight and output_norm.weight, or where the file has no output.weight
+	// (OutputTied: the head is token_embd.weight read a second time) token_embd.weight and the norm.
+	OutputBytes int64
+	OutputTied  bool
 	// Estimated is set when the header lacked what the KV cost needs (unknown architecture):
 	// the numbers are a conservative guess (every layer full multi-head attention), and Note says
 	// what was assumed.
@@ -860,7 +870,23 @@ func (f *File) Info() (Info, error) {
 	}
 
 	exLayers := map[int]bool{}
+	if in.NLayer > 0 {
+		in.BlockBytes = make([]int64, in.NLayer)
+	}
+	var outW, outNorm, tokEmbd int64
+	hasOut := false
 	for _, t := range f.Tensors {
+		switch t.Name {
+		case "output.weight":
+			outW, hasOut = t.Bytes, true
+		case "output_norm.weight":
+			outNorm = t.Bytes
+		case "token_embd.weight":
+			tokEmbd = t.Bytes
+		}
+		if i, ok := blockIndex(t.Name); ok && i < in.NLayer && t.Bytes >= 0 && t.Bytes <= math.MaxInt64-in.BlockBytes[i] {
+			in.BlockBytes[i] += t.Bytes
+		}
 		if t.Bytes < 0 || t.Bytes > math.MaxInt64-in.ExpertBytes-in.DenseBytes {
 			return in, fmt.Errorf("%w: the tensor sizes pass the int64 range at %q", ErrMalformed, t.Name)
 		}
@@ -882,6 +908,12 @@ func (f *File) Info() (Info, error) {
 		}
 	}
 	in.ExpertLayers = len(exLayers)
+	in.OutputTied = !hasOut
+	if hasOut {
+		in.OutputBytes = outW + outNorm
+	} else {
+		in.OutputBytes = tokEmbd + outNorm
+	}
 	in.Note = strings.Join(notes, "; ")
 	return in, nil
 }

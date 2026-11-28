@@ -137,6 +137,10 @@ func (a *API) gate(next http.Handler) http.Handler {
 				unauthorized(w, CodeTokenRequired, "bearer token required (easy-engine token prints it)")
 				return
 			}
+			if !pairedMay(id, r) {
+				failCode(w, http.StatusForbidden, CodeNotAllowed, scopeRefusal)
+				return
+			}
 			client, used = id, true
 			a.sawClient(id)
 		case a.Open:

@@ -147,7 +147,7 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 			if a.stopping.Load() {
 				st.Phase = "stopping"
 			}
-			writeJSON(w, 200, st)
+			writeJSON(w, 200, statusFor(r, st))
 		}
 	case "hardware":
 		if need("GET") {

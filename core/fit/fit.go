@@ -35,6 +35,11 @@ var ErrSplitMoE = errors.New("fit: a mixture-of-experts model is never split by 
 // (gguf.Info.BlockBytes, one per layer, not all of them empty). Since the dense split (in no core tag yet).
 var ErrNoBlocks = errors.New("fit: the header gives no bytes per block")
 
+// ErrSplitRecurrent means WithSplit was given a header with recurrent (linear-attention or SSM)
+// layers: their fixed per-slot state would have to be placed by layer as llama.cpp places it, which
+// the split does not do yet, so such a model is never split. Since the dense split (in no core tag yet).
+var ErrSplitRecurrent = errors.New("fit: a model with recurrent layers is never split by whole layers")
+
 // ErrNoSplit means a shape with layers on the CPU (Shape.CPULayers) was priced from a footprint
 // that does not allow it (no Split) or that has fewer layers than the shape moves. It is never
 // priced as a shape on the card. Since the dense split (in no core tag yet).
@@ -664,6 +669,9 @@ func WithSplit(fp Footprint, info gguf.Info) (Footprint, error) {
 	if fp.MoE || info.NExpert > 0 || info.ExpertBytes > 0 {
 		return Footprint{}, ErrSplitMoE
 	}
+	if info.StateBytesPerSlot > 0 || slices.ContainsFunc(info.Layers, func(l gguf.Layer) bool { return l.Recurrent }) {
+		return Footprint{}, ErrSplitRecurrent // its per-slot state is not placed by layer here
+	}
 	if info.NLayer <= 0 || len(info.BlockBytes) != info.NLayer || !slices.ContainsFunc(info.BlockBytes, func(b int64) bool { return b > 0 }) {
 		return Footprint{}, ErrNoBlocks // no figures, or none naming a byte: never blocks taken as weightless
 	}
@@ -1201,14 +1209,28 @@ func (fp fig) cpuWeights(c int) float64 {
 	return v
 }
 
+// cpuFullShare and cpuSWAShare are the first c layers' parts of the full-attention and
+// sliding-window cache.
+func (fp fig) cpuFullShare(c int) float64 {
+	var v float64
+	for i := 0; i < c && i < fp.layers(); i++ {
+		v += fp.Split.FullShare[i]
+	}
+	return v
+}
+
+func (fp fig) cpuSWAShare(c int) float64 {
+	var v float64
+	for i := 0; i < c && i < fp.layers(); i++ {
+		v += fp.Split.SWAShare[i]
+	}
+	return v
+}
+
 // cpuCache is the cache the first c layers keep on the CPU at a layout: their share of the
 // full-attention and sliding-window cache. The compute scratch stays on the card.
 func (fp fig) cpuCache(slots, ctxPerSlot, c int) float64 {
-	var full, swa float64
-	for i := 0; i < c && i < fp.layers(); i++ {
-		full += fp.Split.FullShare[i]
-		swa += fp.Split.SWAShare[i]
-	}
+	full, swa := fp.cpuFullShare(c), fp.cpuSWAShare(c)
 	kv := fp.PerTokenMiB * full * float64(slots*ctxPerSlot)
 	if fp.SWAPerTokenMiB > 0 {
 		w := ctxPerSlot
@@ -1556,6 +1578,9 @@ func (fp fig) estTPS(n int, scale float64) float64 {
 
 func choose(fp fig, room roomFig, w Wants, budget, ram float64, enforceSpeed bool) (Shape, error) {
 	if room.noBlock() {
+		if fp.splitOn(room, w) { // a split footprint may still run on the processor alone: it needs no block
+			return fp.processorAlone(w, ram)
+		}
 		return Shape{}, ErrTooBig // no free block on the card: no layout on it holds
 	}
 	if !room.NoGPU {
@@ -1672,15 +1697,23 @@ func (fp fig) chooseSplit(room roomFig, w Wants, budget, ram float64) (Shape, er
 			}
 		}
 	}
+	if s, err := fp.processorAlone(w, ram); err == nil {
+		return s, nil
+	}
+	if card(w.MinSlots, w.CtxFloor, n) {
+		return Shape{}, &SplitShortError{NeedMiB: ceilMiB(fp.splitRAM(w.MinSlots, w.CtxFloor, n)),
+			FreeMiB: int(math.Floor(math.Max(host, 0))), Basis: Predicted}
+	}
+	return Shape{}, ErrTooBig
+}
+
+// processorAlone is the processor-alone shape at the most slots and ctx ram holds, or ErrTooBig.
+func (fp fig) processorAlone(w Wants, ram float64) (Shape, error) {
 	for slots := w.Slots; slots >= w.MinSlots; slots-- {
 		ceil := fp.ctxCeiling(w, slots)
 		if ctx, ok := maxCtx(w.CtxFloor, ceil, func(c int) bool { return fp.allHost(slots, c) <= ram }); ok {
 			return fp.shape(w, slots, ctx, 0, true), nil
 		}
-	}
-	if card(w.MinSlots, w.CtxFloor, n) {
-		return Shape{}, &SplitShortError{NeedMiB: ceilMiB(fp.splitRAM(w.MinSlots, w.CtxFloor, n)),
-			FreeMiB: int(math.Floor(math.Max(host, 0))), Basis: Predicted}
 	}
 	return Shape{}, ErrTooBig
 }
@@ -1729,6 +1762,9 @@ func MissRetry(fp Footprint, cur Shape, failedBufMiB int, room Room, w Wants) (S
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	byBuf := cur.CtxPerSlot
 	cache, compute := f.perToken(cur.CPUOnly)
+	if cur.CPULayers > 0 && !cur.CPUOnly {
+		cache *= 1 - f.cpuFullShare(cur.CPULayers) // a split's failed buffer is the card's: its share of each token
+	}
 	if perTok := cache + compute; failedBufMiB > 0 && perTok > 0 && cur.Slots > 0 {
 		drop := int(math.Ceil((float64(failedBufMiB) + f.ScratchMiB) / (perTok * float64(cur.Slots))))
 		byBuf = cur.CtxPerSlot - drop
@@ -1785,7 +1821,15 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 	}
 	f, w := st.fp, st.w // f is priced at the type cur runs at, st.kv
 	w.KVType = st.kv    // every step keeps that type until the move to the next type of the list
+	split := f.splitOn(st.room, w)
 	if !cur.CPUOnly && st.room.noBlock() {
+		if split { // the processor alone needs no block on the card: no more slots or ctx than cur
+			ws := w
+			ws.Slots = min(w.Slots, cur.Slots)
+			ws.MinSlots = min(w.MinSlots, ws.Slots)
+			ws.CtxMax = min(w.CtxMax, max(cur.CtxPerSlot, w.CtxFloor))
+			return f.processorAlone(ws, st.room.ram)
+		}
 		return Shape{}, ErrTooBig // no free block on the card: no smaller layout on it holds either
 	}
 	if !cur.CPUOnly {
@@ -1793,13 +1837,17 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 			return Shape{}, err // no start on the card fits the machine's free memory, smaller or not
 		}
 	}
+	if cur.CPULayers > 0 && !cur.CPUOnly && !split {
+		// A split where the room or the wants no longer allow one (Whole, a unified pool, no card):
+		// cur whole would need more card than cur, so walk the whole layout down from cur's slots and
+		// ctx to the first step the room holds; never a shape it does not hold.
+		return f.wholeWithin(fp, cur, room, w, st.room)
+	}
 	if w.Whole {
 		cur.NCpuMoe = 0
-		cur.CPULayers = 0
 	}
-	split := f.splitOn(st.room, w)
-	if cur.CPUOnly || !split {
-		cur.CPULayers = 0 // only a split shape keeps layers on the CPU (settle refused any it cannot price)
+	if cur.CPUOnly {
+		cur.CPULayers = 0 // a caller's processor-alone shape moves no layer: it lays none on the card
 	}
 	if cur.CtxPerSlot > w.CtxFloor {
 		step := cur.CtxPerSlot / 16
@@ -1873,6 +1921,47 @@ func StepDown(fp Footprint, cur Shape, room Room, w Wants) (Shape, error) {
 		}
 	}
 	return startSplit()
+}
+
+// wholeWithin is StepDown for a split cur in a room or under wants that allow none: the walk of
+// cur's slots and ctx with every layer on the card (on the processor alone with no card), down to
+// the first shape the room holds, or the walk's refusal. Each step is priced at its own type.
+func (f fig) wholeWithin(fp Footprint, cur Shape, room Room, w Wants, rm roomFig) (Shape, error) {
+	s := f.shape(w, cur.Slots, cur.CtxPerSlot, 0, rm.NoGPU)
+	for i := 0; ; i++ {
+		st, err := settle(&fp, &s, &room, nil)
+		if err != nil {
+			return Shape{}, err
+		}
+		if st.fp.holds(st.room, s) {
+			return s, nil
+		}
+		if i > 1<<16 {
+			return Shape{}, ErrTooBig // the walk is bounded; this is never reached
+		}
+		if s, err = StepDown(fp, s, room, w); err != nil {
+			return Shape{}, err
+		}
+	}
+}
+
+// holds reports whether room holds shape s of fp (priced at s's type): the processor alone in
+// host RAM; on the card its need within the budget, its largest allocation within the block and
+// its start within the machine's free memory where held, and a split's layers within host RAM.
+func (fp fig) holds(room roomFig, s Shape) bool {
+	if s.CPUOnly {
+		return fp.allHost(s.Slots, s.CtxPerSlot) <= room.ram
+	}
+	if room.noBlock() || fp.need(s) > room.budget || !fp.hostOK(room, s.NCpuMoe) {
+		return false
+	}
+	if s.CPULayers > 0 {
+		if fp.splitRAM(s.Slots, s.CtxPerSlot, s.CPULayers) > fp.splitHostRoom(room, room.ram) {
+			return false
+		}
+		return room.LargestBlock == 0 || fp.splitLargest(s.Slots, s.CtxPerSlot, s.CPULayers) <= float64(room.LargestBlock)
+	}
+	return room.LargestBlock == 0 || fp.largest(s.Slots, s.CtxPerSlot, s.NCpuMoe) <= float64(room.LargestBlock)
 }
 
 // splitBelow is the walk's next split from cur (at its slots and ctx): the fewest layers on the CPU
@@ -2224,7 +2313,9 @@ func (b *Book) calibrate(key string, seed Footprint, s Shape, measuredMiB, hostM
 }
 
 // LowerCap records an out-of-memory of shape failed in room with engine build build: the next
-// start must use less total ctx than ctxTotal. Where the cap moves it carries what lifts it
+// start must use less total ctx than ctxTotal. A processor-alone shape of a footprint with Split
+// in a room with a card records nothing: its miss was of host memory, and the cap would bound
+// every plan on the card (the walk down answers it instead). Where the cap moves it carries what lifts it
 // (CapLift): the room, the miss (the memory fp predicts failed needs above the same slots at
 // ctxTotal) and the build. Where the miss cannot be told (no slots, a type fp cannot be priced
 // at, or nothing between them, as when the walk kept the ctx and moved experts) the miss is 0 and
@@ -2237,6 +2328,9 @@ func (b *Book) LowerCap(key string, fp Footprint, failed Shape, ctxTotal int, ro
 		return err
 	}
 	rm, f := st.room, st.fp
+	if f.Split != nil && failed.CPUOnly && !rm.NoGPU {
+		return nil // a split footprint's processor alone ran out of host memory: no cap on the card's plans
+	}
 	if b.Entries == nil {
 		b.Entries = map[string]Calib{}
 	}

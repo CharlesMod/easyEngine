@@ -84,6 +84,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			clientFail(w, mediaRefused(why))
 			return
 		}
+		if textOnlyChatPath(r.URL.Path) {
+			if why := textOnlyChat(bodyOf(r)); why != "" {
+				clientFail(w, mediaRefused(why))
+				return
+			}
+		}
 	}
 	q := run.DoorAsk{ReqID: id, Att: att, Identity: identity(r), Local: local, Touch: touchOf(r)}
 	rt, door, done := a.S.EnterAs(q)

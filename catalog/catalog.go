@@ -35,12 +35,30 @@ type Asset struct {
 	// (ext4 and NTFS allocate in 4 KiB clusters, so this is an upper bound there). 0 = unknown.
 	UnpackedSize int64    `json:"unpacked_size,omitempty"`
 	Extra        []string `json:"extra,omitempty"` // ids of further assets unpacked into the same dir (cudart)
+
+	// Which build of llama.cpp a llama asset belongs to, filled from its rung by Backends, Asset
+	// and LlamaAsset (never written to the file): the rung's full tag (b12651-easy1, not 12651),
+	// whether it is a patched build, the rung's place (0 = the pin) and, for a build that is
+	// not patched, why this machine gets it.
+	Tag     string `json:"-"`
+	Patched bool   `json:"-"`
+	Rung    int    `json:"-"`
+	RungWhy string `json:"-"`
 }
 
+// LlamaCpp is one rung of the llama.cpp ladder: one release's builds. The catalog names the
+// rungs in order (Catalog.Llama): the patched pin first (a release of the fork, tag
+// b<N>-easy<M>), then the stock upstream release, whose builds are offered only for a platform
+// and accelerator the patched release has no build for (docs/ENGINE.md, "Which llama.cpp build").
 type LlamaCpp struct {
-	Tag    string  `json:"tag"`
-	Assets []Asset `json:"assets"`
+	Tag     string  `json:"tag"`
+	Repo    string  `json:"repo,omitempty"`    // owner/name of the GitHub repo the release is in
+	Patched bool    `json:"patched,omitempty"` // a patched build (the fork's), not stock upstream
+	Assets  []Asset `json:"assets"`
 }
+
+// PatchedTag reports whether a tag names a patched build of the fork (b12651-easy1).
+func PatchedTag(tag string) bool { return strings.Contains(tag, "-easy") }
 
 type Model struct {
 	ID      string `json:"id"`
@@ -114,8 +132,13 @@ type Footprint struct {
 }
 
 type Catalog struct {
-	Version  int      `json:"version"`
-	LlamaCpp LlamaCpp `json:"llamacpp"`
+	Version int `json:"version"`
+	// Llama is the ordered ladder of llama.cpp releases (version 10 on): the patched pin first,
+	// stock upstream after it. Rungs() reads it.
+	Llama []LlamaCpp `json:"llama,omitempty"`
+	// LlamaCpp is the one release a catalog before version 10 names; still read (Rungs treats
+	// it as the only rung), never written by gencatalog any more.
+	LlamaCpp LlamaCpp `json:"llamacpp,omitzero"`
 	UV       []Asset  `json:"uv"`
 	Models   []Model  `json:"models"`
 	// AgentRuntime is the measured disk a fresh agent setup takes (managed Python, the uv
@@ -212,8 +235,50 @@ func checkDownload(kind, id, url, sha string, size int64) error {
 	return nil
 }
 
+// Rungs returns the llama.cpp ladder, pin first. An older catalog's one release is the only rung;
+// its Patched is read from its tag.
+func (c *Catalog) Rungs() []LlamaCpp {
+	if len(c.Llama) > 0 {
+		return c.Llama
+	}
+	if c.LlamaCpp.Tag == "" && len(c.LlamaCpp.Assets) == 0 {
+		return nil
+	}
+	l := c.LlamaCpp
+	l.Patched = l.Patched || PatchedTag(l.Tag)
+	return []LlamaCpp{l}
+}
+
 func (c *Catalog) validate() error {
-	assets := append(append([]Asset{}, c.LlamaCpp.Assets...), c.UV...)
+	if len(c.Llama) > 0 && (c.LlamaCpp.Tag != "" || len(c.LlamaCpp.Assets) > 0) {
+		return fmt.Errorf("both llama (the ladder) and llamacpp (one release) are set")
+	}
+	assets := append([]Asset{}, c.UV...)
+	tags := map[string]bool{}
+	for _, r := range c.Rungs() {
+		if err := checkName("llama.cpp tag", r.Tag); err != nil {
+			return err
+		}
+		if tags[r.Tag] {
+			return fmt.Errorf("llama.cpp tag %q is named twice", r.Tag)
+		}
+		tags[r.Tag] = true
+		ids := map[string]bool{}
+		for _, a := range r.Assets {
+			if ids[a.ID] {
+				return fmt.Errorf("llama.cpp %s names asset %q twice", r.Tag, a.ID)
+			}
+			ids[a.ID] = true
+		}
+		for _, a := range r.Assets {
+			for _, x := range a.Extra {
+				if !ids[x] {
+					return fmt.Errorf("llama.cpp %s: asset %q needs %q, which that release does not name", r.Tag, a.ID, x)
+				}
+			}
+		}
+		assets = append(assets, r.Assets...)
+	}
 	for _, a := range assets {
 		if err := checkName("asset id", a.ID); err != nil {
 			return err
@@ -281,10 +346,12 @@ func (c *Catalog) Model(id string) (Model, bool) {
 	return Model{}, false
 }
 
-// Asset finds a llama.cpp or uv asset by id.
+// Asset finds a llama.cpp or uv asset by id. A llama.cpp id is resolved as Backends resolves
+// it: from the first rung that has a build of that platform and accelerator.
 func (c *Catalog) Asset(id string) (Asset, bool) {
-	for _, a := range c.LlamaCpp.Assets {
-		if a.ID == id {
+	for _, a := range c.llamaAll() {
+		if a.ID == id && c.offered(a) {
+			a.RungWhy = c.rungWhy(a)
 			return a, true
 		}
 	}
@@ -308,13 +375,49 @@ func (c *Catalog) UVFor(goos, goarch string) (Asset, bool) {
 
 var blackwell = regexp.MustCompile(`(?i)RTX\s*(PRO\s*)?(50\d\d|[4-9]\d\d\d\s*Blackwell)|\bB[1-9]\d{2}\b|\bGB\d{3}`)
 
+// preTuring names NVIDIA cards older than Turing (Maxwell, Pascal, Volta): CUDA 13 no longer
+// builds for them, so a CUDA 13 build is never offered to a machine whose cards are all such.
+//
+// The names, from NVIDIA's own lists: Volta (TITAN V, Quadro GV100, Tesla V100, V100S), Pascal
+// (GeForce GTX 10xx, GT 1030, MX 1xx/2xx/3xx, TITAN X/Xp, Quadro P and GP100, Tesla P4/P6/P40/P100),
+// Maxwell (GTX 9xx and 750, Quadro M, Tesla M, the Maxwell TITAN X) and Kepler (GTX 6xx/7xx,
+// Quadro K, Tesla K). GTX 16xx, the RTX cards, Quadro RTX, TITAN RTX and Tesla T4 are Turing or
+// later and are not matched.
+var preTuring = regexp.MustCompile(`(?i)\bGTX\s*(6\d\d|7\d\d|9\d\d|10\d\d)\b|\bGT\s*10[34]0\b|\bMX\s*[1-3]\d0\b|\bTITAN\s*(X|Xp|V|Black|Z)\b|\bQuadro\s*(GV100|GP100|[KMP]\d)|\bTesla\s*([KMP]\d|V100)|\bV100S?\b|\bP100\b|\bP(4|6|40)\b`)
+
+// Driver floors (NVIDIA's CUDA compatibility table): a CUDA 13 build needs driver 580 or later,
+// a CUDA 12 build 525 or later (minor-version compatibility). An unknown driver (0) passes.
+const cuda13Driver, cuda12Driver = 580, 525
+
+// driverMajor is the major number of an NVIDIA driver version ("580.95.05", "581.57"), 0 when
+// unknown.
+func driverMajor(v string) int {
+	n := 0
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			break
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
 // Backends returns the llama.cpp builds to try on hw, best first: NVIDIA gets cuda, AMD and
 // Intel get vulkan, Apple Silicon gets metal, and everything falls back through vulkan (when a
-// GPU exists) to cpu.
+// GPU exists) to cpu. Each build comes from the first rung of the ladder that has a build for
+// that platform and accelerator (the patched pin; stock only where the pin has none), and the
+// list never holds two rungs' builds of one platform and accelerator.
+//
+// Among CUDA builds: the CUDA 13 build (id prefix "cuda13") comes first for Blackwell and the
+// CUDA 12 one for every other card; a CUDA 13 build is left out when every NVIDIA card is
+// older than Turing or the driver is older than 580, a CUDA 12 build when the driver is older
+// than 525. On a mixed machine an NVIDIA card gets CUDA whatever else sits beside it (the
+// device pin, plan.PinDevice, holds the server to the planned card).
 func (c *Catalog) Backends(hw probe.Hardware) []Asset {
 	var cand []Asset
-	for _, a := range c.LlamaCpp.Assets {
-		if a.OS == hw.OS && a.Arch == hw.Arch && a.Accel != "cudart" {
+	for _, a := range c.llamaAll() {
+		if a.OS == hw.OS && a.Arch == hw.Arch && a.Accel != "cudart" && c.offered(a) {
+			a.RungWhy = c.rungWhy(a)
 			cand = append(cand, a)
 		}
 	}
@@ -328,7 +431,8 @@ func (c *Catalog) Backends(hw probe.Hardware) []Asset {
 		return out
 	}
 	var nv, amdIntel, apple, anyGPU bool
-	blackwellGPU := false
+	blackwellGPU, modernNV := false, false
+	driver := 0
 	for _, g := range hw.GPUs {
 		anyGPU = true
 		switch g.Vendor {
@@ -336,6 +440,12 @@ func (c *Catalog) Backends(hw probe.Hardware) []Asset {
 			nv = true
 			if blackwell.MatchString(g.Name) {
 				blackwellGPU = true
+			}
+			if !preTuring.MatchString(g.Name) {
+				modernNV = true
+			}
+			if d := driverMajor(g.Driver); d > 0 && (driver == 0 || d < driver) {
+				driver = d
 			}
 		case "amd", "intel", "other":
 			amdIntel = true
@@ -346,13 +456,13 @@ func (c *Catalog) Backends(hw probe.Hardware) []Asset {
 	var order []Asset
 	if nv {
 		cu := pick("cuda")
-		// The newest toolkit (id prefix "cuda13") first for Blackwell; older cards stay on the
-		// older toolkit, which still knows them.
 		var newer, older []Asset
 		for _, a := range cu {
 			if strings.HasPrefix(a.ID, "cuda13") {
-				newer = append(newer, a)
-			} else {
+				if modernNV && (driver == 0 || driver >= cuda13Driver) {
+					newer = append(newer, a)
+				}
+			} else if driver == 0 || driver >= cuda12Driver {
 				older = append(older, a)
 			}
 		}
@@ -374,4 +484,54 @@ func (c *Catalog) Backends(hw probe.Hardware) []Asset {
 	}
 	order = append(order, pick("cpu")...)
 	return order
+}
+
+// llamaAll is every llama.cpp asset of every rung, in ladder order, each marked with its rung.
+func (c *Catalog) llamaAll() []Asset {
+	var out []Asset
+	for i, r := range c.Rungs() {
+		for _, a := range r.Assets {
+			a.Tag, a.Patched, a.Rung = r.Tag, r.Patched, i
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// offered reports whether a's rung is the one a machine of a's platform and accelerator gets:
+// the first rung with a build for that platform and accelerator. A later (stock) rung never
+// stands in for an earlier one that has such a build, whatever happens to that build at runtime.
+func (c *Catalog) offered(a Asset) bool {
+	for _, b := range c.llamaAll() {
+		if b.Rung >= a.Rung {
+			break
+		}
+		if b.OS == a.OS && b.Arch == a.Arch && b.Accel == a.Accel {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Catalog) rungWhy(a Asset) string {
+	switch {
+	case a.Patched:
+		return ""
+	case a.Rung == 0:
+		return "the catalog names no patched build"
+	default:
+		return fmt.Sprintf("no patched build for %s/%s (%s)", a.OS, a.Arch, a.Accel)
+	}
+}
+
+// LlamaAsset finds asset id in the rung tagged tag: a build's extras (cudart) come from the
+// build's own release, and an installed build is looked up by the tag it was installed from.
+func (c *Catalog) LlamaAsset(tag, id string) (Asset, bool) {
+	for _, a := range c.llamaAll() {
+		if a.Tag == tag && a.ID == id {
+			a.RungWhy = c.rungWhy(a)
+			return a, true
+		}
+	}
+	return Asset{}, false
 }

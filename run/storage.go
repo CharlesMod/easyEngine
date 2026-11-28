@@ -253,6 +253,7 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 // The user's own GGUF file is only forgotten here: its path lies outside the data dir and is never deleted.
 func (s *Supervisor) forgetDownloadsLocked() {
 	s.st.Model, s.st.Target, s.st.StarterOwned, s.st.Backend, s.st.Previous = "", "", "", "", ""
+	s.st.Build, s.st.NextBuild, s.move = "", "", nil
 	s.st.Custom, s.st.CustomPrev = nil, ""
 	s.st.Book.Entries = nil
 	s.st.defaults()
@@ -266,6 +267,7 @@ func (s *Supervisor) RemoveDownloads() error {
 		return ErrBusy
 	}
 	s.removing = true
+	s.removeGen++ // a move under way stages nothing it fetched before this (build.go)
 	s.mu.Unlock()
 	s.wg.Add(1)
 	go func() {
@@ -286,12 +288,12 @@ func (s *Supervisor) runRemoveDownloads() {
 	// until the "job" and "upgrade" facts say neither is left.
 	s.Cancel()
 	for {
-		w, err := s.hub.Wake("job", "upgrade") // before looking, so an end said in between is heard
+		w, err := s.hub.Wake("job", "upgrade", "build") // before looking, so an end said in between is heard
 		if err != nil {
 			return
 		}
 		s.mu.Lock()
-		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState())
+		free := !s.jobRunning && !(s.upg != nil && s.upg.activeState()) && s.moveCancel == nil
 		if free {
 			s.jobRunning = true
 			s.refreshLocked()
@@ -354,12 +356,11 @@ func (s *Supervisor) runRemoveDownloads() {
 // emptyDir deletes the contents of dir (a directory directly under the data dir), never following
 // a symlink or junction, and returns the bytes freed and the paths that remain.
 func (s *Supervisor) emptyDir(dir string) (freed int64, left []string) {
-	fi, err := os.Lstat(dir)
-	if err != nil {
+	if _, err := os.Lstat(dir); err != nil {
 		os.MkdirAll(dir, 0o755)
 		return 0, nil
 	}
-	if !fi.IsDir() { // a link or file where the directory should be: leave it, it may point out
+	if !realDir(dir) { // a link or file where the directory should be: leave it, it may point out
 		return 0, []string{filepath.Base(dir)}
 	}
 	ents, _ := os.ReadDir(dir)

@@ -49,7 +49,7 @@ with code 2 before writing anything.
 <data>/
   settings.json         the keeper's file: mode, external endpoint, linger, cache type, sampler policy, listener, yield options (below)
   state.json            what the engine itself learns: model id, backend id, pending target (first-run upgrade), custom file, calibration book
-  backends/<backend-id>/      unpacked llama.cpp release (llama-server[.exe] + libs)
+  backends/<backend-id>@<tag>/  unpacked llama.cpp build (llama-server[.exe] + libs); backends/<backend-id>/ for one installed before tags were recorded
   models/<file>.gguf
   runtime/uv[.exe]            pinned uv binary
   runtime/venvs/<agent-id>/   agent virtualenv (uv-managed Python 3.12; on Windows site/ + base-python.txt, §8)
@@ -64,7 +64,7 @@ with code 2 before writing anything.
 ### settings.json and state.json
 
 `settings.json` is the keeper's file (package `settings`): what the person chose. `state.json`
-keeps only what the engine learns (`model`, `backend`, `target`, `starter_owned`, `custom`,
+keeps only what the engine learns (`model`, `backend`, `build`, `next_build`, `target`, `starter_owned`, `custom`,
 `custom_prev`, `book`, `previous`). A first start writes `settings.json` **whole**, every key
 with its default, indented, mode 0600 (it can hold an API key), through a unique temp file,
 fsync and rename:
@@ -209,10 +209,74 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
   per-slot state for each KV type, scratch, MiB per expert layer, and decode speed against
   `--n-cpu-moe`. A model with no block gets the catalog `size` and a conservative per-token
   guess, flagged `estimated`. Fit is re-checked from the header after download.
-- Backend choice: NVIDIA GPU → `cuda` (with `cudart` extra on Windows); AMD/Intel GPU on
-  Linux/Windows → `vulkan`; Apple Silicon → `metal`; else `cpu`. If a backend fails its smoke
-  test (`llama-server --version` and `--list-devices` show the GPU) the next one is tried
-  (cuda → vulkan → cpu).
+- Backend choice (`catalog.Backends`): NVIDIA GPU → `cuda` (with its `cudart` extra, Linux and
+  Windows); AMD/Intel GPU on Linux/Windows → `vulkan`; Apple Silicon → `metal`; else `cpu`. If a
+  backend fails its smoke test (`llama-server --version` and `--list-devices` show the GPU; a
+  Vulkan build whose only device is Mesa's software one, llvmpipe, fails it) the next one is tried
+  (cuda → vulkan → cpu). See "Which llama.cpp build" below for CUDA 12/13 and the rungs.
+
+### Which llama.cpp build (catalog version 10)
+
+The engine runs the patched build made for the hive (fork `CharlesMod/llama.cpp`, tag
+`b12651-easy1`: upstream b12651 plus CUDA buffers in 256 MiB chunks, CUDA buffers laid by the
+driver's VMM (`GGML_CUDA_VMM_BUFFERS`, on by default with one device; the engine pins one card),
+the line `easy: slot N released, idle`, a Gemma 4 tool-args grammar fix; patch set e69b6a67), not
+stock llama-server.
+
+- **Rungs.** `llama` is an ordered list of releases, each `{tag, repo, patched, assets}`: the
+  patched pin first, the stock upstream release second. A build of the stock rung is offered only
+  for a platform and accelerator (os, arch, accel) the pin has no build for (today the arm64
+  builds: `cpu-linux-arm64`, `vulkan-linux-arm64`, `cuda13-linux-arm64`, `cpu-win-arm64`,
+  `vulkan-win-arm64`; the fork builds no arm64). It never stands in for a patched build that
+  failed: a failed patched build is followed by the next accelerator's build of the ladder, and a
+  failed start is reported. gencatalog writes both rungs from the two releases:
+  `go run ./tools/gencatalog -out catalog/catalog.json -version 10 -repo CharlesMod/llama.cpp
+  -llama-tag b12651-easy1` (the stock rung is `-stock-repo` default `ggml-org/llama.cpp`,
+  `-stock-tag` default the pin's `b<N>`; only the builds the pin lacks are written). A catalog
+  before version 10 (one `llamacpp` release) is still read, as a one-rung ladder (patched when its
+  tag is `-easyN`).
+- **CUDA 12 or 13.** The CUDA 13 build (`cuda13-*`) comes first for Blackwell, the CUDA 12 one for
+  every other card; CUDA 13 is never offered when every NVIDIA card is older than Turing (CUDA 13
+  dropped Maxwell, Pascal and Volta) or the driver is older than 580; CUDA 12 not when the driver
+  is older than 525 (NVIDIA's compatibility floors; the driver is read with
+  `nvidia-smi --query-gpu=driver_version`, an unknown driver passes). Linux x64 gets the fork's CUDA
+  12.8 build (with its cudart tarball), whatever the card: there is no stock CUDA 13 rung on Linux
+  x64. Windows: 12.4 and 13.5, each with its cudart zip.
+- **A mixed machine.** An NVIDIA card gets CUDA whatever sits beside it (an AMD card, an Intel
+  iGPU); an AMD card beside an Intel iGPU gets Vulkan, and the device pin (`plan.PinDevice`) holds
+  the server to the planned adapter, never the iGPU (the probe leaves iGPUs without dedicated
+  memory out on Linux).
+- **On disk.** A build is installed under `backends/<id>@<tag>`; one installed before the engine
+  recorded tags sits under `backends/<id>` (tag unknown). `state.json` `backend` and `build` name
+  the build that runs, `next_build` the pin staged beside it. A fetched build carries `.unpacked` (its archive's sha256), a smoke-tested one `.installed`.
+- **The pin moves.** When the selected build is not the one the catalog gives this machine for its
+  backend (a stock b12651 or an unrecorded install, or an older pin), the engine fetches the pin
+  beside it in the background (status `build.next`: downloading, installing, then `staged`):
+  downloaded, checked against its sha256 and unpacked, never run, since a model server may hold
+  the card. The disk is checked first (too little: `waiting`, the reason said). The next load of
+  the model server (a start, a reshape, a yield's end, a wake), with the card free, smoke-tests the
+  staged build as the engine's own process (inside `host.Own`, its pid among the engine's for the
+  room watch) and runs it. A smoke test that fails there leaves the engine starting on the build it
+  has, says `failed` and why, and is not run again for that tag until the pin, the driver or a
+  person's or client's word (an API start, attach, wake, host, install, a settings change) changed;
+  nothing is downloaded again, what was verified stays. A failed fetch (`waiting`, `error`, and
+  status `errors`) is tried again on the network coming back or such a word, never on a request
+  at the door alone and never on a clock. A move begins only while no install job, move or remove
+  runs, and stages nothing if the selection changed or a remove ran meanwhile. An install job never
+  replaces a complete selected build (main's layout included): only the move brings the pin. A
+  planned stop with the pin staged saves no context (the context key carries the build, so nothing
+  could be laid back), and contexts of another build are let go. Once the new build has served
+  ready, the other builds of the same backend id are removed, by exact names only (`backends/<id>`,
+  `backends/<id>@<tag>`, and main's old archives in `downloads/`; never past a symlink, never
+  another backend's, not while an install, the move or a remove runs; said as `build.pruned`). A
+  failure of the old build while a staged one waits is recorded under the old build's keys.
+- **Keyed by the build.** What the engine remembers per build carries the full tag: the prompt
+  cache key (`id@tag@sha256`), the out-of-memory cap's build (let go when it differs), and the
+  book's key (`model|card|id@tag`), so b12651 and b12651-easy1, whose CUDA memory behaves
+  differently, never share a measurement. A build installed before tags keeps its old keys.
+- **The patched build's lines.** `easy: CUDA VMM buffers on|off (...)` is read from the server's
+  stderr into status `build.vmm`. `easy: slot N released, idle` is not consumed: idle is already
+  the door's own count reaching zero (a reply's end), which the line could not improve on, for every build.
 
 ## 4. Hardware probe
 
@@ -343,7 +407,7 @@ loop lives in `run`.
   model). Header seeds land within 4 % or 120 MiB of the sweep on all four catalog models.
   The seed is then **calibrated** after every healthy load from
   the measured use (as `calibrate()` does in the hive launcher: accept a new `fixed` only
-  within ±15 % of the seed). The book is keyed by model sha256 + GPU name + backend id and
+  within ±15 % of the seed). The book is keyed by model sha256 + GPU name + backend id and llama.cpp tag (`id@tag`) and
   kept in `state.json`.
 - **Every figure marked.** `Footprint.Basis` (`basis`) and `Shape.VRAMBasis` (`vram_basis`) are
   `fit.Predicted` or `fit.Measured` (`""` only on a value built by hand). A footprint is measured
@@ -398,8 +462,8 @@ loop lives in `run`.
   so a room back where an earlier out-of-memory was measured keeps that earlier cap. With
   neither changed the cap stands exactly as before. A cap from an older book recorded nothing:
   the first `LetGo` (or `LowerCap`) records the room and build as they stand then, and it lifts
-  from there as any other. In the engine the build is the backend id and the sha256 of the
-  archive installed under it (`backends/<id>/.installed`), so a new llama.cpp build under the
+  from there as any other. In the engine the build is the backend id, the llama.cpp tag and the sha256 of the
+  archive installed under it (`backends/<id>@<tag>/.installed`; `id@tag@sha`), so a new llama.cpp build under the
   same id lets the cap go; another id is another book key altogether. The engine calls `LetGo`
   each time it reads the book for a start.
 - **An unknown cache type is refused.** `Seed`, `SeedFromBytes`, `KVBytes`, and every entry that
@@ -904,7 +968,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
 | `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
 | `GET hello`, `POST pair`, `GET`/`DELETE pair/{id}`, `GET pairing`, `POST pairing/answer` | who this engine is, and pairing a client on the network (§7f); the first four need no token |
-| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |

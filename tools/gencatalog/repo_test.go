@@ -137,7 +137,7 @@ func TestForkMissingAssetIsNamed(t *testing.T) {
 func TestRunRefusesBadRepoAndTagBeforeAnyRequest(t *testing.T) {
 	srv, paths := fakeGitHub(t, "x/y", nil)
 	c := &client{http: srv.Client(), api: srv.URL, log: func(string, ...any) {}}
-	if err := run(c, "not a repo", "unused.json", "", "", time.Hour, "", 1); err == nil {
+	if err := run(c, "not a repo", defaultRepo, "unused.json", "", "", "", time.Hour, "", 1); err == nil {
 		t.Fatal("bad repo accepted")
 	}
 	if len(*paths) != 0 {

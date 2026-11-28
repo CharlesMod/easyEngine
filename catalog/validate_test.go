@@ -71,7 +71,7 @@ func TestEmbeddedPassesValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Models) == 0 || len(c.LlamaCpp.Assets) == 0 {
+	if len(c.Models) == 0 || len(c.llamaAll()) == 0 {
 		t.Fatal("embedded catalog is empty")
 	}
 }

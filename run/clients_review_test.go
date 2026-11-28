@@ -78,7 +78,7 @@ func TestClientEachHoldItsOwnNotify(t *testing.T) {
 func TestClientUnownedContextNeverIntoAClientsSlot(t *testing.T) {
 	e := testkit.New(t)
 	e.WatchFile(filepath.Join(e.Ctl, "slots.log"))
-	s := ready(t, e) // three anonymous slots
+	s := ready(t, e)  // three anonymous slots
 	ask(t, s, 2, 400) // an anonymous prompt in slot 2
 	from := testkit.Mark(t, s, "before the client")
 	b, _ := clAttach(t, s, clReq("b", nil, true, clProf(4, 65536, 4096))) // 4 slots: a grow, b gets 0..3

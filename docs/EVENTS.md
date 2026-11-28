@@ -269,13 +269,14 @@ connection.
   idle rule runs in `serve` too (ENGINE.md §6c): the named moment is armed when the quiet begins
   (no attachment, the door empty, a model loaded), for `linger_s` when the last attachment to leave
   was local, `idle_sleep_s` (default 600) when a caller only sent requests, and
-  `max(idle_sleep_s, RemoteIdleFloor = 60 s)` after a remote leave or remote-only requests (no
-  remote act alone loads and unloads the model faster); any request at the door or attach
-  cancels it (a request the rule did not see in flight is found when the moment comes, and the
-  quiet starts again from there), and a settings change (PUT or the file's word) arms the same moment again for what
+  `max(idle_sleep_s, RemoteIdleFloor = 60 s)` after a busy stretch with any remote traffic in it
+  (sticky: no remote act alone loads and unloads the model faster) and after a wake somebody asked
+  for; any request at the door, any attach or any change of phase ends the quiet (a request the
+  rule did not see in flight is found when the moment comes, and the next quiet counts from its
+  time, which the supervisor records with its count), and a settings change (PUT or the file's word) arms the same moment again for what
   is left of the new delay, never a second timer. The rule wakes on the hub's `request`, `door`,
-  `phase`, `attachment` and `idle` facts, the parents' exits and the moment; it reads no clock but
-  the moment's own start. The `idle` fact says the moment while it is armed. A caller that only
+  `phase`, `attachment`, `idle`, `job`, `upgrade`, `yield` and `nudge` words, the parents' exits and the moment; it reads no clock but
+  the times its quiet counts from (the quiet's start, the last traffic's), never to wait. The `idle` fact says the moment while it is armed. A caller that only
   sends requests is idle once they stop; a standing attachment keeps the model however silent. A
   mod does not start
   the engine with a parent pid any more: it finds the engine (the lock, hello), attaches with its

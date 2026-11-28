@@ -817,63 +817,96 @@ a service or a shell: no tray, and it ends with its parents, as described next.
 
 The owner's words: the engine is paused when idle and not connected to by a game or the hive, so
 the card's memory is free for other work. One rule, the same in `serve` and in the app
-(`app/resident.go` `idleLoop`):
+(`app/resident.go` `idleLoop`, `run/idle.go`):
 
 - **The model sleeps** when all of these hold: no attachment stands (a held presence, an attached
   pid; in the app also a parent pid, since the app does not end with its parents; the engine's
-  own base profile is not one), no request is in flight or held at the door, a model is loaded
-  (phase `ready` or `resizing`), and the quiet has lasted its delay.
-- **The delay** is a named moment armed when the quiet begins and cancelled by any request at the
-  door (begun, held, or refused) or any attach. It depends on what the quiet follows and whose it
-  was ("local" as ee-clients decides it: the attachment's own local flag, the request's caller as
-  `localCaller` says, never a header):
-  - the last attachment left and it was **local** (a local attachment, a parent pid in the app):
-    `linger_s` (default 0, at once);
-  - local requests, or nothing since the model was loaded: `idle_sleep_s` (default 600) exactly;
-  - the last attachment to leave was **remote** (paired, an open caller or the master key from
-    another machine), or requests came from another machine: `idle_sleep_s` but never less than
-    **`RemoteIdleFloor` (60 s)** (`run/idle.go`).
-  0 means at once. When the moment comes and any request reached the door since it was armed
-  (one the rule never saw in flight), the quiet starts again from there.
+  own base profile is not one), no request is in flight or held at the door, the engine is **at
+  rest** with a model loaded (phase `ready`, and no swap, install or remove job, reshape, drain
+  or yield under way: `Supervisor.IdleSleepable`), and the quiet has lasted its delay. Any change
+  of phase disarms the quiet; coming back to `ready` begins a new one.
+- **The delay** is a named moment armed when the quiet begins. It is chosen by the **busy
+  stretch** the quiet follows (everything since the last quiet began). "Local" is decided as
+  ee-clients decides it (the attachment's own local flag, the request's caller as `localCaller`
+  says; never a header of the rule's own):
+  - **remote traffic anywhere in the stretch** (a request from another machine, or the leave of
+    a remote attachment: paired, an open caller or the master key from another machine), whatever
+    local traffic came after it: `idle_sleep_s`, never less than **the floor, 60 s**
+    (`run.RemoteIdleFloor`);
+  - else a **wake somebody asked for** in the stretch (`POST wake`, or an attach that woke the
+    model) followed by nothing but a local leave or nothing: the delay below, never less than the
+    floor;
+  - else the last attachment left and it was local: `linger_s` (default 0, at once);
+  - else local requests, or nothing since the model was loaded: `idle_sleep_s` (default 600).
+  0 means at once. Every request at the door counts as traffic (begun, held, refused). When the
+  moment comes and finds traffic since it was armed (a request the rule never saw in flight),
+  the next quiet counts from that traffic's time, not from the moment.
   `idle_sleep: false` (or `--no-idle-sleep`) turns the rule off entirely: the model stays loaded
   until a person or a client says otherwise. `--idle-sleep <dur>` sets the quiet for one run.
   A change of either setting (PUT or an edit of the file) arms the same moment again for the new
-  delay, counted from the start of the quiet; there is never a second timer. The hub's `idle`
-  fact says the settings and, while armed, `why` as `<delay>/<cause>` (delay `linger` |
-  `idle_sleep` | `remote_floor`; cause `load` | `local_requests` | `remote_requests` |
-  `local_leave` | `remote_leave`) and `delay_ms`.
-- **Why a remote leave waits.** ee-clients holds that no sequence of acts by remote identities
+  delay, counted from the start of the quiet; there is never a second timer.
+- **The flags win, and say so.** Status `idle_sleep`, `idle_sleep_s` and the `idle` fact are the
+  values that act; `idle_sleep_forced: true` says a flag forces them for this run. `PUT settings`
+  of a value a flag overrides answers **409** (`idle_sleep is forced off by --no-idle-sleep for
+  this run; ...` / `idle_sleep_s is set by --idle-sleep for this run; ...`); sending the value
+  that acts is no change and is accepted. An edit of the file is stored and acts once the flag
+  is gone.
+- **The `idle` fact** says the settings that act, `idle_sleep_forced`, `armed`, and while armed
+  `why` as `<delay>/<cause>` (delay `linger` | `idle_sleep` | `floor`; cause `load` | `wake` |
+  `local_requests` | `local_leave` | `remote_requests` | `remote_leave`), `delay_ms` (the whole
+  quiet) and `left_ms` (what was left of it when armed).
+- **Why remote traffic waits.** ee-clients holds that no sequence of acts by remote identities
   alone restarts a running model server uncharged. A start from down is never charged, an attach
-  wakes the model, and an idle sleep is the engine's own stop (it ends a waking period and refills
-  every remote restart budget, `refillBudgets`, as a linger unload did). Were `linger_s` 0 to apply
-  to a remote leave, a remote client could attach, detach (the model sleeps at once, budgets
-  whole) and attach again, loading and unloading the model as often as it liked while a local
-  caller paid a reload each time. So a remote leave and remote-only traffic take the long delay,
-  floored: an idle sleep that follows them needs at least `max(idle_sleep_s, 60 s)` of total quiet
-  (no attachment, nothing at the door), during which nobody else is using the model, so a remote
-  identity cannot bring it about faster than once per that quiet. Local leaves and local requests
-  keep the exact settings.
+  wakes the model, and an idle sleep is the engine's own stop: it ends a waking period and refills
+  every remote restart budget (`refillBudgets`), as the linger unload did. Were `linger_s` 0, or
+  an `idle_sleep_s` of 0, to apply after remote traffic, a remote client could attach, detach
+  (the model sleeps at once, budgets whole) and attach again, loading and unloading the model as
+  often as it liked while a local caller paid a reload each time. With the floor, an idle sleep
+  that follows remote traffic needs at least `max(idle_sleep_s, 60 s)` of total quiet (no
+  attachment, nothing at the door), during which nobody else is using the model: no remote
+  identity can bring it about faster than once per that quiet, and the refill it brings is the
+  refill of a model nobody used. Remote is sticky for the stretch, so local traffic that overlaps
+  or follows it does not shorten the wait. Local leaves and local requests keep the exact
+  settings; a wake somebody asked for is not undone sooner than the floor.
 - **Who is idle.** A caller that only sends requests (no attachment) is idle once its requests
   stop: the model stays loaded while they keep coming and sleeps `idle_sleep_s` after the last
-  one (at least 60 s for a caller on another machine). A standing attachment keeps the model loaded however long it is silent. A `serve
-  --parent-pid` parent keeps the engine's process alive (it ends with its parents, as before), but
-  it is not a client and does not keep the model loaded. In `serve`, `--linger` stays the
-  engine's life after its parents; the model's linger after the last attachment is `linger_s`.
-  (Before this rule, `serve` never unloaded the model, and the app with `linger_s` 0 unloaded it
-  right after each request a remote caller sent, when it saw the request in flight.)
-- **The sleep** is `POST sleep`'s: the prompt-cache slots are saved (§5, "The prompt cache across
-  a restart"), the model server's process group is stopped, the restart budgets are whole again.
-  Status: phase `sleeping`, `sleep_reason` `idle`, message `Model unloaded: idle, the card is
-  free`. `sleep_reason` is `asked` after `POST sleep` or a person's stop, `start` for an app that
-  started asleep, `""` when not sleeping (kept for a paired client).
+  one (at least 60 s for a caller on another machine). A standing attachment keeps the model
+  loaded however long it is silent. A `serve --parent-pid` parent keeps the engine's process
+  alive (it ends with its parents, as before), but it is not a client and does not keep the model
+  loaded. In `serve`, `--linger` stays the engine's life after its parents; the model's linger
+  after the last attachment is `linger_s`. (Before this rule, `serve` never unloaded the model,
+  and the app with `linger_s` 0 unloaded it right after each request a remote caller sent, when
+  it saw the request in flight.)
+- **The sleep and the door.** The decision is one step with the door (`SleepIdleSince`): under
+  the operation lock and the lock a request takes to be routed and begun, the engine looks that
+  nothing is in flight or held, that it is at rest and that the phase has not changed since the
+  quiet began, and says phase `sleeping`. A request begun before that makes it decline (the
+  quiet starts again); a request after it is held and wakes the model as at any sleeping engine
+  (its start waits for the operation lock, so it follows the stop). No request is forwarded to a
+  server the idle sleep is about to stop. Then it is a sleep like `POST sleep`'s: the prompt-cache
+  slots are saved (§5, "The prompt cache across a restart"), the model server's process group is
+  stopped (a member that outlives the group's leader is killed with the group on unix; Windows
+  kills the leader, and the job object takes any descendant at the engine's exit), the restart
+  budgets are whole again. Status: phase `sleeping`, `sleep_reason` `idle`, message `Model
+  unloaded: idle, the card is free`. `sleep_reason` is `asked` after `POST sleep` or a person's
+  stop, `start` for an app that started asleep, `""` when not sleeping (kept for a paired
+  client). A swap that ends while the model sleeps keeps the sleep's reason and words, and an
+  attach decides whether to wake by the person's stop itself, never by the message.
+- **`POST sleep` (a person's or a client's explicit unload)** keeps its older behaviour: it says
+  `sleeping` before it stops the server (requests that arrive after are held and wake the model),
+  and requests already in flight are cut with the server, as `POST stop` cuts them; the
+  prompt-cache keeper saves nothing then (§5). That is what the sleep and stop routes always did;
+  the idle rule, which nobody asked for at that moment, never cuts one.
 - **What stays running while asleep.** The engine process (listener, pairing, hello, status, the
   hub), which never opens the card: it touches the GPU only through one-shot `nvidia-smi` reads
   (NVML: no CUDA context, no memory; each exits when it has answered), and under
   `--yield-to-games` the yield reactor's `nvidia-smi -q -d PIDS` reads, also one-shot. The
-  profile's **agent**, if a profile names one (the owner's service has none): a Python client of
-  the engine (httpx, pydantic) that talks to the model over HTTP and opens no card; it stays so the
-  game's side keeps running, and its first request wakes the model. No other child runs: after an
-  idle sleep no process the engine started holds the card.
+  profile's **agent**, if a profile names one (the owner's service has none), keeps running: the
+  engine's agent runtime (a Python venv started with `python -m <module>`, talking to the model
+  over HTTP) opens no card, and its first request wakes the model. But an agent that itself uses
+  the GPU (its own torch or CUDA work) would keep its share of the card while the model sleeps:
+  that is the agent's, not the engine's, and the engine does not stop it. No other child runs:
+  after an idle sleep no process the engine started holds the card.
 - **Wake.** A proxied request (held at the door until the model is up; a stream hears `: easy
   waiting`), an attach (in `serve` too) or `POST wake`. The start fits against the room actually
   free: when other programs hold part of the card, a smaller shape (status `shape` says it).
@@ -1126,7 +1159,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, idle_sleep?: bool, idle_sleep_s?: 0-604800, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context`, `idle_sleep` and `idle_sleep_s` (400 `idle_sleep_s must be 0 to 604800 seconds`; a change re-arms the idle moment, §6c). Like every setting, only this machine's callers (loopback, the page, an open caller on this machine) and the master key change them; a paired token, or an open caller from another machine, gets 403. `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, idle_sleep?: bool, idle_sleep_s?: 0-604800, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context`, `idle_sleep` and `idle_sleep_s` (400 `idle_sleep_s must be 0 to 604800 seconds`; 409 for a value `--no-idle-sleep` or `--idle-sleep` overrides this run; a change re-arms the idle moment, §6c). Like every setting, only this machine's callers (loopback, the page, an open caller on this machine) and the master key change them; a paired token, or an open caller from another machine, gets 403. `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
 | `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |

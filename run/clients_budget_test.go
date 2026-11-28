@@ -62,7 +62,9 @@ func spend(t *testing.T, s *run.Supervisor, who, name string) {
 // charged, and the charge never exceeds their budgets. A seeded walk of attach, detach, return and
 // change of wants by two remote identities, with unloads (the linger's) and returns while down,
 // no local traffic. The unload makes every budget whole; the wake's start from down is the
-// period's own and never charged; a remote caller's sleep never refills.
+// period's own and never charged. (An --open caller from another machine cannot sleep the model:
+// api.TestOpenRemoteCallerIsScopedLikeAPairedToken; a sleep from another machine never refills:
+// TestRemoteCausedStopsNeverRefill.)
 func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 	for _, seed := range []uint64{1, 2, 3, 4, 5, 6} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
@@ -78,7 +80,7 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 			on := map[string]*state{} // who/name -> standing attachment
 			last := map[string]int{}  // who/name -> the slots it last attached with
 			charged := func() int { return s.RestartsOf("client-1") + s.RestartsOf("client-2") }
-			from, woke, periods, down, remoteDown := len(e.Starts()), 0, 0, false, false
+			from, woke, periods, down := len(e.Starts()), 0, 0, false
 			endPeriod := func(step int) {
 				restarts := len(e.Starts()) - from - woke
 				if c := charged(); restarts > c || c > 8 {
@@ -99,29 +101,11 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 					}
 					down = true
 					continue
-				case down && rng.IntN(4) == 0: // a first request loads it
-					if remoteDown {
-						// the period goes on (a remote caller's sleep refilled nothing); the start
-						// from down is not a reshape's (said in the report: --open callers only)
-						woke++
-					} else {
-						from, woke = len(e.Starts()), 1 // a new period
-					}
-					remoteDown = false
+				case down && rng.IntN(4) == 0: // a first request loads it: a new period
+					from, woke = len(e.Starts()), 1
 					go s.Wake()
 					testkit.WaitPhase(t, s, "ready", 15*time.Second)
 					down = false
-					continue
-				case !down && rng.IntN(12) == 0: // a remote caller asks a sleep: never a refill
-					before := charged()
-					if err := s.SleepBy(false); err != nil {
-						t.Fatal(err)
-					}
-					testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
-					if charged() != before {
-						t.Fatalf("step %d: a remote caller's sleep refilled", step)
-					}
-					down, remoteDown = true, true
 					continue
 				}
 				who, name := whos[rng.IntN(2)], names[rng.IntN(2)]

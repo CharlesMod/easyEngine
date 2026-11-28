@@ -1004,7 +1004,19 @@ the master token or the engine's own machine.
 
 `serve --open` makes a non-loopback listener with **no** token, and logs one warning line:
 `easy-engine: WARNING: listening on <host>:<port> with no token (--open); ...`. It makes no
-token file.
+token file. What a caller on it may do depends on where it is, judged by the real peer address
+(a loopback address, or one of this machine's own on the listener) and never by a header (a
+forwarding header only ever makes a caller remote):
+
+- **from this machine**: everything, as on the loopback listener (except the person's side of
+  pairing, which answers only on the loopback listener or with the master token).
+- **from another machine**: exactly what a paired token may. On the control API: `hello` and the
+  client's side of pairing (`POST pair`, `GET`/`DELETE pair/{id}`), `GET status` in its reduced
+  form (above: no ports, paths, errors, contexts or other clients), `POST attach` and `DELETE
+  attach/{id}`; every other route, including any added later, is 403 `not_allowed`. On the model
+  server's paths: the same allow list as a paired token (§7g). Administration from another
+  machine (sleep, stop, wake, start, install, remove, settings, storage, logs, events and the rest)
+  needs the master key.
 
 The one exception to the token on a non-loopback listener is the setup page itself (`GET /`,
 `/index.html`): a browser navigation cannot send a header, and the page's script has to load to
@@ -1472,7 +1484,8 @@ the door still refuses it what cannot be confined while clients hold slots, and 
 An **`--open` caller from another machine** is held on the proxy to the same allow list as a
 paired token (`api/scope.go`: completions, tokenize, detokenize, apply-template, models, health;
 403 `not_allowed` for the rest, so `GET /slots`, `/props`, `/metrics`, embeddings and the like
-never reach the model server from it). Every `open@<ip>` shares one restart budget and one set of
+never reach the model server from it), and on the control API too (§7, `serve --open`): it can
+attach, detach and read the reduced status, never sleep, stop or administer the engine. Every `open@<ip>` shares one restart budget and one set of
 remote caps (each address keeps its own key space).
 
 **Attach.** `POST /engine/v1/attach` (with `X-Easy-Engine: 1`):
@@ -1681,8 +1694,9 @@ from its source; `api/paths.go`):
 
 A path that cannot be confined is refused to a remote caller while another client holds slots
 (403 `path_not_offered`) and passed for a local one. (A paired token reaches only the completion,
-tokenize and model paths at all: the gate's scope, `api/scope.go`. The table holds for `--open`
-callers and the master key from another machine, which the gate does not scope.)
+tokenize and model paths at all: the gate's scope, `api/scope.go`; an `--open` caller from
+another machine the same. The table holds for the master key from another machine, which the gate
+does not scope.)
 
 A confined request **fails closed**: its body must be exactly one JSON object (a byte-order mark,
 an empty body, an array, trailing data, a top-level key given twice or nesting deeper than 64 is

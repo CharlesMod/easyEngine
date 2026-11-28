@@ -51,6 +51,20 @@ func forwarded(r *http.Request) bool {
 // names a client on another machine), whatever address it comes from. A forwarder on this machine
 // that adds no such header (ssh -L, socat) makes its callers local: docs/ENGINE.md section 7g.
 func localCaller(r *http.Request) bool {
+	if !peerLocal(r) {
+		return false
+	}
+	switch ClientID(r.Context()) {
+	case ClientLoopback, ClientPage, ClientOpen, tokens.MasterID:
+		return true
+	}
+	return false
+}
+
+// peerLocal: the real peer is this machine (a loopback address, or one of this machine's own on
+// the listener) and the request carries no forwarding header. The gate's client is not read: the
+// gate itself asks it of an --open caller (gate.go).
+func peerLocal(r *http.Request) bool {
 	if forwarded(r) {
 		return false
 	}
@@ -71,11 +85,7 @@ func localCaller(r *http.Request) bool {
 			return false
 		}
 	}
-	switch ClientID(r.Context()) {
-	case ClientLoopback, ClientPage, ClientOpen, tokens.MasterID:
-		return true
-	}
-	return false
+	return true
 }
 
 // identity is who an attach or a proxied request is from: "loopback" for a local caller, else

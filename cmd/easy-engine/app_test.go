@@ -120,3 +120,18 @@ func TestServeStillNeedsAParent(t *testing.T) {
 		t.Fatalf("%q exit %d", out, code)
 	}
 }
+
+// serve takes --vision (it is a flag, and in the usage text): with it and no parent the
+// command still fails for the parent, not for an unknown flag.
+func TestServeKnowsTheVisionFlag(t *testing.T) {
+	bin := buildBin(t)
+	env := noTrayEnv(t, t.TempDir())
+	out, code := runBin(t, bin, env, "serve", "--vision")
+	if code != 2 || !strings.Contains(out, "--parent-pid") || strings.Contains(out, "not defined") {
+		t.Fatalf("%q exit %d", out, code)
+	}
+	out, _ = runBin(t, bin, env, "serve", "--no-such-flag")
+	if !strings.Contains(out, "-vision\n") {
+		t.Fatalf("usage does not name --vision: %q", out)
+	}
+}

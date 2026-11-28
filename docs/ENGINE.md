@@ -883,7 +883,11 @@ the card's memory is free for other work. One rule, the same in `serve` and in t
   quiet began, and says phase `sleeping`. A request begun before that makes it decline (the
   quiet starts again); a request after it is held and wakes the model as at any sleeping engine
   (its start waits for the operation lock, so it follows the stop). No request is forwarded to a
-  server the idle sleep is about to stop. Then it is a sleep like `POST sleep`'s: the prompt-cache
+  server the idle sleep is about to stop. A local caller held while the engine reshapes to
+  give the commons a range is a held request (the door's count), so it keeps the model; a slot's
+  erase on handover (§7g) runs after its request is counted in flight, so no sleep falls between
+  the erase and the request it was for; the setup page's test (`POST test`) is routed and counted
+  in the same one step (`Enter`). Then it is a sleep like `POST sleep`'s: the prompt-cache
   slots are saved (§5, "The prompt cache across a restart"), the model server's process group is
   stopped (a member that outlives the group's leader is killed with the group on unix; Windows
   kills the leader, and the job object takes any descendant at the engine's exit), the restart

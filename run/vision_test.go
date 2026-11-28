@@ -483,6 +483,8 @@ func remVis(name string, vision bool) run.AttachRequest {
 	return run.AttachRequest{Name: name, Hold: true, Profile: visProf(vision), Identity: "client-1", Local: false}
 }
 
+// A remote attach with vision while the model runs restarts it with the projector and is charged;
+// its leave restarts nothing (the projector stays loaded) and is not charged.
 func TestVisionRemoteAttachIsCharged(t *testing.T) {
 	v := newVis(t, 800)
 	v.put(t)
@@ -492,30 +494,37 @@ func TestVisionRemoteAttachIsCharged(t *testing.T) {
 		t.Fatalf("restarts left at attach: %v", av.RestartsLeft)
 	}
 	visReady(t, s, true)
+	starts := v.e.Starts()
+	if len(starts) != 2 || !v.hasMM(starts[1]) {
+		t.Fatalf("starts: %v", starts)
+	}
 	if left := clView(t, s, av.Attachment).RestartsLeft; left == nil || *left != 3 {
-		t.Fatalf("restarts left after the vision restart: %v", left)
-	}
-	// its leave is never charged; spend the rest with attach/leave rounds (a name that left and
-	// comes back is a return, never charged, so each round has a new name)
-	spent := 1
-	for ; spent < 4; spent++ {
-		if e := s.Detach(av.Attachment, "client-1"); e != nil {
-			t.Fatal(e)
-		}
-		visReady(t, s, false)
-		av, _ = clAttach(t, s, remVis("r"+string(rune('a'+spent)), true))
-		visReady(t, s, true)
-	}
-	if left := clView(t, s, av.Attachment).RestartsLeft; left == nil || *left != 0 {
-		t.Fatalf("restarts left after %d charged restarts: %v", spent, ptrOf(left))
+		t.Fatalf("restarts left after the vision restart: %v", ptrOf(left))
 	}
 	if e := s.Detach(av.Attachment, "client-1"); e != nil {
 		t.Fatal(e)
 	}
-	visReady(t, s, false)
+	s.React()
+	testkit.Mark(t, s, "after the remote leave and the reactor's look")
+	if st := s.Status(); st.Phase != "ready" || !st.Vision {
+		t.Fatalf("after a remote leave: phase %s vision %v", st.Phase, st.Vision)
+	}
+	if got := len(v.e.Starts()); got != 2 {
+		t.Fatalf("a remote leave started the server: %d starts", got)
+	}
+	if got := s.RestartsOf("client-1"); got != 1 {
+		t.Fatalf("charged %d after the leave, want the attach's 1", got)
+	}
+}
+
+// With the budget spent the vision change waits (Slots.Why restart_budget_spent) and text keeps serving.
+func TestVisionRemoteBudgetSpentWaits(t *testing.T) {
+	v := newVis(t, 800)
+	v.put(t)
+	s := v.start(t, nil)
+	spend(t, s, "client-1", "x") // four changes of wants, none of them vision
 	n := len(v.e.Starts())
-	// the budget is spent: the change is accepted and waits; text keeps serving
-	av, _ = clAttach(t, s, remVis("r"+string(rune('a'+spent)), true))
+	av, _ := clAttach(t, s, remVis("v", true))
 	testkit.WaitFor(t, 10*time.Second, "the change to wait on the budget", func() bool {
 		return clView(t, s, av.Attachment).Slots.Why == "restart_budget_spent"
 	})
@@ -524,6 +533,32 @@ func TestVisionRemoteAttachIsCharged(t *testing.T) {
 	st := s.Status()
 	if st.Phase != "ready" || st.Vision || len(v.e.Starts()) != n {
 		t.Fatalf("phase %s vision %v starts %d (was %d)", st.Phase, st.Vision, len(v.e.Starts()), n)
+	}
+	if got := s.RestartsOf("client-1"); got != 4 {
+		t.Fatalf("charged %d, want 4", got)
+	}
+}
+
+// A remote attach with vision while the model is unloaded is not charged, and the start the wake
+// makes loads the projector.
+func TestVisionRemoteAttachWhileUnloadedIsFree(t *testing.T) {
+	v := newVis(t, 800)
+	v.put(t)
+	s := v.start(t, nil)
+	var av run.AttachView
+	sleepThenWake(t, s, func() {
+		av, _ = clAttach(t, s, remVis("r", true))
+		if av.RestartsLeft == nil || *av.RestartsLeft != 4 {
+			t.Fatalf("restarts left at attach: %v", ptrOf(av.RestartsLeft))
+		}
+	})
+	visReady(t, s, true)
+	starts := v.e.Starts()
+	if len(starts) != 2 || !v.hasMM(starts[1]) {
+		t.Fatalf("starts: %v", starts)
+	}
+	if left := clView(t, s, av.Attachment).RestartsLeft; left == nil || *left != 4 || s.RestartsOf("client-1") != 0 {
+		t.Fatalf("restarts left %v, charged %d: a start from unloaded is never charged", ptrOf(left), s.RestartsOf("client-1"))
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,72 +47,99 @@ func waitHeld(t *testing.T, s interface{ Held() int }, n int) {
 	testkit.WaitFor(t, 15*time.Second, strconv.Itoa(n)+" requests held at the door", func() bool { return s.Held() == n })
 }
 
-// S3: remote requests held at the door are bounded by count: 8 of one client (its 9th is 429
-// busy) and 32 of all (a fifth client's first is busy), however long the hold. Each client's grow
-// waits for idle behind a local reply in flight; once the reply ends, every held one is served.
+// answered is a background request's answer, or the test fails with what it waited for: a request
+// the engine should have refused at once but held instead never hangs the test.
+func answered(t *testing.T, c <-chan sent, what string) sent {
+	t.Helper()
+	select {
+	case r := <-c:
+		return r
+	case <-time.After(20 * time.Second): // watchdog for silence: an answer due at once, or after the grow
+		t.Fatalf("no answer to %s", what)
+	}
+	return sent{}
+}
+
+// attachWaiting attaches remote clients 1..n, each one slot, each waiting for idle behind the
+// local reply in flight.
+func attachWaiting(t *testing.T, rs *httptest.Server, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		h := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(i))
+		if sl, _ := h.first["slots"].(map[string]any); h.status != 200 || sl["why"] != "waiting_for_idle" {
+			t.Fatalf("attach %d: %d %v", i, h.status, h.first)
+		}
+	}
+}
+
+// S3 / D4 / D8: remote requests held at the door are bounded by count: 8 of one client (its 9th is
+// 429 busy) and 32 of all (a fifth client's first is busy), however long the hold, and one client
+// at its share never makes another busy. Each client's grow waits for idle behind a local reply in
+// flight; once the reply ends, every held one is served. Every wait is bounded (answered).
 func TestRemoteHeldRequestsBounded(t *testing.T) {
 	e, s, srv := gatedEnv(t, time.Hour) // named moment: no DrainMax in this test's life
 	_, rs, _ := remoteSrv(t, s)
 	_, br := streamGated(t, srv.URL)
-	for n := 1; n <= 5; n++ {
-		h := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(n))
-		if sl, _ := h.first["slots"].(map[string]any); h.status != 200 || sl["why"] != "waiting_for_idle" {
-			t.Fatalf("attach %d: %d %v", n, h.status, h.first)
-		}
-	}
+	attachWaiting(t, rs, 5)
 	const q = `{"messages":[{"role":"user","content":"x"}]}`
 	var held []<-chan sent
 	for n := 1; n <= 4; n++ {
-		for i := 0; i < 8; i++ {
+		for i := 0; i < 8; i++ { // one at a time: each body read alone (a client's share of reads is 2)
 			held = append(held, sendAs(rs.URL, q, n))
+			waitHeld(t, s, 8*(n-1)+i+1)
 		}
-		waitHeld(t, s, 8*n)
 		if n == 1 {
-			if r := <-sendAs(rs.URL, q, 1); r.code != 429 || codeOf(r.body) != "busy" {
+			if r := answered(t, sendAs(rs.URL, q, 1), "one client's 9th"); r.code != 429 || codeOf(r.body) != "busy" {
 				t.Fatalf("one client's 9th held: %d %s", r.code, r.body)
 			}
 		}
 	}
-	if r := <-sendAs(rs.URL, q, 5); r.code != 429 || codeOf(r.body) != "busy" {
+	if r := answered(t, sendAs(rs.URL, q, 5), "the 33rd"); r.code != 429 || codeOf(r.body) != "busy" {
 		t.Fatalf("the 33rd held: %d %s", r.code, r.body)
 	}
 	for i := 1; i <= 4; i++ { // the local reply ends: the door's empty moment, the grow
 		os.WriteFile(filepath.Join(e.Ctl, "go."+strconv.Itoa(i)), nil, 0o644)
 		br.ReadString('\n')
 	}
-	for _, c := range held {
-		if r := <-c; r.code != 200 {
-			t.Fatalf("a held request after the grow: %d %s", r.code, r.body)
+	for i, c := range held {
+		if r := answered(t, c, "a held request after the grow"); r.code != 200 {
+			t.Fatalf("held request %d after the grow: %d %s", i, r.code, r.body)
 		}
 	}
 }
 
-// S3: the bytes of remote bodies kept (held at the door or in flight) are bounded: four held
-// bodies of 15 MiB are kept, a fifth would pass 64 MiB and is 429 busy.
+// S3 / D4 / D8: the bytes of remote bodies kept (held at the door or in flight) are bounded per
+// client and in all: two held bodies of ~16 MiB are one client's 32 MiB (its third is busy, and a
+// second client is still taken: one client never makes another busy); four clients fill 128 MiB
+// and a fifth client's first is busy.
 func TestRemoteKeptBytesBounded(t *testing.T) {
 	e, s, srv := gatedEnv(t, time.Hour) // named moment: no DrainMax in this test's life
 	_, rs, _ := remoteSrv(t, s)
 	_, br := streamGated(t, srv.URL)
-	h := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
-	if h.status != 200 {
-		t.Fatalf("attach: %d %v", h.status, h.first)
-	}
-	big := `{"messages":[{"role":"user","content":"x"}],"pad":"` + strings.Repeat("a", 15<<20) + `"}`
+	attachWaiting(t, rs, 5)
+	big := `{"messages":[{"role":"user","content":"x"}],"pad":"` + strings.Repeat("a", 16<<20-1<<10) + `"}`
 	var held []<-chan sent
-	for i := 1; i <= 4; i++ {
-		held = append(held, sendAs(rs.URL, big, 1))
-		waitHeld(t, s, i)
+	for n := 1; n <= 4; n++ {
+		for i := 0; i < 2; i++ {
+			held = append(held, sendAs(rs.URL, big, n))
+			waitHeld(t, s, 2*(n-1)+i+1)
+		}
+		if n == 1 {
+			if r := answered(t, sendAs(rs.URL, big, 1), "one client's third body"); r.code != 429 || codeOf(r.body) != "busy" || !strings.Contains(r.body, "32 MiB of one client") {
+				t.Fatalf("one client's third ~16 MiB body: %d %.300s", r.code, r.body)
+			}
+		}
 	}
-	if r := <-sendAs(rs.URL, big, 1); r.code != 429 || codeOf(r.body) != "busy" || !strings.Contains(r.body, "64 MiB") {
-		t.Fatalf("a fifth 15 MiB body: %d %s", r.code, r.body)
+	if r := answered(t, sendAs(rs.URL, big, 5), "a fifth client's body"); r.code != 429 || codeOf(r.body) != "busy" || !strings.Contains(r.body, "128 MiB in all") {
+		t.Fatalf("a fifth client's ~16 MiB body: %d %.300s", r.code, r.body)
 	}
 	for i := 1; i <= 4; i++ {
 		os.WriteFile(filepath.Join(e.Ctl, "go."+strconv.Itoa(i)), nil, 0o644)
 		br.ReadString('\n')
 	}
-	for _, c := range held {
-		if r := <-c; r.code != 200 {
-			t.Fatalf("a held request after the grow: %d %.200s", r.code, r.body)
+	for i, c := range held {
+		if r := answered(t, c, "a held body after the grow"); r.code != 200 {
+			t.Fatalf("held body %d after the grow: %d %.200s", i, r.code, r.body)
 		}
 	}
 }

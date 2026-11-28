@@ -1026,23 +1026,40 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 	e.InstallFake()
 	s := e.StartSup(e.Config())
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 2 * time.Second}
-	eight := make(chan struct{})
-	var once sync.Once
+	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 3 * time.Second}
+	var mu sync.Mutex
+	counts := make(chan struct{}, 64)
+	now := int32(0)
 	a.SayReads(func(n int32) {
-		if n == 8 {
-			once.Do(func() { close(eight) })
-		}
+		mu.Lock()
+		now = n
+		mu.Unlock()
+		counts <- struct{}{}
 	})
+	reads := func(want int32) { // the count says nothing to any hub: the API's own word of each count
+		for {
+			mu.Lock()
+			n := now
+			mu.Unlock()
+			if n == want {
+				return
+			}
+			select {
+			case <-counts:
+			case <-time.After(10 * time.Second): // watchdog for silence: the reads begin long before this
+				t.Fatalf("timed out waiting for %d bodies being read (now %d)", want, n)
+			}
+		}
+	}
 	srv := httptest.NewServer(a.Handler())
 	t.Cleanup(srv.Close)
-	open := func() net.Conn {
+	open := func(n int) net.Conn {
 		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { conn.Close() })
-		fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+		fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-%d\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{", n)
 		return conn
 	}
 	answer := func(conn net.Conn) int {
@@ -1055,19 +1072,19 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	var conns []net.Conn
-	for i := 0; i < 8; i++ {
-		conns = append(conns, open())
+	// one client's share: two bodies at once; its third is busy
+	conns := []net.Conn{open(1), open(1)}
+	reads(2)
+	if c := answer(open(1)); c != 429 {
+		t.Fatalf("one client's third read: %d", c)
 	}
-	// the count says nothing to any hub, so the test waits on the API's own word of each count
-	select {
-	case <-eight:
-	case <-time.After(10 * time.Second): // network timeout: the eight reads begin long before this
-		t.Fatalf("timed out waiting for eight bodies being read (now %d)", a.RemoteReadsNow())
+	// three more clients fill the total: 8; a fifth client's first is busy
+	for n := 2; n <= 4; n++ {
+		conns = append(conns, open(n), open(n))
+		reads(int32(2 * n))
 	}
-	ninth := open()
-	if c := answer(ninth); c != 429 {
-		t.Fatalf("the ninth: %d", c)
+	if c := answer(open(5)); c != 429 {
+		t.Fatalf("the ninth read: %d", c)
 	}
 	// each of the eight is cut by the total bound (it never finished)
 	for _, c := range conns {

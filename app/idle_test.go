@@ -230,7 +230,8 @@ func TestServeParentKeepsTheEngineNotTheModel(t *testing.T) {
 	}
 	par.kill()
 	select {
-	case <-r.res: // the engine ends with its parent (linger 0), as before
+	case res := <-r.res: // the engine ends with its parent (linger 0), as before
+		r.res <- res // for the cleanup, which waits for it too
 	case <-time.After(20 * time.Second): // watchdog for silence
 		t.Fatal("the engine did not end with its parent")
 	}

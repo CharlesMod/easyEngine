@@ -49,3 +49,17 @@ func (s *Supervisor) Listeners() int { return int(s.listeners.Load()) }
 
 // CatalogNow is the catalog the engine uses now (overlays included).
 func (s *Supervisor) CatalogNow() *catalog.Catalog { c, _ := s.catalog(); return c }
+
+// PlansNow is how many reshapes are asked for the clients now, and the slot map's generation.
+func (s *Supervisor) PlansNow() (int, uint64) {
+	s.clients.mu.Lock()
+	defer s.clients.mu.Unlock()
+	return len(s.clients.plans), s.clients.gen
+}
+
+// RestartsOf is how many restarts a budget key has been charged.
+func (s *Supervisor) RestartsOf(who string) int {
+	s.clients.mu.Lock()
+	defer s.clients.mu.Unlock()
+	return s.clients.restarts[who]
+}

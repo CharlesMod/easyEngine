@@ -2,7 +2,6 @@ package run
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -234,7 +233,7 @@ type clientReg struct {
 	reLocal  bool
 	plans    map[string]reshapePlan // whose change a reshape is asked for: attachment key -> plan
 	restarts map[string]int         // budget key -> restarts its own changes caused in this life
-	profHash map[string]string      // attachment key -> the hash of the profile it last attached with
+	revokes  uint64                 // revokes begun (DetachRevoked): an attach's token read before one is read again
 	// stale: the last client with wants left; the shape it grew stands (its range vacant) until
 	// it returns, the model stops for another reason, or an under-served caller's request comes
 	stale bool
@@ -259,7 +258,6 @@ func (s *Supervisor) clientsInit() {
 	r.used = map[int]uint64{}
 	r.plans = map[string]reshapePlan{}
 	r.restarts = map[string]int{}
-	r.profHash = map[string]string{}
 	if !s.cfg.ProfileGiven {
 		return
 	}
@@ -1099,12 +1097,24 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		}
 	}()
 	model := s.selectedID()
-	hash := profileHash(req.Profile)
 	r := &s.clients
-	r.mu.Lock()
-	if req.Valid != nil && !req.Valid() {
+	// the token is read outside the clients lock (it may read the token file): a revoke that came
+	// between the read and the registration bumps r.revokes, and the token is read again
+	for {
+		r.mu.Lock()
+		g := r.revokes
 		r.mu.Unlock()
-		return AttachView{}, nil, cerr(401, "token_revoked", "the token this attach came with was revoked")
+		valid := req.Valid == nil || req.Valid()
+		r.mu.Lock()
+		if r.revokes != g {
+			r.mu.Unlock()
+			continue
+		}
+		if !valid {
+			r.mu.Unlock()
+			return AttachView{}, nil, cerr(401, "token_revoked", "the token this attach came with was revoked")
+		}
+		break
 	}
 	var old *attachment
 	// caps: a local caller's are counted over local attachments only; a remote caller's over its
@@ -1161,11 +1171,9 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 			return refuse(429, "too_many_slots", "clients on other machines would want %d slots; at most %d in all", slotsSide+prof.Slots, maxRemoteSlots)
 		}
 	}
-	// a return: the key attaches again with the profile it last had; never charged
+	// charged for any restart its attach causes; a return served from its own standing range
+	// causes none and so costs nothing, a return that needs a restart is charged as an attach is
 	charge := budgetKey(req.Identity, req.Local)
-	if r.profHash[key] == hash {
-		charge = ""
-	}
 	cand := &attachment{id: newID(), name: name, identity: req.Identity, key: key, local: req.Local, prof: prof, wanting: wanting,
 		notify: make(chan struct{}, 1), charge: charge, cred: req.Cred}
 	if old != nil {
@@ -1235,7 +1243,6 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 			resumed = r.serveFromVacantLocked(a, h)
 		}
 	}
-	r.profHash[key] = hash
 	if wanting {
 		r.stale = false // a client with wants stands again
 	}
@@ -1430,16 +1437,20 @@ func (s *Supervisor) Detach(id, identity string) *ClientError {
 // is said gone. The person's act: no restart is counted against anyone.
 func (s *Supervisor) DetachRevoked(valid func(identity, cred string) bool) {
 	r := &s.clients
+	type who struct{ id, identity, cred string }
 	r.mu.Lock()
-	var ids []string
+	r.revokes++ // an attach whose token was read before this reads it again
+	var list []who
 	for _, a := range r.list {
-		if !a.base && !a.local && !valid(a.identity, a.cred) {
-			ids = append(ids, a.id)
+		if !a.base && !a.local {
+			list = append(list, who{a.id, a.identity, a.cred})
 		}
 	}
 	r.mu.Unlock()
-	for _, id := range ids {
-		s.leaveIf(id, func(*attachment) bool { return true }, "revoked")
+	for _, w := range list { // the token store is read outside the clients lock
+		if !valid(w.identity, w.cred) {
+			s.leaveIf(w.id, func(a *attachment) bool { return a.cred == w.cred }, "revoked")
+		}
 	}
 }
 
@@ -1488,8 +1499,15 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 			// the last client with wants: nothing reshapes. Its range stays vacant for its return;
 			// the model stopping for another reason, or an under-served caller's request, reshapes
 			r.stale = true
-		case r.givesLocked():
-			r.planLocked(1, a.key, "", false, nil) // a leave is never charged
+		case a.local && r.givesLocked():
+			// a local caller's leave is the machine's own word: a reshape that gives the others
+			// something, when idle, charged to no one
+			r.planLocked(1, a.key, "", true, nil)
+		default:
+			// a remote leave never reshapes by itself (no remote act restarts the model uncharged):
+			// an attachment that waits for room is folded in by its own charged plan, else at the
+			// next start made for another reason
+			r.planWaitersLocked()
 		}
 	}
 	r.mu.Unlock()
@@ -1505,6 +1523,17 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 	s.SayClientAttachments(a.identity)
 	s.agentChanged()
 	s.wakeMind(func(c *causes) { c.clients = true })
+}
+
+// planWaitersLocked asks a reshape, when idle, for each attachment left out or waiting for room
+// (not one below its floor), on its own behalf and charged to its own budget: a waiter whose
+// budget is spent waits for the next start made for another reason.
+func (r *clientReg) planWaitersLocked() {
+	for _, a := range r.list {
+		if a.wanting && !a.base && len(a.slots) == 0 && !a.short && r.plans[a.key].level == 0 {
+			r.planLocked(1, a.key, budgetKey(a.identity, a.local), a.local, a)
+		}
+	}
 }
 
 // givesLocked: a reshape now would give someone something (an attachment left out or waiting
@@ -2082,8 +2111,6 @@ func (s *Supervisor) agentChanged() {
 	}()
 }
 
-// buildHelp is the installed llama-server's --help (nil: no build installed, or it could not be
-// read): never anything a client names is run.
 // cachedHelp is the installed build's help when it has been read already; it never runs the
 // binary (nil: not read yet).
 func (s *Supervisor) cachedHelp() *Help {
@@ -2098,16 +2125,8 @@ func (s *Supervisor) cachedHelp() *Help {
 	return nil
 }
 
-// profileHash identifies a profile for a key's return (the same profile as it last had).
-func profileHash(p *Profile) string {
-	if p == nil {
-		return "none"
-	}
-	b, _ := json.Marshal(p)
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
+// buildHelp is the installed llama-server's --help (nil: no build installed, or it could not be
+// read): never anything a client names is run.
 func (s *Supervisor) buildHelp() *Help {
 	in, ok := s.resolveInstall()
 	if !ok || in.bin == "" {

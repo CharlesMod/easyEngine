@@ -639,7 +639,8 @@ func TestLoneClientDropAndReturnBusy(t *testing.T) {
 }
 
 // The model stops for another reason (an unload): the next start uses the wants that stand (no
-// client), and the client's return grows it again, uncharged.
+// client), and the client's return grows it again: a restart its own attach causes, charged as an
+// attach is (a free return is only one served from its standing range).
 func TestLoneClientReturnAfterAnUnload(t *testing.T) {
 	e, s, _ := clientsEnv(t, true, nil)
 	_, rs, _ := remoteSrv(t, s)
@@ -662,13 +663,14 @@ func TestLoneClientReturnAfterAnUnload(t *testing.T) {
 	R2 := openHold(t, rs, loneR, tok(1))
 	m := R2.untilGiven(2)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 3 {
+	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 2 {
 		t.Fatalf("return after an unload: starts %d (from %d), restarts left %d", got, n, restartsLeft(m))
 	}
 }
 
 // Another caller reshaped the client's range away (a local client that wanted more); the
-// client's return grows the model again, uncharged.
+// client's return grows the model again, charged (S2: else leave and return would restart the
+// model for nothing, forever).
 func TestLoneClientReturnAfterAnotherReshaped(t *testing.T) {
 	e, s, srv := clientsEnv(t, true, nil)
 	_, rs, _ := remoteSrv(t, s)
@@ -688,14 +690,14 @@ func TestLoneClientReturnAfterAnotherReshaped(t *testing.T) {
 	}
 	m := R2.untilGiven(2)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if got := len(e.Starts()); got != n+2 || restartsLeft(m) != 3 {
+	if got := len(e.Starts()); got != n+2 || restartsLeft(m) != 2 {
 		t.Fatalf("return: starts %d (from %d), restarts left %d", got, n+1, restartsLeft(m))
 	}
 	// a change of its wants is charged
 	R3 := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":3,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
 	m = R3.untilGiven(3)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if restartsLeft(m) != 2 {
+	if restartsLeft(m) != 1 {
 		t.Fatalf("a change of wants: restarts left %d", restartsLeft(m))
 	}
 }

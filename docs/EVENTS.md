@@ -71,7 +71,8 @@ type Event struct {
   step of bytes, never per time), `upgrade`, `build` (the llama.cpp build that runs and the move to the catalog's pin; ENGINE.md §3), `room` (reading: adapters, reserve, free for the model),
   `yield`, `recovery`, `error` (happening), `request` (happening: begin, end, slot, tokens, tok/s),
   `attachment` (keyed) and `wants` (§5),
-  `context` (happening: saved, laid back, let go).
+  `context` (happening: saved, laid back, let go), `vision` (fact: the projector loaded, and why
+  not) and `vision.progress` (reading: its download, said per step of bytes).
 
 ## 3. What replaces each poll
 

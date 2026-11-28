@@ -98,7 +98,8 @@ fsync and rename:
     "grace_s": 15,
     "steady_s": 60,
     "strict": false
-  }
+  },
+  "vision": false
 }
 ```
 
@@ -982,7 +983,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer` and `keep_context`. `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always", vision?: bool}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context` and `vision` (a change of `vision` reloads the running server when idle if it loads or drops the projector; §7h). `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
 | `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |
@@ -1717,6 +1718,91 @@ to 4 KiB) were 5192 MB against 5218 MB counted, and the cudart step's sampled pe
 its count; free space on that system disk moved by up to 300 MB either way during a run from
 other programs (remote-desktop traces, a WSL disk), which is what the headroom is for there.
 
+### 7h. Vision: a model's projector (ee-vision)
+
+A catalog model may carry a vision **projector** (an mmproj GGUF, `catalog/projector.go`):
+
+```json
+"projector": {
+  "file": "gemma-4-26B-A4B-it-mmproj-F16.gguf",
+  "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/c099eb48e663fd284577b04978a94ffccb261841/mmproj-F16.gguf",
+  "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+  "size": 1193058784,
+  "load_mib": 1296, "image_mib": 130, "max_image_tokens": 512,
+  "detail": {"low": 512, "high": 768, "max": 1024}
+}
+```
+
+`file` is the local name in `models/` (plain, never another model's file; two models share one
+only when it is the same download), `url` is pinned to a commit (tools/gencatalog resolves sha256
+and size from that commit's LFS metadata, `tools/gencatalog/projectors.go`), `load_mib` is what
+loading it adds on the card and `image_mib` what the first image adds on top, `max_image_tokens`
+the most tokens one image becomes under the engine's batch settings (0: not capped by them), and
+`detail` the long edge in pixels an image is scaled down to for each detail level of the look call
+(never up). Campfire (Gemma 4 26B, measured on a P40 and an RTX 5080 with b12651-easy1): at
+`-ub 512` an image is capped at 512 tokens (384 px about 82, 512 about 90, 768 about 194, 1024
+about 338), so `low` 512 (about the cost of 384), `high` 768, `max` 1024, the largest measured
+size under the cap; past it llama-server shrinks the image to the cap itself, so bigger bytes buy
+nothing. The engine's batch settings are not changed for vision. The proposal for Bonfire's
+projector (Qwen 27B, about (W/32)x(H/32) tokens, not capped by `-ub`): `load_mib` 852,
+`image_mib` 106 (958 at peak), `max_image_tokens` 0, `low` 768, `high` 1536 (measured, about
+1317 tokens at 1536x864), `max` 2048 (not measured; about 2300 tokens at 16:9).
+
+**Wanting it.** Vision is wanted when the setting `vision` is true (`PUT settings {"vision":
+true}`, from this machine or with the master key; `settings.json` "vision"), for one run by
+`serve --vision` (never written back), or when any attachment's profile says `"vision": true`
+(local or remote). A change of the attachments' merged want that makes the running server load
+or drop the projector is a change of wants: planned like any other (§7g) and charged to a
+remote client's restart budget; a return with the same profile is free; a leave is never
+charged. A change of the setting reloads the server when it is idle.
+
+**The file.** When vision is wanted and the served model's projector is not in `models/`, it is
+downloaded in the background (fetch.Download: resumed `.part`, sha256 verified before the
+rename; an attempt that moves no bytes waits for a word, never a cadence), its progress in
+status `vision_progress` and the reading `vision.progress`. The model serves text meanwhile;
+when the file is verified and vision is still wanted, the running server reloads when idle. A
+download that fails or does not match its sha256 is not tried again until vision is asked for
+anew (the setting, an attach); `vision_note` says so and status `errors` says why. Storage lists
+the file with its model's id and `projector: true`; it cannot be deleted while vision is wanted
+for the served model, while it is loaded, or while it downloads (409); deleting a model by id
+removes its projector too, unless another catalog model uses the same file.
+
+**The launch.** `--mmproj <models>/<file>` is given only when vision is wanted, the served model
+has a projector, the file is present at its catalog size (it has its final name only once its
+hash matched), and the build's `--help` knows `--mmproj`. Every projector and media flag is
+engine-owned (`flag_owned` in `extra_args`) and the matching environment variables are stripped
+(below, "Media from remote callers"). llama-server then says "cache_reuse is not supported by
+multimodal, it will be disabled"; measured on Gemma, text turns lose nothing by it.
+
+**The room.** A start that is to load the projector gives the fit `load_mib + image_mib` less
+of the card: the room's `Margin` grows by that much (`run/vision.go withProjectorRoom`, applied
+in `roomSensed`, so the first fit, every restart, reshape and the held-room checks of a running
+server use the same rule; a margin of 0, "the default", is first made the default explicitly).
+The sizing core is not changed: its budget is the card less others, the game's reserve and the
+margin, and the projector sits on the card (the engine never gives `--no-mmproj-offload`), so
+for an MoE model the fit keeps fewer expert layers on the card or a smaller cache, exactly as
+if another program held that much; host RAM is not charged, since the projector is not in it.
+On a Mac (unified memory) the card is the pool the fit is given (a share of RAM), and the
+projector comes out of that same pool, so the same reduction is right. With no GPU the room is
+left as it is. If the model does not fit with the projector (or a remote client's floor is not
+reached with it), the projector is dropped before any client is left out: the model serves
+text and `vision_note` says it does not fit. A load that runs out of memory with the projector
+is tried once more at once at the same shape without it. The calibration book learns the model
+alone: a reading taken with the projector loaded has `load_mib` taken off.
+
+**Telling.** Status `vision` (true only while the running server has the projector loaded),
+`vision_note` (why not, while vision is wanted; "" otherwise; never an error text or a path)
+and `vision_progress`; hello `vision`; the reduced status a paired client sees keeps `vision`
+and `vision_note`. The fact `vision` `{vision, note}` is said when either changes. The
+prompt-cache key carries the projector's sha256 (`run/context.go`), so a slot saved with the
+projector is never laid back onto a server without it, nor the other way ("the vision projector
+was added or removed").
+
+**Images.** A local caller may send images in a chat body untouched. A remote caller's body
+with any media is refused (below); with vision off a local body with an image is left alone
+(llama-server answers it with a clean error: 500 "image input is not supported" on the chat
+paths, 400 on `/completion`).
+
 #### Media from remote callers
 
 A caller from another machine (`localCaller` false: a real non-local peer, or any forwarding
@@ -1775,6 +1861,9 @@ Written by the game's mod, passed with `--profile`. Game-agnostic fields only:
 `models` (optional: `prefer`, `can_use`) are the launch options and model advice of §7g; the
 file's are the base attachment's.
 
+`vision` (optional, `true`/`false`) asks for the served model's vision projector (§7h); the
+attachments' wants are merged as "any of them wants it".
+
 `host_files_mib` (optional) is how far the host's own files on the engine's disk may still grow,
 e.g. the agent's call log at its cap times its copies; every disk check counts it in full (§7c).
 `agent.disk_bytes` (optional) replaces the catalog's measured agent runtime size.
@@ -1807,7 +1896,7 @@ and `_MODEL=<model>`). The old names are kept too, see "Renamed from hermes-engi
 ```
 easy-engine [app]   [--port N] [--host H [--open]] [--linger D] [--yield-to-games ...]   a tray icon; stays open, waits for a connection (§6a)
                       the defaults are settings.json (§2); the flags override them for one run, never written back
-easy-engine serve   --profile F --parent-pid P [--port N] [--host H [--open]] [--linger D]
+easy-engine serve   --profile F --parent-pid P [--port N] [--host H [--open]] [--linger D] [--vision]
                       [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                        [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]   §6b
 easy-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed

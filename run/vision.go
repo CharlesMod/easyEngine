@@ -161,7 +161,7 @@ func (s *Supervisor) visionWantChanged(why string, restart bool) {
 		// when the next start plans it
 		try, note := s.visionPlan(in, wanted)
 		if try && !snapLoaded {
-			note = "the vision projector is loaded when the model server is next idle"
+			note = "the vision projector is loaded at the model server's next restart (when it is idle)"
 		}
 		s.mu.Lock()
 		if !snapLoaded && running {

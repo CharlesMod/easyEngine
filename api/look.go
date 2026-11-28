@@ -88,6 +88,10 @@ func lookBusy(why string) *run.ClientError {
 	return &run.ClientError{Status: 429, Code: "busy", Msg: why}
 }
 
+func lookTooLarge(n int) *run.ClientError {
+	return lookBad("look_too_large", "the look's images come to %d MiB once built; at most %d MiB from another machine (fewer images or a lower detail)", n>>20, maxRemoteBody>>20)
+}
+
 func lookBad(code, format string, args ...any) *run.ClientError {
 	return &run.ClientError{Status: 400, Code: code, Msg: fmt.Sprintf(format, args...)}
 }
@@ -332,6 +336,7 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content := make([]map[string]any, 0, 2*len(q.images)+1)
+	builtSize := 0
 	for i, im := range q.images {
 		res, ie := lookimg.Prepare(im.data, edge, lookimg.Default)
 		q.images[i].data = "" // each caller image is let go once it is built
@@ -341,6 +346,12 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		}
 		if im.label != "" {
 			content = append(content, map[string]any{"type": "text", "text": im.label})
+		}
+		// a remote look's built images are bounded as they are made, not only once all are built
+		builtSize += base64.StdEncoding.EncodedLen(len(res.Data))
+		if !local && builtSize > maxRemoteBody {
+			clientFail(w, lookTooLarge(builtSize))
+			return
 		}
 		uri := "data:" + res.MIME + ";base64," + base64.StdEncoding.EncodeToString(res.Data)
 		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
@@ -367,7 +378,7 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !local && len(built) > maxRemoteBody {
-		clientFail(w, lookBad("look_too_large", "the look's images come to %d MiB once built; at most %d MiB from another machine (fewer images or a lower detail)", len(built)>>20, maxRemoteBody>>20))
+		clientFail(w, lookTooLarge(len(built)))
 		return
 	}
 	a.looks.decoded()

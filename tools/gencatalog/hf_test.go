@@ -162,6 +162,20 @@ func TestModelsOnlyKeepsTheRest(t *testing.T) {
 		}
 	}
 
+	// the projectors are part of their models: -models-only rebuilds them at their pinned commits
+	for id, sp := range projectorSpecs {
+		var got *catalog.Projector
+		for _, m := range pa.Models {
+			if m.ID == id {
+				got = m.Projector
+			}
+		}
+		if got == nil || got.File != sp.local || got.SHA256 != strings.Repeat("33", 32) ||
+			got.URL != srv.URL+"/"+sp.repo+"/resolve/"+sp.rev+"/"+sp.file {
+			t.Errorf("projector of %s after -models-only: %+v", id, got)
+		}
+	}
+
 	// unchanged Hugging Face data: a second run is byte-identical
 	if err := refreshModels(hfClient(srv), out, 0); err != nil {
 		t.Fatal(err)

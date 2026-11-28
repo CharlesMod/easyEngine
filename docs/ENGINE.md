@@ -1844,7 +1844,10 @@ A catalog model may carry a vision **projector** (an mmproj GGUF, `catalog/proje
 
 `file` is the local name in `models/` (plain, never another model's file; two models share one
 only when it is the same download), `url` is pinned to a commit (tools/gencatalog resolves sha256
-and size from that commit's LFS metadata, `tools/gencatalog/projectors.go`), `load_mib` is what
+and size from that commit's LFS metadata, `tools/gencatalog/projectors.go`, through the same
+Hugging Face base as the models; the projectors are part of their models' entries, so the full
+run and `-models-only` both rebuild them, and at a pinned commit the result is the same),
+`load_mib` is what
 loading it adds on the card and `image_mib` what the first image adds on top, `max_image_tokens`
 the most tokens one image becomes under the engine's batch settings (0: not capped by them), and
 `detail` the long edge in pixels an image is scaled down to for each detail level of the look call
@@ -1872,9 +1875,18 @@ does not start, `vision_note` says "no room on disk for the vision projector (ne
 (the sizes are in status errors, no path), text keeps serving, and the next want (the setting
 toggled, an attach) checks again. Remove downloads lets a projector download go (it is not
 recorded as failed) and waits for it to stop writing before it deletes the `.part`. A change of the attachments' merged want that makes the running server load
-or drop the projector is a change of wants: planned like any other (§7g) and charged to a
-remote client's restart budget; a return with the same profile is free; a leave is never
-charged. A change of the setting reloads the server when it is idle.
+or drop the projector is a change of wants: planned like any other (§7g), by the rules of the
+remote restart budget there (charged to the remote client whose attach asks it, per waking
+period; an attach while the model is unloaded is not charged, and the next start loads the
+projector). A local leave of the last want of vision lets the projector go when idle; a remote
+leave restarts nothing by itself, so the projector stays loaded until the next start made for
+another reason. A change of the setting reloads the server when it is idle.
+
+**Which projector.** Always the projector of the model that is loaded: under a tier step
+(§3, a selected model too big for the card served by a lower tier) it is the serving tier's,
+not the selection's. `vision`, the storage protection, and the look call's detail table and
+`chat_template_kwargs` all follow it. A tier that fits only without its projector serves text
+there (the projector is dropped before a lower tier is tried).
 
 **The file.** When vision is wanted and the served model's projector is not in `models/`, it is
 downloaded in the background (fetch.Download: resumed `.part`, sha256 verified before the
@@ -1967,11 +1979,27 @@ sampler policy. The remote media checks are skipped for it alone (the mark is th
 set in the request's context, never a header).
 
 **Bounds.** At most 2 looks decode images at once, engine-wide; a caller from another machine
-has one look at a time (from its body to its answer); the built requests of remote looks hold at
-most 64 MiB in all; a remote look whose built request passes 16 MiB (the remote body bound) is
-400 `look_too_large`. Over any of these the answer is 429 `busy` at once: nothing waits for
-room. The body itself is read by the proxy's bounded read (16 MiB and 8 at once from other
-machines, 64 MiB locally; silence and total timeouts).
+has one look at a time (from its body to its answer). A remote look's bytes count against the
+proxy's one bound of remote bodies kept (64 MiB of bodies read and not yet ended, §7g): its
+body while it is decoded, then the request built from it while that request lives; so looks and
+other remote requests share the 64 MiB, never 64 MiB each. A remote look whose built images pass
+16 MiB (the remote body bound) is 400 `look_too_large`, judged as each image is built. Over a
+bound the answer is 429 `busy` at once: nothing waits for room. The body is read by the proxy's
+bounded read (16 MiB and 8 at once from other machines, 64 MiB locally; silence and total
+timeouts).
+
+**Worst-case memory for callers from other machines: about 530 MiB.** That is the 64 MiB of
+kept remote bodies (looks included) plus 2 looks decoding at once, each at most about 232 MiB:
+its image strings (at most 16 MiB, the body bound), one file (8 MiB), its pixels (16 Mi px as
+RGBA, 64 MiB), the scaled copy (never more pixels than the source, 64 MiB), its re-encoding (at
+most about 64 MiB) and the built image parts (16 MiB). With Campfire's table (long edge at most
+1024 px) the scaled copy and its encoding are at most 4 MiB each, and the worst case is about
+400 MiB. Local looks share the 2 decoders and are not otherwise counted.
+
+**Without an attachment.** A look is a chat request of its caller's at the door, so a remote
+caller with no attachment is treated exactly as its chat request would be: served from the
+commons when that request would be, `409 attach_required` when that request would be (the only
+free slots still hold a departed client's context), and an `id_slot` confined the same way.
 
 **Answers.**
 - `409 vision_off` when the model server runs without a projector, when the served model has
@@ -1982,8 +2010,9 @@ machines, 64 MiB locally; silence and total timeouts).
   `tokens.completion` are the model server's `usage.prompt_tokens` and `usage.completion_tokens`
   (prompt counts the image tokens and cached tokens); `ms.prefill` is `timings.prompt_ms` (it
   includes the image encode, not the engine's decode) and `ms.total` is `timings.prompt_ms +
-  timings.predicted_ms`, rounded. llama-server says nowhere how many tokens the images became, so
-  `tokens.image` is -1; any figure the answer does not carry is -1. A refusal of the door or an
+  timings.predicted_ms`, rounded. `tokens.image` is -1: -1 means the model server does not report
+  that figure (llama-server b12651 says nowhere how many tokens the images became; the engine
+  does not estimate it); any other figure the answer does not carry is -1 too. A refusal of the door or an
   error of the model server is passed on as it came.
 - Streamed (`stream: true`): the chat-completion event stream exactly as the proxy streams it
   (the hold's waiting word, every chunk, the usage chunk), and one more event just before

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -48,6 +49,54 @@ func settle(t *testing.T, s *run.Supervisor) {
 	t.Fatal("plans still asked after 8 starts")
 }
 
+// bindFails is how many starts could not bind their port and never listened (the fake's
+// bindfails.log): the engine starts again after one, as the same start.
+func bindFails(e *testkit.Env) int {
+	b, err := os.ReadFile(filepath.Join(e.Ctl, "bindfails.log"))
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
+}
+
+// The walk's intermittent (6 restarts, 5 charged, under load): a reshape's start lost its port to
+// another process between the engine's pick (freePort) and llama-server's bind; the server
+// exited while loading and the mind started it again as an error's retry. One restart, charged
+// once, two lines in starts.log; and the lost port counted as a failure, so a second one before
+// the run was stable left the engine waiting in error. Held here at that point by the fake's
+// bindfail: the launch starts again at once on a new port, counts no failure, the charge is
+// one, and the walk's count of restarts takes the start that never listened out.
+func TestStartThatNeverListenedIsOneRestart(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	clAttach(t, s, remoteReq("client-1", "x", 1))
+	settle(t, s)
+	n, f, c := len(e.Starts()), bindFails(e), s.RestartsOf("client-1")
+	if err := os.WriteFile(filepath.Join(e.Ctl, "bindfail"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clAttach(t, s, remoteReq("client-1", "x", 4)) // a change of wants: one charged restart
+	settle(t, s)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("phase %s, starts %d (from %d), bind failures %d (from %d), charged %d", s.Phase(), len(e.Starts()), n, bindFails(e), f, s.RestartsOf("client-1"))
+		}
+	})
+	// (under load another process may take a port too: each lost one is a start that never listened)
+	testkit.WaitFor(t, 15*time.Second, "ready after the retry", func() bool {
+		return s.Phase() == "ready" && len(e.Starts()) == n+1+bindFails(e)-f
+	})
+	if bindFails(e) < f+1 || s.RestartsOf("client-1") != c+1 {
+		t.Fatalf("bind failures %d (from %d), charged %d (from %d)", bindFails(e), f, s.RestartsOf("client-1"), c)
+	}
+	if r := s.Status().Recovery; r != nil {
+		t.Fatalf("a lost port was counted as a failure: %+v", r)
+	}
+	if restarts := len(e.Starts()) - n - (bindFails(e) - f); restarts != 1 {
+		t.Fatalf("the walk's count: %d restarts for one change", restarts)
+	}
+}
+
 // spend charges who's whole budget by changes of its wants on one attachment.
 func spend(t *testing.T, s *run.Supervisor, who, name string) {
 	t.Helper()
@@ -83,9 +132,11 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 			on := map[string]*state{} // who/name -> standing attachment
 			last := map[string]int{}  // who/name -> the slots it last attached with
 			charged := func() int { return s.RestartsOf("client-1") + s.RestartsOf("client-2") }
-			from, woke, periods, down := len(e.Starts()), 0, 0, false
+			from, failed, woke, periods, down := len(e.Starts()), bindFails(e), 0, 0, false
 			endPeriod := func(step int) {
-				restarts := len(e.Starts()) - from - woke
+				// a start that never listened (its port taken between the engine's pick and its bind,
+				// as under load) is retried: the retry is the same restart, not another
+				restarts := len(e.Starts()) - from - woke - (bindFails(e) - failed)
 				if c := charged(); restarts > c || c > 8 {
 					t.Fatalf("step %d: a waking period had %d restarts by remote acts, %d charged (budgets 8)", step, restarts, c)
 				}
@@ -105,7 +156,7 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 					down = true
 					continue
 				case down && rng.IntN(4) == 0: // a first request loads it: a new period
-					from, woke = len(e.Starts()), 1
+					from, failed, woke = len(e.Starts()), bindFails(e), 1
 					go s.Wake()
 					testkit.WaitPhase(t, s, "ready", 15*time.Second)
 					down = false

@@ -44,6 +44,9 @@
 //	  loadgate   while present (a FIFO the test made), a start waits while loading until the test
 //	             writes to it and closes it: a start held in its loading window, by an event
 //	  savefail / restorefail  while present, slot save / restore answer 500 (nothing written)
+//	  bindfail   once (removed when taken): the next start fails to bind its port, as when another
+//	             process takes it between the engine's pick and the bind
+//	  bindfails.log  written: one line per start that could not bind its port (it never listened)
 //	  slots.log  written: one line per slot save ("save <id> <name> <n>") and restore attempt
 //	             ("restore <id> <name> ok|fail"); needs --slot-save-path to be served at all
 //	  healthy    written (with the pid) when /health turns 200
@@ -765,8 +768,18 @@ func main() {
 		mux.ServeHTTP(w, r)
 	})
 	ln, err := net.Listen("tcp", addr)
+	if err == nil && ctl != "" && os.Remove(filepath.Join(ctl, "bindfail")) == nil {
+		ln.Close() // as if another process took the port between the engine's pick and this bind
+		err = fmt.Errorf("listen tcp %s: bind: address already in use", addr)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		if ctl != "" { // a start that never listened: not a running server's restart
+			if f, ferr := os.OpenFile(filepath.Join(ctl, "bindfails.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+				fmt.Fprintf(f, "pid=%d %v\n", os.Getpid(), err)
+				f.Close()
+			}
+		}
 		os.Exit(1)
 	}
 	if v := os.Getenv("FAKELLAMA_VMM"); v != "" { // the patched build's word on its CUDA buffers ("on (1 device)")

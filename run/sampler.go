@@ -84,7 +84,7 @@ func (s *Supervisor) samplerLocked() SamplerInfo {
 				info.Note = "custom file not set: requests pass through untouched"
 			}
 		} else if cat != nil {
-			if m, ok = cat.Model(s.st.Model); !ok {
+			if m, ok = cat.Model(s.servedIDLocked()); !ok {
 				info.Note = fmt.Sprintf("model %q is not in the catalog: requests pass through untouched", s.st.Model)
 			}
 		}

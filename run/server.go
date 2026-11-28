@@ -51,7 +51,7 @@ func (s *Supervisor) roomSensed(ctx context.Context, hw probe.Hardware, ourPIDs 
 		return r, sn
 	}
 	s.mu.Lock()
-	id := s.st.Model
+	id := s.servedIDLocked()
 	s.mu.Unlock()
 	if cat, err := s.catalog(); err == nil { // speed curves were measured on one card; others plan slower
 		if m, ok := s.modelFor(cat, id); ok {
@@ -146,6 +146,7 @@ func (s *Supervisor) startLocked() error {
 	}
 	s.setPhase("starting", "Choosing a shape")
 	s.clearExcl() // every client is in the merge again: the shape is chosen afresh
+	s.dropStep()  // every start tries the selected model first (tiers.go)
 	lc, room, w, err := s.loadContext(ctx)
 	if err != nil {
 		return s.failStart(err, true)
@@ -169,8 +170,11 @@ func (s *Supervisor) startLocked() error {
 		shape, err = fit.Choose(lc.fp, room, w)
 	}
 chosen:
-	if err != nil { // another app may be holding the card: look again slowly, never give up for good
-		return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
+	if err != nil {
+		var stepped bool
+		if lc, room, w, shape, stepped = s.stepTier(ctx, lc, room, w); !stepped { // another app may be holding the card: look again slowly, never give up for good
+			return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
+		}
 	}
 	if shape, err = s.belowCeiling(lc, shape, room, w); err != nil {
 		return s.failSlow(err)

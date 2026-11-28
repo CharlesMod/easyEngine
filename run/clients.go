@@ -1013,13 +1013,15 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 	return v
 }
 
+// selectedID is the model a client's can_use is judged against: the one that serves (the
+// selection, or the tier it stepped down to: tiers.go), never a selection that is not loaded.
 func (s *Supervisor) selectedID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st.Mode == "external" {
 		return s.st.External.Model
 	}
-	return s.st.Model
+	return s.servedIDLocked()
 }
 
 // AttachClient is POST attach. A profile is checked first (checkProfile); then, under one lock,

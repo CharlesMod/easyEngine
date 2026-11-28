@@ -960,7 +960,9 @@ paired token: scoped as a paired token is, with the reduced status; the master k
 as `master@<ip>`), and it is never the identity `loopback`. **A reverse proxy in front of the
 loopback listener must pass a token** (the master key, or a paired one per client). The engine
 reads the token file for this and never makes one on loopback; with no file, such a request is
-401. A plain loopback request, and the setup page in a local browser, are unchanged. The proxy drops every `Access-Control-*` header the
+401, and its message names the header ("this request carries X-Forwarded-For, so it is treated as
+coming from another machine and needs a token"), so a program of this machine that sends one by
+mistake learns why. A plain loopback request, and the setup page in a local browser, are unchanged. The proxy drops every `Access-Control-*` header the
 upstream sent, so a model server cannot grant a web page access, and it never passes the
 client's `Authorization` header to the local llama-server.
 
@@ -1479,8 +1481,11 @@ or the listener's own address), the gate's client is the loopback listener, the 
 `--open` or the master token, and the request carries no forwarding header (`Forwarded`,
 `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `Via`, any `Tailscale-*`):
 a header can only take privilege away. Every paired token is **remote**. A forwarder on this
-machine that adds no such header (`ssh -L`, `socat`) makes its callers local: put such a forwarder
-only where everyone who can reach it may act as this machine. A remote caller with no id of its own
+machine that adds no such header (`ssh -L`, `socat`, and a reverse proxy such as nginx's
+`proxy_pass` with its defaults, which adds none) makes its callers local: put such a forwarder only
+where everyone who can reach it may act as this machine. A reverse proxy for other machines must
+add `X-Forwarded-For` (then its callers are remote and need a token, §7 gate), or point at a
+non-loopback listener (`--host`). A remote caller with no id of its own
 is told apart by address: `open@<ip>` on an `--open` listener, `master@<ip>` for the master token
 from another machine.
 
@@ -1708,15 +1713,29 @@ remote, is run unconfined, and no slot serves two owners in turn while it still 
 prompt. Each slot carries whose prompt it holds (its tag: an attachment's key; `commons` for this
 machine and the master key, which trust each other; `anon:<identity>` for a remote caller in the
 commons). A slot changes owner only in two ways: the server restarted in between (a new process:
-nothing held but what the lay-back puts back into its owner's slot), or the slot is erased
-first: the door picks the slot (one already holding the caller's own prompt first, then one that
-needs no erase, then the least recently used) and, when it holds another's, sends `POST
-/slots/{n}?action=erase` and waits for its answer before the request goes (llama-server: the
-erase waits while the slot is processing, server-context.cpp:3307-3332; it clears the slot's
-tokens and its memory, :393-399, and needs `--slot-save-path`, :5834-5837, which the engine
-always passes). An erase that fails is 502 `slot_not_cleared`, and the slot is taken to hold
-anyone's (every next owner erases it). So a remote client may be given another's vacant range
-without a restart: each slot is erased on its first use.
+nothing held but what the lay-back puts back, labelled with its owner, below), or the slot is
+erased first. **The engine orders every handover, never the model server**: llama-server's erase
+and completion are separate tasks; an erase on a busy slot is deferred, a completion naming a busy
+slot is deferred with its `id_slot`, and when the slot releases it takes back first the deferred
+task naming that slot (server-queue.cpp:90-112), which an erase never does (its `id_slot` is -1).
+So the door picks the slot (a free one with no handover waiting: one already holding the caller's
+own prompt, then one that needs no erase, then the least recently used; an idle slot of the range
+before a busy one) and, when it holds another's prompt:
+1. the request waits in the engine until no request the door sent to that slot is still running
+   (each one's end is the event; a request's mark ends only after the model server has its task:
+   the client's going does not end it upstream before the model server answered its headers);
+2. it sends `POST /slots/{n}?action=erase` and waits for the answer (llama-server clears the
+   slot's tokens and memory, server-context.cpp:393-399; it needs `--slot-save-path`,
+   :5834-5837, which the engine passes);
+3. only on the erase's 200 is the slot labelled the newcomer's, and the request goes.
+While a handover waits or runs on a slot, every other request for that slot, whoever sends it
+(the newcomer's next one, the old owner's), waits behind it in the engine in arrival order. A
+remote caller's waiting request counts among its held ones (429 `busy` past its share); one whose
+client goes leaves the line. An erase that fails is 502 `slot_not_cleared`, and the slot is
+labelled anyone's (every next owner erases it); a restart while it waits is 503 `slot_lost`. The
+`request` happening says `{what: slot_wait, slot, waiting}` as the line changes. So a remote
+client may be given another's vacant range without a restart: each slot is erased on its first
+use.
 
 Nothing is confined only while the map holds no attachment's range and no untrusted caller's
 prompt, and then only for a trusted caller: exactly as before clients. A remote caller with no
@@ -1726,7 +1745,7 @@ from its source; `api/paths.go`):
 | Paths | Slot | At the door |
 |---|---|---|
 | `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` other than absent, `null` or the literal `1` is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329; the server casts the value to int32, so `-4294967294` would be 2); `extra_params` in a `/v1/messages` body is 400 `extra_params_not_offered` (llama-server unpacks it over the converted body, server-chat.cpp:680-685, so past the door's `id_slot` and `n`) |
-| `POST /slots/{n}?action=erase` | one, by the path | confined; save and restore refused (403) |
+| `POST /slots/{n}?action=erase` | one, by the path | confined; exactly one `action=erase` in the URL and no form body, else 400 (a POST with no action too); the request upstream is the engine's own (the path, `action=erase`, no body); save and restore refused (403) |
 | `/embedding(s)`, `/v1/embeddings`, `/rerank(ing)`, `/v1/rerank(ing)`, `/tts`, `/(v1/)audio/speech`, `/(v1/)audio/transcriptions` (multipart), `GET /v1/realtime`, `/v1/systemone` | one the server picks | not confinable |
 | `/responses`, `/v1/responses` | one the server picks (its conversion drops `id_slot`, server-chat.cpp:32) | not confinable |
 | `/v1/chat/completions/control`, `POST /lora-adapters`, `POST /props`, `/predict`, any POST not in this table | another request, every slot, or unknown | not confinable |
@@ -1740,6 +1759,14 @@ the door can neither keep to a range nor erase first. Otherwise it is passed for
 tokenize and model paths at all: the gate's scope, `api/scope.go`; an `--open` caller from
 another machine the same. The table holds for the master key from another machine, which the gate
 does not scope.)
+
+The engine's own agent (its URL variables point at the door, `run/agent.go`) and the chat window
+(llama-server's web UI under `/chat/ui/`, proxied through the door) are this machine's callers
+like any other: while a client holds a range their completions run in the commons (held while the
+engine reshapes to give it one), `GET /slots` shows them only the commons' slots, and a path that
+cannot be confined (embeddings, `/v1/responses`, `POST /props`) is 403 `path_not_offered` until
+no client holds a range. The agent's and the web UI's own request paths live outside this
+repository and are not checked here.
 
 A confined request **fails closed**: its body must be exactly one JSON object (a byte-order mark,
 an empty body, an array, trailing data, a top-level key given twice or nesting deeper than 64 is
@@ -1792,9 +1819,33 @@ slot's erase (the invariant), and with the RAM prompt cache on, only its own ret
 it without a restart. Callers of this machine and the master key trust each other: no erase
 between them.
 
-A context saved from a client's slot goes back into that client's slot of the same number after a
-reshape; one saved from a slot no client owned goes back only into the same number when no client
-owns it in the new map, else it is let go (`that slot belongs to a client now`).
+**Kept contexts carry their owner.** At a sleep, stop, reshape, grow, shrink, yield or install, a
+slot is saved only when its tag is an attachment's key or the trusted commons'; an untrusted
+caller's prompt in the commons (`anon:`) and a slot whose erase failed (`?`) are never saved, so
+after the restart the slot is simply empty. Each kept file records its owner tag (`owner` in the
+index); the lay-back puts it back only into a slot the new map gives the same owner: a client's
+into that client's slot of the same number after a reshape, the commons' into the same number
+when the commons owns it in the new map (or the base's range, for the base's own), and labels the
+slot with that owner. Anything else is let go (`that slot belongs to a client now`; a file of an
+older engine that names no owner is let go too).
+
+**Reading slots.** `GET /slots` answers every slot's prompt and generated text and its token
+counts (llama-server's to_json, server-context.cpp:835-866). The door filters it for every caller,
+this machine's and the master key included: a slot whose tag is not the caller's own (its
+attachments' keys; the commons for a trusted caller; its `anon:` tag for a remote one) keeps only
+`id`, `is_processing` and `n_ctx`. With one owner in the map nothing is hidden. The other read
+paths carry no slot text: `/props` is the server's start settings (cached), `/metrics` the
+whole server's counters (prompt and cached tokens summed over every caller), `/health` its status.
+This is a rule of the wire: whoever owns the machine can still read the engine's files (kept
+contexts, logs) and the processes' memory.
+
+**Form bodies.** cpp-httplib folds a form-encoded body into the request's parameters, and
+llama-server reads them beside the query with the last value winning (server-http.cpp get_params):
+`?action=erase` with a form body `action=restore` would be a restore. The door reads slot actions
+from the URL alone and refuses a form-encoded or multipart body (400 `bad_request`) on every path
+where it reads the URL or a JSON body: the confined completion paths, slot actions, the resumable
+stream paths. The completion handlers read only the JSON body, so no form could set `id_slot`,
+`n` or `cache_prompt` there; the refusal keeps it that way.
 
 - samplers: `X-Easy-Sampler` is looked up in the attachment's own profiles first.
 - the `request` happening's begin and end say `attachment`; the end says `client_slot` (its own

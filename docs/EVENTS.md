@@ -158,8 +158,14 @@ one budget), never counted against a local caller's. None stating any: the profi
   held while the engine reshapes to give the commons a range, and for a remote one 409
   `attach_required`. The invariant: a request runs only in its own range (its attachment's or the
   commons); while the map holds any attachment's range no caller is run unconfined; a slot changes
-  owner only by a restart or an erase the door sends and waits for before the request (each slot
-  tagged with whose prompt it holds). The RAM prompt cache is on only with no listener but loopback
+  owner only by a restart or an erase (each slot tagged with whose prompt it holds). The engine
+  orders a handover, never the model server: the newcomer waits in the engine until no request the
+  door sent to the slot runs (each end is the event), then the erase is sent and answered, and only
+  on its 200 is the slot labelled the newcomer's; every other request for the slot waits behind it
+  in arrival order (the `request` happening, what `slot_wait`). A kept context carries its owner and
+  is laid back only into that owner's slot; an untrusted caller's prompt or an unclean slot is never
+  kept. `GET /slots` shows a caller only its own slots' detail; a slot action is rebuilt by the door
+  (exactly `action=erase`, no body) and form bodies are refused where the door reads a body. The RAM prompt cache is on only with no listener but loopback
   and one owner. Local callers and the master key trust each other; an `--open` remote
   caller is held to the paired allow list; the master key from another machine is unrestricted.
   `n`/`n_cmpl` other than absent, null or the literal 1 in a confined body is 400 `n_not_offered`

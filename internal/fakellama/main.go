@@ -43,6 +43,7 @@
 //	  loadfail   while present, every start fails while loading with a non-memory error
 //	  loadgate   while present (a FIFO the test made), a start waits while loading until the test
 //	             writes to it and closes it: a start held in its loading window, by an event
+//	  erasefail  while present, slot erase answers 500 (nothing cleared)
 //	  savefail / restorefail  while present, slot save / restore answer 500 (nothing written)
 //	  bindfail   once (removed when taken): the next start fails to bind its port, as when another
 //	             process takes it between the engine's pick and the bind
@@ -845,6 +846,10 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 	id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/slots/"))
 	if err != nil || id < 0 || id >= np {
 		fail(400, "Invalid slot ID", "invalid_request_error")
+		return
+	}
+	if action == "erase" && exists("erasefail") {
+		fail(500, "fake erase failure", "server_error")
 		return
 	}
 	if action == "erase" { // as llama-server's: the slot's tokens and its cache are cleared

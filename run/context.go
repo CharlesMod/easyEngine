@@ -73,6 +73,11 @@ type keptCtx struct {
 	ClientSlot *int   `json:"client_slot,omitempty"`
 	File       string `json:"file"`
 	Key        ctxKey `json:"key"`
+	// Owner is whose prompt the slot held when it was saved (its door tag: an attachment's key,
+	// or the commons of the trusted callers). It goes back only into a slot the new map gives
+	// the same owner, labelled so; a file with none (an older engine's) is let go.
+	Owner        string `json:"owner,omitempty"`
+	OwnerTrusted bool   `json:"owner_trusted,omitempty"`
 }
 
 // KeptContext is one saved slot as status shows it.
@@ -378,6 +383,12 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 	est := map[int]int64{}
 	for id := 0; id < srv.shape.Slots; id++ {
 		if n := held[id]; n > 0 {
+			if t := s.slotTag(id); !keptTag(t) {
+				// an untrusted caller's prompt in the commons, or a slot whose erase failed: never
+				// kept, so never laid back (after the restart the slot is simply empty)
+				s.logf("context: slot %d not kept: it holds %s", id, tagWords(t))
+				continue
+			}
 			ids = append(ids, id)
 			est[id] = estimateBytes(srv, n)
 			total += est[id]
@@ -402,6 +413,7 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 	s.letGoContexts("replaced by the save before " + why) // what an earlier stop left and no start took
 	var got []keptCtx
 	for _, id := range ids {
+		tag := s.slotTag(id)
 		s.kept.mu.Lock()
 		s.kept.seq++
 		name := fmt.Sprintf("slot%d-%d-%d.bin", id, os.Getpid(), s.kept.seq)
@@ -413,6 +425,7 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 		err := s.slotCall(base, id, "save", name, &ans)
 		c := keptCtx{Slot: id, Tokens: held[id], File: name, Key: srv.ctxKey}
 		c.Client, c.ClientSlot = s.slotOwner(id)
+		c.Owner, c.OwnerTrusted = tag.Who, tag.Trusted
 		switch {
 		case err != nil:
 			s.addError("context: saving slot %d before %s failed: %v (not kept)", id, why, err)
@@ -463,6 +476,18 @@ func (s *Supervisor) layBack(srv *server, base string) {
 		return
 	}
 	for _, c := range l {
+		if c.Owner == "" {
+			s.dropFile(c, "it does not say whose prompt it holds")
+			continue
+		}
+		if c.Owner == commonsWho && c.Client != "" && !s.isBaseKey(c.Client) {
+			s.dropFile(c, "it held the commons' prompt in a client's slot")
+			continue
+		}
+		if c.Owner != commonsWho && c.Owner != c.Client {
+			s.dropFile(c, "it held another owner's prompt than the slot's client")
+			continue
+		}
 		if c.Client != "" && c.ClientSlot != nil {
 			// a client's slot goes back into the slot that client has under its own number now
 			e, why := s.slotFor(c.Client, *c.ClientSlot)
@@ -498,6 +523,7 @@ func (s *Supervisor) layBack(srv *server, base string) {
 			continue
 		}
 		srv.laidBack[c.Slot] = ans.NRestored
+		s.labelSlot(c.Slot, SlotTag{Who: c.Owner, Trusted: c.OwnerTrusted}) // whose prompt it now holds
 		s.dropFileQuiet(c.File)
 		s.logf("context: slot %d laid back: %d tokens, %d bytes", c.Slot, ans.NRestored, ans.NRead)
 		s.say("context", strconv.Itoa(c.Slot), contextSaid{What: "laid_back", Slot: c.Slot, Tokens: ans.NRestored, Bytes: ans.NRead, Why: "the start after the stop it was saved at", Client: c.Client, ClientSlot: c.ClientSlot})

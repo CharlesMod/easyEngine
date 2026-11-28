@@ -798,12 +798,15 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 		a.poke()
 	}
 	m.ramCache = ls.ramCache
-	// whose prompt each slot holds at the start: the server is new, so only what the lay-back puts
-	// back (a key's own contexts into its range; unowned ones into unowned slots: the commons')
+	// whose prompt each slot holds at the start: the server is new, so nothing but what the
+	// lay-back puts back, and it labels each slot it fills with the kept prompt's owner
+	// (context.go; an untrusted caller's prompt or an unclean slot is never kept). An empty slot is
+	// labelled as its range's: an attachment's key, else the commons (a trusted caller not
+	// confined may run in any of them while nothing is claimed).
 	m.tags = make([]SlotTag, shape.Slots)
 	commonsRange := false
 	for e := range m.tags {
-		m.tags[e] = SlotTag{Who: "commons", Trusted: true}
+		m.tags[e] = SlotTag{Who: commonsWho, Trusted: true}
 		if m.keys[e] == "" {
 			commonsRange = true
 		}
@@ -2356,6 +2359,70 @@ func (s *Supervisor) slotOwner(e int) (string, *int) {
 		}
 	}
 	return k, &n
+}
+
+// commonsWho is the tag's owner of a slot that holds the trusted callers' prompt (this
+// machine's and the master key's, Trusted: they trust each other).
+const commonsWho = "commons"
+
+// slotTag is whose prompt engine slot e of the running mind holds (zero: none, or no map).
+func (s *Supervisor) slotTag(e int) SlotTag {
+	r := &s.clients
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m := r.run; m != nil && e >= 0 && e < len(m.tags) {
+		return m.tags[e]
+	}
+	return SlotTag{}
+}
+
+// keptTag: a slot with this tag may be saved across a restart: an attachment's prompt, or the
+// commons' (trusted). Never an untrusted caller's in the commons ("anon:"), a slot whose erase
+// failed ("?"), or an empty one.
+func keptTag(t SlotTag) bool {
+	switch {
+	case t.Who == "", t.Who == "?", strings.HasPrefix(t.Who, "anon:"):
+		return false
+	case t.Who == commonsWho:
+		return t.Trusted
+	}
+	return true
+}
+
+// tagWords says a tag for the log.
+func tagWords(t SlotTag) string {
+	switch {
+	case t.Who == "":
+		return "no one's prompt"
+	case t.Who == "?":
+		return "a prompt whose erase failed"
+	case strings.HasPrefix(t.Who, "anon:"):
+		return "the prompt of " + strings.TrimPrefix(t.Who, "anon:") + ", a caller from another machine with no attachment"
+	}
+	return t.Who + "'s prompt"
+}
+
+// labelSlot records whose prompt engine slot e holds (the lay-back's restore of a kept slot).
+func (s *Supervisor) labelSlot(e int, t SlotTag) {
+	r := &s.clients
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m := r.run; m != nil && e >= 0 && e < len(m.tags) {
+		m.tags[e] = t
+	}
+}
+
+// isBaseKey: key is the base attachment's (the --profile file's; its range is the commons).
+func (s *Supervisor) isBaseKey(key string) bool {
+	r := &s.clients
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, a := range r.list {
+		if a.base {
+			return a.key == key
+		}
+	}
+	return false
 }
 
 // unownedSlot: engine slot e of the running mind was given to no client (true with no map).

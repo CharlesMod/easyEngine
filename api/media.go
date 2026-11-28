@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -287,6 +288,19 @@ func scanNode(n mediaNode, skip bool) string {
 		if r := scanNode(c, skip || mediaSkipKeys[lk]); r != "" {
 			return r
 		}
+	}
+	return ""
+}
+
+// unscannable says why a remote caller's body cannot be scanned whole: a byte-order mark (which
+// llama-server skips and the scan would not), or JSON nested deeper than maxJSONDepth. "" when it
+// can be. A body that is not JSON at all is left to the model server, which refuses it.
+func unscannable(body []byte) string {
+	if bytes.HasPrefix(bytes.TrimLeft(body, " \t\r\n"), []byte("\xEF\xBB\xBF")) {
+		return "a body from another machine may not start with a byte-order mark"
+	}
+	if jsonDepth(body) > maxJSONDepth {
+		return fmt.Sprintf("a body from another machine may nest at most %d deep", maxJSONDepth)
 	}
 	return ""
 }

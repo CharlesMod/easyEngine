@@ -207,3 +207,28 @@ func TestLocalUnknownPartTypePasses(t *testing.T) {
 		t.Fatalf("the model server saw %s", got)
 	}
 }
+
+// A body the scan cannot read whole is refused to a caller from another machine before it can
+// hide a media part: a byte-order mark (llama-server skips it) and nesting deeper than the scan
+// reads, on a path the door does not confine (embeddings) as on a chat path.
+func TestUnscannableRemoteBodyRefused(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	post := fromElsewhere(t, s)
+	before := upstreamBytes(t, e)
+	deep := strings.Repeat("[", 70) + strings.Repeat("]", 70)
+	img := `{"type":"image_url","image_url":{"url":"https://x/y.png"}}`
+	for _, c := range []struct{ name, path, body string }{
+		{"BOM embeddings", "/v1/embeddings", "\xEF\xBB\xBF" + `{"input":[` + img + `]}`},
+		{"BOM chat", "/v1/chat/completions", "\xEF\xBB\xBF" + `{"messages":[{"role":"user","content":[` + img + `]}]}`},
+		{"deep embeddings", "/v1/embeddings", `{"x":` + deep + `,"input":[` + img + `]}`},
+		{"deep chat", "/v1/chat/completions", `{"x":` + deep + `,"messages":[{"role":"user","content":[` + img + `]}]}`},
+	} {
+		code, b := post("POST", c.path, c.body)
+		if code != 400 || codeOf(b) != "bad_request" {
+			t.Errorf("%s: %d %s", c.name, code, b)
+		}
+	}
+	if after := upstreamBytes(t, e); after != before {
+		t.Fatalf("an unscannable body reached the model server: %q -> %q", before, after)
+	}
+}

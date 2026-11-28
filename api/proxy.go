@@ -80,6 +80,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if scan {
+		// a body the scan could not read whole could hide a part the model server still parses
+		// (it skips a byte-order mark and reads any depth): refused, as the door refuses it
+		if why := unscannable(bodyOf(r)); why != "" {
+			badRequest(w, why)
+			return
+		}
 		if found, why := mediaIn(bodyOf(r)); found {
 			clientFail(w, mediaRefused(why))
 			return

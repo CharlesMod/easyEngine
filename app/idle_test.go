@@ -576,7 +576,7 @@ func TestRemoteFloorWhenIdleSleepIsZero(t *testing.T) {
 // restarts the quiet: when the moment comes it finds traffic since it was armed, arms again from
 // there, and the model sleeps a whole quiet after that request, not at the first moment.
 func TestUnseenRequestRestartsTheQuiet(t *testing.T) {
-	const quiet = 400 * time.Millisecond
+	const quiet = time.Second
 	r, _ := startEngine(t, true, nil, idleAfter(quiet))
 	s := r.follow(t)
 	if code := r.post(t); code != 200 {
@@ -600,7 +600,8 @@ func TestUnseenRequestRestartsTheQuiet(t *testing.T) {
 	// when armed again is less than the whole delay
 	var f idleFact
 	body(evs[again], &f)
-	if f.LeftMS >= f.DelayMS {
+	// (the request came just after the first arming; the moment found it a whole quiet later)
+	if f.LeftMS >= f.DelayMS/2 {
 		t.Fatalf("armed again for %d ms of %d: counted from the fire, not from the request", f.LeftMS, f.DelayMS)
 	}
 	if d := evs[slept].At.Sub(sent); d < quiet {

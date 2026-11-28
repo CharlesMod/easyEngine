@@ -179,8 +179,10 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 		switch {
 		case n > 0:
 			hadClients = true
-		case hadClients || now.Leaves != seen.Leaves:
-			hadClients, st.kind = false, "leave" // the last attachment left (seen or not)
+		case hadClients:
+			// the last attachment left (a leave the loop never saw stands as what it did see:
+			// remote leaves are counted above, so a missed one never shortens the quiet)
+			hadClients, st.kind = false, "leave"
 		}
 		seen = now
 		r := rule()

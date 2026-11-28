@@ -46,6 +46,7 @@ func TestProjectorChecks(t *testing.T) {
 		{"zero image tokens cap", mut(func(p *Projector) { p.MaxImageTokens = 0 }), false},
 		{"equal detail levels", mut(func(p *Projector) { p.Detail = Detail{Low: 512, High: 512, Max: 512} }), false},
 		{"detail at the bound", mut(func(p *Projector) { p.Detail.Max = MaxDetailPx }), false},
+		{"partial name", mut(func(p *Projector) { p.File = "m-mmproj.gguf.part" }), true},
 		{"empty name", mut(func(p *Projector) { p.File = "" }), true},
 		{"slash in name", mut(func(p *Projector) { p.File = "a/b.gguf" }), true},
 		{"dotdot name", mut(func(p *Projector) { p.File = "../b.gguf" }), true},
@@ -78,7 +79,8 @@ func TestProjectorChecks(t *testing.T) {
 				t.Fatal(perr)
 			}
 			_, err = c.WithModels([]Model{m})
-			if (err != nil) != tc.bad {
+			// an overlay's projector is always a checked download: no import-only one
+			if bad := tc.bad || tc.name == "import-only"; (err != nil) != bad {
 				t.Fatalf("WithModels: bad=%v err=%v", tc.bad, err)
 			}
 		})

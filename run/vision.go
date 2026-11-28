@@ -2,10 +2,14 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
@@ -33,6 +37,31 @@ type visionState struct {
 	dl      *visionDL
 	failed  map[string]string // projector sha256 -> why its download failed; asked again on a new want
 	roomErr string            // the last "no room" detail put in status errors (said once per kind)
+	// bad: projector files (by identity) that failed to load or did not match their sha256; each is
+	// left alone until the file changes, the pinned build changes, or a person asks again (the
+	// setting turned on, serve restarted: this is memory only)
+	bad map[projIdent]string
+	// pendingBad: a start with the projector failed and the text-only retry is under way; it is
+	// marked bad only if that retry comes up (so a model that fails for its own sake blames nobody)
+	pendingBad string
+}
+
+// ProjRecord is what the engine verified of one projector file: its size and mtime when its sha256
+// was checked (by the download, or by hashing the file itself). The file is trusted only while it
+// still has that size and mtime. It is in state.json ("projectors", by file name).
+type ProjRecord struct {
+	Size    int64  `json:"size"`
+	MTimeNS int64  `json:"mtime_ns"`
+	SHA256  string `json:"sha256"`
+}
+
+// projIdent is the identity of a projector file as the not-loadable record knows it: the file,
+// its size and mtime, the sha256 the catalog names for it, and the llama-server build it was tried
+// with.
+type projIdent struct {
+	file         string
+	size, mtime  int64
+	sha, backend string
 }
 
 type visionDL struct {
@@ -40,6 +69,7 @@ type visionDL struct {
 	progress *Progress
 	cancel   context.CancelFunc
 	done     chan struct{} // closed when the download goroutine has stopped writing and said so in vis
+	verify   bool          // hashing a file already there, not downloading
 }
 
 // VisionInfo is the hub fact "vision".
@@ -98,11 +128,136 @@ func (s *Supervisor) projectorPath(p *catalog.Projector) string {
 	return filepath.Join(s.dir, "models", p.File)
 }
 
-// projectorPresent: the file is there at its catalog size. The file has that name only after its
-// sha256 was verified (fetch.Download renames the .part once the hash matches), as for a model.
+// projectorStat is the projector file's stat when it is a regular, non-empty file of the catalog's size.
+func (s *Supervisor) projectorStat(p *catalog.Projector) (os.FileInfo, bool) {
+	st, err := os.Lstat(s.projectorPath(p))
+	if err != nil || !st.Mode().IsRegular() || st.Size() <= 0 || (p.Size != 0 && st.Size() != p.Size) {
+		return nil, false
+	}
+	return st, true
+}
+
+// projectorPresent: the file is there and the engine verified its sha256 (it downloaded it, which
+// checks the hash before the file has its name, or it hashed the file itself): the record in
+// state.json has the catalog's sha256 and the file's size and mtime. A file with no matching
+// record is never trusted, whatever its size.
 func (s *Supervisor) projectorPresent(p *catalog.Projector) bool {
-	st, err := os.Stat(s.projectorPath(p))
-	return err == nil && st.Mode().IsRegular() && st.Size() > 0 && (p.Size == 0 || st.Size() == p.Size)
+	st, ok := s.projectorStat(p)
+	if !ok || p.SHA256 == "" {
+		return false
+	}
+	s.mu.Lock()
+	r, have := s.st.Projectors[p.File]
+	s.mu.Unlock()
+	return have && r.SHA256 == p.SHA256 && r.Size == st.Size() && r.MTimeNS == st.ModTime().UnixNano()
+}
+
+// recordProjector writes down that the file p names, as it is on disk now, has the sha256 p names
+// (state first; the caller says the fact after).
+func (s *Supervisor) recordProjector(p *catalog.Projector, st os.FileInfo) {
+	s.mu.Lock()
+	if s.st.Projectors == nil {
+		s.st.Projectors = map[string]ProjRecord{}
+	}
+	s.st.Projectors[p.File] = ProjRecord{Size: st.Size(), MTimeNS: st.ModTime().UnixNano(), SHA256: p.SHA256}
+	s.mu.Unlock()
+	s.save()
+}
+
+// projectorOwned says the engine put (downloaded) or verified the file p names, for p's sha256.
+func (s *Supervisor) projectorOwned(p *catalog.Projector) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.st.Projectors[p.File]
+	return ok && p.SHA256 != "" && r.SHA256 == p.SHA256
+}
+
+// forgetProjector drops the record of a file the engine deleted.
+func (s *Supervisor) forgetProjector(file string) {
+	s.mu.Lock()
+	_, had := s.st.Projectors[file]
+	delete(s.st.Projectors, file)
+	s.mu.Unlock()
+	if had {
+		s.save()
+	}
+}
+
+// projIdentOf is p's file as it is on disk with the build bin; ok false when it is not a file.
+func (s *Supervisor) projIdentOf(p *catalog.Projector, bin string) (projIdent, bool) {
+	st, err := os.Lstat(s.projectorPath(p))
+	if err != nil || !st.Mode().IsRegular() {
+		return projIdent{}, false
+	}
+	return projIdent{file: p.File, size: st.Size(), mtime: st.ModTime().UnixNano(), sha: p.SHA256, backend: bin}, true
+}
+
+// projectorBad says whether p's file, as it is now and with this build, is known not to load (or
+// not to match its sha256), and the note that says so.
+func (s *Supervisor) projectorBad(p *catalog.Projector, bin string) (string, bool) {
+	id, ok := s.projIdentOf(p, bin)
+	if !ok {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	note, bad := s.vis.bad[id]
+	return note, bad
+}
+
+// markProjectorBad records that p's file, as it is now, is not loadable with bin, and why (note).
+func (s *Supervisor) markProjectorBad(p *catalog.Projector, bin, note string) {
+	id, ok := s.projIdentOf(p, bin)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	if s.vis.bad == nil {
+		s.vis.bad = map[projIdent]string{}
+	}
+	s.vis.bad[id] = note
+	s.mu.Unlock()
+}
+
+// VisionAskedAgain is a person asking for vision again (the setting turned on): a projector that
+// failed to load or did not match is tried once more. A client's attach is not that.
+func (s *Supervisor) visionAskedAgainLocked() {
+	clear(s.vis.bad)
+}
+
+// projectorFailedToLoad marks the projector of the served model as not loadable (by its file's
+// identity and the build), after a start with it failed and the same start without it came up.
+// It is not tried again until the file changes, the build changes, or a person asks again.
+func (s *Supervisor) projectorFailedToLoad(in install, why string) {
+	p := in.model.Projector
+	if p == nil {
+		return
+	}
+	note := "the vision projector failed to load: " + why
+	s.markProjectorBad(p, in.bin, note)
+	s.mu.Lock()
+	s.vis.note = note
+	s.refreshLocked()
+	s.mu.Unlock()
+	s.logf("vision: %s; not tried again until the file or the llama.cpp build changes or vision is asked for again", note)
+}
+
+// lastWords is the last line of a server's complaint with every path in it left out.
+func lastWords(msg string) string {
+	if i := strings.LastIndex(msg, "exited while loading: "); i >= 0 {
+		msg = msg[i+len("exited while loading: "):]
+	}
+	f := strings.Fields(msg)
+	for i, w := range f {
+		if strings.ContainsAny(w, `/\`) {
+			f[i] = "<path>"
+		}
+	}
+	out := strings.Join(f, " ")
+	if len(out) > 200 {
+		out = out[:200]
+	}
+	return out
 }
 
 // servingModel is the catalog model the next start loads (and the projector it carries).
@@ -121,8 +276,10 @@ func (s *Supervisor) visionSnapNow() visionSnap {
 	in, ok := s.servingModel()
 	ready := false
 	if ok && in.model.Projector != nil && s.projectorPresent(in.model.Projector) {
-		h := helpOf(in.bin, s.cfg.ExtraEnv)
-		ready = h == nil || h.Has("--mmproj")
+		if _, bad := s.projectorBad(in.model.Projector, in.bin); !bad {
+			h := helpOf(in.bin, s.cfg.ExtraEnv)
+			ready = h == nil || h.Has("--mmproj")
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,8 +335,10 @@ func (s *Supervisor) visionWantChanged(why string, restart bool) {
 	}
 	need := !wanted && snapLoaded
 	if wanted && !snapLoaded && ok && in.model.Projector != nil && s.projectorPresent(in.model.Projector) {
-		h := helpOf(in.bin, s.cfg.ExtraEnv)
-		need = h == nil || h.Has("--mmproj")
+		if _, bad := s.projectorBad(in.model.Projector, in.bin); !bad {
+			h := helpOf(in.bin, s.cfg.ExtraEnv)
+			need = h == nil || h.Has("--mmproj")
+		}
 	}
 	if need {
 		s.mu.Lock()
@@ -205,9 +364,13 @@ func (s *Supervisor) visionPlan(in install, wanted bool) (try bool, note string)
 		case h != nil && !h.Has("--mmproj"):
 			note = "this llama-server build does not know --mmproj"
 		case !s.projectorPresent(p):
-			note = s.fetchProjector(in.model)
+			note = s.prepareProjector(in)
 		default:
-			try = true
+			if bad, isBad := s.projectorBad(p, in.bin); isBad {
+				note = bad
+			} else {
+				try = true
+			}
 		}
 	}
 	return try, note
@@ -357,6 +520,15 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 			s.mu.Unlock()
 		})
 		letGo := err != nil && ctx.Err() != nil // let go: no longer wanted, or the engine stops
+		if err == nil {
+			// fetch.Download renamed the file into place only after its sha256 matched: that is
+			// the verification the engine records (state first, the fact after)
+			if st, e := os.Lstat(path); e == nil && st.Mode().IsRegular() {
+				s.recordProjector(p, st)
+			} else {
+				err = errors.New("the downloaded projector is not on disk")
+			}
+		}
 		s.mu.Lock()
 		s.vis.dl = nil
 		s.stoCache = nil
@@ -378,9 +550,208 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 			return
 		}
 		s.logf("vision projector %s downloaded and verified", p.File)
-		s.visionWantChanged("the vision projector is ready", true)
+		s.projectorReady("the vision projector is ready")
 	}()
 	return "the vision projector is downloading"
+}
+
+// projectorMismatchNote is the note of a projector file in the models folder that is not the one
+// its catalog entry names.
+const projectorMismatchNote = "the vision projector file in the models folder did not match its sha256: it is not loaded"
+
+// prepareProjector is the plan for a wanted projector that is not (yet) verified on disk: no file
+// starts its download, an older pin's own file is downloaded over, and any other file in its place
+// is hashed once in the background (never trusted on its size, never overwritten).
+func (s *Supervisor) prepareProjector(in install) string {
+	p := in.model.Projector
+	st, err := os.Lstat(s.projectorPath(p))
+	if err != nil || !st.Mode().IsRegular() {
+		return s.fetchProjector(in.model)
+	}
+	if note, bad := s.projectorBad(p, in.bin); bad {
+		return note
+	}
+	s.mu.Lock()
+	r, have := s.st.Projectors[p.File]
+	s.mu.Unlock()
+	if have && r.SHA256 != p.SHA256 && r.Size == st.Size() && r.MTimeNS == st.ModTime().UnixNano() {
+		return s.fetchProjector(in.model) // the engine's own file of an earlier pin: replaced by the download
+	}
+	if p.SHA256 == "" || p.Size != 0 && st.Size() != p.Size {
+		s.markProjectorBad(p, in.bin, projectorMismatchNote)
+		return projectorMismatchNote
+	}
+	return s.verifyProjector(in)
+}
+
+// verifyProjector hashes the file at the projector's name in the background (progress in
+// vision_progress), and records it when its sha256 is the catalog's.
+func (s *Supervisor) verifyProjector(in install) string {
+	p, bin := in.model.Projector, in.bin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.vis.dl != nil {
+		if s.vis.dl.verify {
+			return "the vision projector is being verified"
+		}
+		return "the vision projector is downloading"
+	}
+	ctx, cancel := context.WithCancel(s.root)
+	dl := &visionDL{file: p.File, cancel: cancel, done: make(chan struct{}), verify: true,
+		progress: &Progress{Step: "verifying vision projector"}}
+	s.vis.dl = dl
+	path := s.projectorPath(p)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer cancel()
+		st0, e0 := os.Lstat(path)
+		sum, err := hashFile(ctx, path, func(done, total int64) {
+			s.mu.Lock()
+			dl.progress = &Progress{Step: "verifying vision projector", DoneBytes: done, TotalBytes: total}
+			sayPtr(s, "vision.progress", "", dl.progress)
+			s.mu.Unlock()
+		})
+		letGo := err != nil && ctx.Err() != nil
+		st1, e1 := os.Lstat(path)
+		changed := e0 != nil || e1 != nil || st0.Size() != st1.Size() || !st0.ModTime().Equal(st1.ModTime())
+		match := err == nil && !changed && sum == p.SHA256
+		note := ""
+		switch {
+		case match:
+			s.recordProjector(p, st1)
+		case letGo || changed:
+		case err != nil:
+			note = "the vision projector file could not be read"
+			s.markProjectorBad(p, bin, note)
+		default:
+			note = projectorMismatchNote
+			s.markProjectorBad(p, bin, note)
+		}
+		s.mu.Lock()
+		s.vis.dl = nil
+		s.stoCache = nil
+		s.sayGone("vision.progress", "")
+		if note != "" {
+			s.vis.note = note
+		}
+		s.refreshLocked()
+		s.mu.Unlock()
+		close(dl.done)
+		switch {
+		case letGo:
+		case match:
+			s.logf("vision projector %s verified (sha256 matches)", p.File)
+			s.projectorReady("the vision projector is verified")
+		case changed:
+			s.visionWantChanged("the vision projector file changed while it was verified", false)
+		default:
+			s.addError("vision projector %s: %s", p.File, note)
+		}
+	}()
+	return "the vision projector is being verified"
+}
+
+// hashFile is the sha256 of the file at path, read in chunks; done is called as it goes, and ctx
+// ends it.
+func hashFile(ctx context.Context, path string, progress func(done, total int64)) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	buf := make([]byte, 1<<20)
+	var done, since int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buf)
+		h.Write(buf[:n])
+		done += int64(n)
+		since += int64(n)
+		if since >= 32<<20 {
+			since = 0
+			progress(done, st.Size())
+		}
+		if err == io.EOF {
+			return hex.EncodeToString(h.Sum(nil)), nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+}
+
+// projectorReady follows a projector that is now on disk and verified (downloaded, or hashed).
+// A local want (the setting, serve --vision, a local attachment) reloads the running server when
+// idle, as a setting change does, and nobody is charged. With remote wants only, the restart goes
+// through the clients' plan charged to one of the attachments that want vision and has restarts
+// left, as an attach's own restart would; with none, nothing restarts: the projector is loaded at
+// the next start made for another reason, and the note says so. No remote act alone restarts a
+// running server uncharged.
+func (s *Supervisor) projectorReady(why string) {
+	wanted := s.visionWanted()
+	vs := s.visionSnapNow()
+	r := &s.clients
+	r.mu.Lock()
+	local := vs.base
+	for _, a := range r.list {
+		if a.prof.Vision && a.local {
+			local = true
+		}
+	}
+	r.mu.Unlock() // s.mu is never taken under the clients' lock
+	if wanted && local && !vs.running {
+		// a start is being made without the projector (it was still being verified when the start
+		// was planned): the server reloads with it once that start is up
+		s.mu.Lock()
+		if (s.phase == "starting" || s.phase == "loading") && !s.vis.tryLoad {
+			s.reshape = true
+			s.reshapeWhy = why
+		}
+		s.mu.Unlock()
+		s.Nudge("vision") // after reshape is set
+	}
+	if !wanted || !vs.restartFor(true) {
+		s.visionWantChanged(why, false)
+		return
+	}
+	if local {
+		s.visionWantChanged(why, true)
+		return
+	}
+	r.mu.Lock()
+	planned := false
+	for _, a := range r.list {
+		if !a.prof.Vision || a.local || a.base {
+			continue
+		}
+		who := budgetKey(a.identity, false)
+		if who != "" && r.restarts[who] >= maxRemoteRestarts {
+			continue
+		}
+		if r.planLocked(2, a.key, who, false, a) {
+			planned = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	s.visionWantChanged(why, false)
+	if planned {
+		s.sayClients()
+		s.wakeMind(func(c *causes) { c.clients = true })
+		return
+	}
+	s.mu.Lock()
+	s.vis.note = "the vision projector is ready and loads at the model server's next restart (no attached client has a restart left to spend on it)"
+	s.refreshLocked()
+	s.mu.Unlock()
 }
 
 // projectorRoom checks the free disk for the projector's download as a model download does

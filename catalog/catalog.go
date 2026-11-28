@@ -335,7 +335,7 @@ const MaxOverlayModels = 16
 
 // WithModels is a copy of c with extra models added after its own (a client's local overlay):
 // each is checked by the rules of a catalog entry (a plain id and file name, an https or loopback
-// URL with its sha256 and size, or none for an import-only entry). An id that c already has is
+// URL with its sha256 and size, or none for an import-only model; a projector always has all three). An id that c already has is
 // refused unless the entry is the same one (an overlay brought again adds nothing): an id means
 // one thing to every client, and a built-in is never replaced. Two models of the overlay may not
 // share an id or a file, nor take a file c's models use. c itself is not changed.
@@ -353,6 +353,11 @@ func (c *Catalog) WithModels(extra []Model) (*Catalog, error) {
 	for _, m := range extra {
 		if err := checkModel(m); err != nil {
 			return nil, err
+		}
+		if pr := m.Projector; pr != nil && (pr.URL == "" || pr.SHA256 == "" || pr.Size <= 0) {
+			// the engine loads a projector only after it verified the file's sha256, and deletes
+			// only a file it put there: an overlay's projector must be a download it can check
+			return nil, fmt.Errorf("model %q: an overlay's projector needs a url, sha256 and size (no import-only projector)", m.ID)
 		}
 		if have, ok := ids[m.ID]; ok {
 			if reflect.DeepEqual(have, m) {

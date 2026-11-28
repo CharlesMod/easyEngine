@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,10 +26,7 @@ func giveProjector(t *testing.T, e *testkit.Env, id string, loadMiB int, low int
 	sum := sha256.Sum256(body)
 	p := &catalog.Projector{File: id + "-mmproj.gguf", SHA256: hex.EncodeToString(sum[:]), Size: int64(len(body)),
 		LoadMiB: loadMiB, ImageMiB: 200, MaxImageTokens: 512, Detail: catalog.Detail{Low: low, High: 512, Max: 1024}}
-	path := filepath.Join(e.Data, "models", p.File)
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	path := e.PutProjector(p, body, true)
 	for i := range e.Cat.Models {
 		if e.Cat.Models[i].ID == id {
 			e.Cat.Models[i].Projector = p

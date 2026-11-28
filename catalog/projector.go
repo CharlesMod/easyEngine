@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Projector is a model's vision projector: an mmproj GGUF that llama-server loads beside the
@@ -101,6 +102,9 @@ func checkProjector(m Model) error {
 	}
 	if err := checkName("projector file", p.File); err != nil {
 		return fmt.Errorf("model %q: %w", m.ID, err)
+	}
+	if strings.HasSuffix(p.File, ".part") {
+		return fmt.Errorf("model %q: projector file %q is a partial download's name", m.ID, p.File)
 	}
 	if p.File == m.File {
 		return fmt.Errorf("model %q: projector file is the model file", m.ID)

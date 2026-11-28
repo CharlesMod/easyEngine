@@ -1882,6 +1882,17 @@ projector). A local leave of the last want of vision lets the projector go when 
 leave restarts nothing by itself, so the projector stays loaded until the next start made for
 another reason. A change of the setting reloads the server when it is idle.
 
+**The reload after the file arrives.** When a download (or the verification below) finishes and
+vision is still wanted, no sequence of remote acts alone restarts a running server uncharged. With
+a local want (the setting, `serve --vision`, a local attachment with vision) the server reloads
+when idle, as for a setting change, and nobody is charged. With remote wants only, the restart is
+planned through the clients' plan (§7g: grow, waiting for idle) and charged to one attachment
+that wants vision and has restarts left (one charge; `restarts_left` drops by one). If none has
+a restart left, nothing restarts: the projector loads at the next start made for another reason,
+and `vision_note` says so ("... loads at the model server's next restart (no attached client
+has a restart left to spend on it)"). A remote attach with vision while the file is not on disk
+costs nothing then (there is no restart to ask for yet).
+
 **Which projector.** Always the projector of the model that is loaded: under a tier step
 (§3, a selected model too big for the card served by a lower tier) it is the serving tier's,
 not the selection's. `vision`, the storage protection, and the look call's detail table and
@@ -1892,16 +1903,40 @@ there (the projector is dropped before a lower tier is tried).
 downloaded in the background (fetch.Download: resumed `.part`, sha256 verified before the
 rename; an attempt that moves no bytes waits for a word, never a cadence), its progress in
 status `vision_progress` and the reading `vision.progress`. The model serves text meanwhile;
-when the file is verified and vision is still wanted, the running server reloads when idle. A
+when the file is verified and vision is still wanted, the running server reloads (see above). A
 download that fails or does not match its sha256 is not tried again until vision is asked for
-anew (the setting, an attach); `vision_note` says so and status `errors` says why. Storage lists
+anew (the setting, an attach); `vision_note` says so and status `errors` says why.
+
+**Verified, never trusted on size.** The engine loads a projector only after it verified the
+file's sha256: it downloaded it (the download checks the hash before the file has its name) or it
+hashed the file itself, and it wrote down `{size, mtime_ns, sha256}` under `projectors` (by file
+name) in `state.json`. The record counts only while the file still has that size and mtime and
+the catalog's sha256. A file in `models/` with the projector's name and no matching record (put
+there by hand, or by another program) is hashed once in the background (`vision_progress` step
+"verifying vision projector"; the model serves text meanwhile) and loaded when it matches;
+with another size or another hash it is not loaded, not overwritten by a download, and
+`vision_note` says it did not match. An older pin's own file (the record has another sha256) is
+replaced by the download. Deleting a model by id removes its projector file only when the record
+says the engine put or verified that file for that projector (same sha256), never a file another
+model or the person owns. A projector in a client's catalog overlay (§7g) must have a url, sha256
+and size (an import-only projector is refused), and no projector file name ends in `.part`.
+
+**A projector that will not load.** A start that carries `--mmproj` and fails for a reason other
+than memory (the server exited while loading, the load timed out, any error) is retried once at
+once without it: text first. When that text start comes up, the projector file is marked not
+loadable, by its identity (file name, size, mtime, the catalog's sha256 and the llama.cpp build
+the engine runs), with the reason in `vision_note` ("the vision projector failed to load: <last
+line of the server's complaint, paths left out>"). It is not tried again, not by a restart, a
+client's word or an attach (a client's attach is not a person asking), until the file changes,
+the pinned build changes, the engine restarts, or the person asks again (the setting turned on
+again). The record is in memory, like the build's smoke-test failure. A failure from memory
+keeps its own rule (below, "The room"). Storage lists
 the file with its model's id and `projector: true`; it cannot be deleted while vision is wanted
 for the served model, while it is loaded, or while it downloads (409); deleting a model by id
 removes its projector too, unless another catalog model uses the same file.
 
 **The launch.** `--mmproj <models>/<file>` is given only when vision is wanted, the served model
-has a projector, the file is present at its catalog size (it has its final name only once its
-hash matched), and the build's `--help` knows `--mmproj`. Every projector and media flag is
+has a projector, the file is present and verified (above), and the build's `--help` knows `--mmproj`. Every projector and media flag is
 engine-owned (`flag_owned` in `extra_args`) and the matching environment variables are stripped
 (below, "Media from remote callers"). llama-server then says "cache_reuse is not supported by
 multimodal, it will be disabled"; measured on Gemma, text turns lose nothing by it.
@@ -2049,7 +2084,11 @@ The check is on the request's shape, not on a header the caller sets. The projec
 flags (`--mmproj*`, `--image*`, `--video*`, `--audio`, `--media-*`, the vision presets) are owned
 (`flag_owned`), and the parent environment's `LLAMA_ARG_MMPROJ*`, `MTMD_BACKEND_DEVICE`,
 `LLAMA_ARG_IMAGE_*`, `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS`, `LLAMA_ARG_MEDIA_ALLOW_PRIVATE_URLS` and
-`LLAMA_MEDIA_MARKER` are stripped from the model server's environment.
+`LLAMA_MEDIA_MARKER` are stripped from the model server's environment, with every other
+`LLAMA_ARG_*` of the parent (llama-server reads its flags, a model repo or URL among them, from
+those; the engine gives the flags). The engine says once per life, in `engine.log`, which names it
+left out. Only what comes from the parent is stripped: the engine adds no `LLAMA_ARG_*` of its own
+(`Config.ExtraEnv`, which tests use for `FAKELLAMA_*`, is passed as given).
 
 **Allow list on the chat routes.** On `/v1/chat/completions` and `/chat/completions` (paths cleaned
 like the others) a remote caller's body must also pass an allow list, on top of the deny scan
@@ -2099,7 +2138,8 @@ lines): `--mmproj`/`-mm` 2552-2559, `--mmproj-url`/`-mmu` 2561-2566, `--mmproj-a
 4816. With `-hf`, the projector is fetched by default (`common/arg.cpp` 368-387, 647-652); the
 engine owns the projector, so that is never left to the flag.
 
-**Stripped environment** (`run/util.go` `mediaEnv`, `common/arg.cpp` `set_env` lines):
+**Stripped environment** (`run/util.go` `envDropped`: every `LLAMA_ARG_*`, and `mediaEnv`; the
+media ones, `common/arg.cpp` `set_env` lines):
 `LLAMA_ARG_MMPROJ` 2559, `LLAMA_ARG_MMPROJ_URL` 2566, `LLAMA_ARG_MMPROJ_AUTO` 2574,
 `LLAMA_ARG_MMPROJ_OFFLOAD` 2582, `MTMD_BACKEND_DEVICE` 2602, `LLAMA_ARG_IMAGE_MIN_TOKENS` 2618,
 `LLAMA_ARG_IMAGE_MAX_TOKENS` 2625, `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS` 2632, `LLAMA_ARG_VIDEO_FPS` 2639,

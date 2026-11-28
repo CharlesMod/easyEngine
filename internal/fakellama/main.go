@@ -335,7 +335,7 @@ func main() {
 	if ctl != "" {
 		f, err := os.OpenFile(filepath.Join(ctl, "starts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
-			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s bin=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), os.Args[0], strings.Join(args, " "))
+			fmt.Fprintf(f, "pid=%d np=%d c=%d ngl=%s moe=%s ctk=%s cvd=%s envarg=%s bin=%s args=%s\n", os.Getpid(), np, c, vals["-ngl"], vals["--n-cpu-moe"], vals["-ctk"], os.Getenv("CUDA_VISIBLE_DEVICES"), llamaArgEnv(), os.Args[0], strings.Join(args, " "))
 			f.Close()
 		}
 	}
@@ -358,6 +358,10 @@ func main() {
 	if mmproj != "" {
 		if _, err := os.Stat(mmproj); err != nil {
 			fmt.Printf("clip_model_loader: failed to open %s\n", mmproj)
+			os.Exit(1)
+		}
+		if os.Getenv("FAKELLAMA_MMPROJ_BAD") != "" {
+			fmt.Println("clip_init: failed to load model: unknown projector type")
 			os.Exit(1)
 		}
 		oom := os.Getenv("FAKELLAMA_MMPROJ_OOM") != ""
@@ -893,4 +897,18 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 	slotMu.Unlock()
 	logLine("restore %d %s ok", id, name)
 	json.NewEncoder(w).Encode(map[string]any{"id_slot": id, "filename": name, "n_restored": n, "n_read": len(data), "timings": map[string]any{"restore_ms": 0.5}})
+}
+
+// llamaArgEnv names the LLAMA_ARG_* variables the server was given ("none" when it has none).
+func llamaArgEnv() string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "LLAMA_ARG_") {
+			out = append(out, k)
+		}
+	}
+	if len(out) == 0 {
+		return "none"
+	}
+	return strings.Join(out, ",")
 }

@@ -19,6 +19,9 @@ import (
 
 const visionProjFile, visionProjSize = "mm1.gguf", 2048
 
+// visionProjBody is the fake projector's content; the catalog names its real sha256.
+func visionProjBody() []byte { return bytes.Repeat([]byte{1}, visionProjSize) }
+
 // visionEnv is a ready engine whose catalog model carries a projector; with file the projector
 // is in the models folder at its catalog size.
 func visionEnv(t *testing.T, file bool, mut func(*run.Config)) (*testkit.Env, *run.Supervisor, *httptest.Server) {
@@ -26,11 +29,9 @@ func visionEnv(t *testing.T, file bool, mut func(*run.Config)) (*testkit.Env, *r
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
-	e.Cat.Models[0].Projector = &catalog.Projector{File: visionProjFile, URL: "http://invalid.example/mm1", SHA256: strings.Repeat("ab", 32), Size: visionProjSize, LoadMiB: 100}
+	e.Cat.Models[0].Projector = &catalog.Projector{File: visionProjFile, URL: "http://invalid.example/mm1", SHA256: testkit.ProjectorSum(visionProjBody()), Size: visionProjSize, LoadMiB: 100}
 	if file {
-		if err := os.WriteFile(filepath.Join(e.Data, "models", visionProjFile), bytes.Repeat([]byte{1}, visionProjSize), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		e.PutProjector(e.Cat.Models[0].Projector, visionProjBody(), true)
 	}
 	cfg := e.Config()
 	if mut != nil {

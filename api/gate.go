@@ -145,6 +145,13 @@ func (a *API) gate(next http.Handler) http.Handler {
 			a.sawClient(id)
 		case a.Open:
 			client = ClientOpen
+			if !peerLocal(r) && (r.URL.Path == "/engine" || strings.HasPrefix(r.URL.Path, "/engine/")) && !pairedMay(ClientOpen, r) {
+				// an --open caller from another machine may do on the control API exactly what a
+				// paired token may (scope.go); administration from another machine needs the
+				// master key. A caller of this machine is unchanged.
+				failCode(w, http.StatusForbidden, CodeNotAllowed, scopeRefusal)
+				return
+			}
 		case keyless(r):
 			client = ""
 		default:

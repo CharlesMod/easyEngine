@@ -90,11 +90,16 @@ func PairedStatusOf(st run.Status) PairedStatus {
 }
 
 // statusFor is what the status endpoint writes: the full status, or the reduced one for a
-// paired token (a client id that is none of the master, loopback, page or open callers).
+// paired token and for an --open caller from another machine (no ports, paths, errors or
+// contexts list).
 func statusFor(r *http.Request, st run.Status) any {
 	switch id := ClientID(r.Context()); id {
-	case "", tokens.MasterID, ClientLoopback, ClientPage, ClientOpen:
+	case "", tokens.MasterID, ClientLoopback, ClientPage:
 		return st
+	case ClientOpen:
+		if peerLocal(r) {
+			return st
+		}
 	}
 	return PairedStatusOf(st)
 }

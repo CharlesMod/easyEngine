@@ -983,7 +983,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always", vision?: bool}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context` and `vision` (a change of `vision` reloads the running server when idle if it loads or drops the projector; §7h). `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always", vision?: bool}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context` and `vision` (with `vision_forced: true` while `serve --vision` holds it on; then `{"vision": false}` answers 409 `vision_forced` and changes nothing; a change of `vision` reloads the running server when idle if it loads or drops the projector; §7h). `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
 | `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |
@@ -1751,7 +1751,18 @@ projector (Qwen 27B, about (W/32)x(H/32) tokens, not capped by `-ub`): `load_mib
 **Wanting it.** Vision is wanted when the setting `vision` is true (`PUT settings {"vision":
 true}`, from this machine or with the master key; `settings.json` "vision"), for one run by
 `serve --vision` (never written back), or when any attachment's profile says `"vision": true`
-(local or remote). A change of the attachments' merged want that makes the running server load
+(local or remote). While `serve --vision` holds it on, `PUT settings {"vision": false}` is
+refused with 409 `vision_forced` ("vision is on for this run by serve --vision; the setting
+cannot turn it off until the engine runs without it") and nothing changes, neither the stored
+setting nor `settings.json`; `{"vision": true}` is accepted and stored. `GET settings` then adds
+`"vision_forced": true` (absent otherwise) beside the stored `vision`. An edit of `settings.json`
+to `"vision": false` in that state is kept as written and stored, vision stays on, and status
+errors say it is forced on by `serve --vision`. The projector's download checks the free disk
+first as a model's does (the file less its `.part`, logs, host files, headroom): with no room it
+does not start, `vision_note` says "no room on disk for the vision projector (needs N MiB more)"
+(the sizes are in status errors, no path), text keeps serving, and the next want (the setting
+toggled, an attach) checks again. Remove downloads lets a projector download go (it is not
+recorded as failed) and waits for it to stop writing before it deletes the `.part`. A change of the attachments' merged want that makes the running server load
 or drop the projector is a change of wants: planned like any other (§7g) and charged to a
 remote client's restart budget; a return with the same profile is free; a leave is never
 charged. A change of the setting reloads the server when it is idle.

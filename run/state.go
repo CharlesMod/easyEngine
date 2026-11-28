@@ -158,6 +158,7 @@ type settingsFile struct {
 	name, discovery     string // the engine's name and the mDNS announce (on | off): the app reads them at start and on each reload
 	err                 string // settings.json cannot be used: the previous settings stand
 	note                string // a listen or yield edit that waits for a restart
+	visionOff           bool   // settings.json says vision off while serve --vision holds it on
 }
 
 func (f *settingsFile) begin(file settings.File, serr *settings.Error) {
@@ -178,6 +179,9 @@ func (f *settingsFile) notes() []string {
 	}
 	if f.note != "" {
 		out = append(out, f.note)
+	}
+	if f.visionOff {
+		out = append(out, "vision is forced on by serve --vision; settings.json says off, which applies when the engine runs without it")
 	}
 	return out
 }
@@ -299,6 +303,9 @@ func (s *Supervisor) ReloadSettings() {
 	same := f.Mode == cur.Mode && f.External == cur.External && f.LingerS == cur.LingerS &&
 		f.KVType == cur.KVType && f.SamplerPolicy == cur.SamplerPolicy && f.Vision == cur.Vision
 	if !same {
+		s.mu.Lock()
+		s.sf.visionOff = s.cfg.Vision && !f.Vision // the file's value is stored; the want stays on
+		s.mu.Unlock()
 		s.logf("settings.json changed: applying it")
 		s.setSettings(Settings{
 			Mode: f.Mode, External: External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey},

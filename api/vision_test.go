@@ -260,3 +260,116 @@ func TestVisionAttachProfileRemote(t *testing.T) {
 		return v
 	})
 }
+
+// 5. serve --vision holds vision on: PUT {"vision": false} is 409 vision_forced and changes
+// nothing (the stored setting and settings.json stay), PUT true is accepted, GET says forced.
+func TestVisionForcedByServeFlag(t *testing.T) {
+	e, _, srv := visionEnv(t, true, func(c *run.Config) { c.Vision = true })
+	url := srv.URL + "/engine/v1/settings"
+	file := func() string {
+		b, err := os.ReadFile(filepath.Join(e.Data, "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if g := getJSON2(t, url); g["vision_forced"] != true || g["vision"] != false {
+		t.Fatalf("GET: %v %v", g["vision"], g["vision_forced"])
+	}
+	// stored false: an off PUT is still refused, and the file is not touched
+	before := file()
+	c, b, _ := do(t, "PUT", url, `{"vision":false,"linger_s":77}`, csrf)
+	var body map[string]any
+	if c != 409 || json.Unmarshal([]byte(b), &body) != nil || body["code"] != "vision_forced" || body["error"] != run.VisionForcedMsg {
+		t.Fatalf("PUT off: %d %s", c, b)
+	}
+	if file() != before || getJSON2(t, url)["linger_s"] == float64(77) {
+		t.Fatalf("a refused PUT changed something: %s", file())
+	}
+	// true is accepted and stored
+	if c, b, _ := do(t, "PUT", url, `{"vision":true}`, csrf); c != 200 {
+		t.Fatalf("PUT true: %d %s", c, b)
+	}
+	if g := getJSON2(t, url); g["vision"] != true || g["vision_forced"] != true || !diskVision(t, e) {
+		t.Fatalf("after true: %v %v", g["vision"], g["vision_forced"])
+	}
+	// stored true: off is refused, true stays
+	before = file()
+	if c, b, _ := do(t, "PUT", url, `{"vision":false}`, csrf); c != 409 || !strings.Contains(b, `"vision_forced"`) {
+		t.Fatalf("PUT off after true: %d %s", c, b)
+	}
+	if g := getJSON2(t, url); g["vision"] != true || file() != before || !diskVision(t, e) {
+		t.Fatalf("a refused PUT moved vision: %v", g["vision"])
+	}
+	// a PUT that does not name vision still works while forced
+	if c, b, _ := do(t, "PUT", url, `{"linger_s":9}`, csrf); c != 200 {
+		t.Fatalf("PUT linger: %d %s", c, b)
+	}
+}
+
+// Not forced: no vision_forced field, and off is accepted.
+func TestVisionNotForcedHasNoFlag(t *testing.T) {
+	_, _, srv := readyEnv(t)
+	url := srv.URL + "/engine/v1/settings"
+	if _, ok := getJSON2(t, url)["vision_forced"]; ok {
+		t.Fatal("vision_forced present when not forced")
+	}
+	if c, b, _ := do(t, "PUT", url, `{"vision":false}`, csrf); c != 200 {
+		t.Fatalf("PUT off: %d %s", c, b)
+	}
+}
+
+// settings.json edited to vision false while forced: the file is kept, the value is stored, vision
+// stays on, and status errors say it is forced.
+func TestVisionForcedAndFileSaysOff(t *testing.T) {
+	e, s, srv := visionEnv(t, true, func(c *run.Config) { c.Vision = true })
+	waitVision := func(on bool) {
+		testkit.WaitFor(t, 20*time.Second, "vision on the status", func() bool {
+			v, _ := statusVision(t, srv.URL, nil)
+			return v == on
+		})
+	}
+	waitVision(true)
+	p := settings.Path(e.Data)
+	f, err := settings.Read(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Vision = true
+	if err := os.WriteFile(p, settings.Encode(f), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.ReloadSettings()
+	f.Vision = false
+	enc := settings.Encode(f)
+	if err := os.WriteFile(p, enc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.ReloadSettings()
+	if b, _ := os.ReadFile(p); string(b) != string(enc) {
+		t.Fatalf("the file was rewritten: %s", b)
+	}
+	if g := getJSON2(t, srv.URL+"/engine/v1/settings"); g["vision"] != false || g["vision_forced"] != true {
+		t.Fatalf("GET: %v %v", g["vision"], g["vision_forced"])
+	}
+	if v, _ := statusVision(t, srv.URL, nil); !v {
+		t.Fatal("vision went off")
+	}
+	found := false
+	for _, e := range s.Status().Errors {
+		found = found || strings.Contains(e, "forced on by serve --vision")
+	}
+	if !found {
+		t.Fatalf("no forced note in %v", s.Status().Errors)
+	}
+	f.Vision = true
+	if err := os.WriteFile(p, settings.Encode(f), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.ReloadSettings()
+	for _, e := range s.Status().Errors {
+		if strings.Contains(e, "forced on by serve --vision") {
+			t.Fatalf("the note stays after the file says on: %q", e)
+		}
+	}
+}

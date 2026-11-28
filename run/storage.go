@@ -310,6 +310,19 @@ func (s *Supervisor) runRemoveDownloads() {
 	// is the bound: the job and the upgrade end when their context says so, and nothing is deleted
 	// until the "job" and "upgrade" facts say neither is left.
 	s.Cancel()
+	// a projector download in flight is let go and its goroutine says it has stopped writing
+	// (dl.done) before the sweep removes its .part
+	s.mu.Lock()
+	dl := s.vis.dl
+	s.mu.Unlock()
+	if dl != nil {
+		dl.cancel()
+		select {
+		case <-dl.done:
+		case <-s.root.Done():
+			return
+		}
+	}
 	for {
 		w, err := s.hub.Wake("job", "upgrade", "build") // before looking, so an end said in between is heard
 		if err != nil {
@@ -365,6 +378,7 @@ func (s *Supervisor) runRemoveDownloads() {
 	s.userStopped = false
 	s.jobRunning = false // the slot this job took, and only that
 	s.stoCache = nil
+	s.vis.note = "" // a download that was let go is no longer "downloading"
 	s.refreshLocked()
 	s.mu.Unlock()
 	s.save()

@@ -39,7 +39,9 @@ type Options struct {
 	Host        string // default 127.0.0.1
 	// Open is serve --open: a non-loopback Host with no token. Without it a non-loopback
 	// listener requires the bearer token in <data dir>/tokens.json.
-	Open        bool
+	Open bool
+	// Vision is serve --vision: the model's vision projector is wanted for this run.
+	Vision      bool
 	Port        int // default 47480
 	Linger      time.Duration
 	LingerSet   bool // Linger given on the command line; else the saved setting applies
@@ -338,7 +340,7 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		prof = p
 	}
 	w := lifecycle.NewWatcher()
-	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident, // the app waits for a connection
+	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident, Vision: o.Vision, // the app waits for a connection
 		ProfileGiven: o.Profile != nil || o.ProfilePath != ""} // a profile given is the base client
 	if o.Yield != nil {
 		y := *o.Yield

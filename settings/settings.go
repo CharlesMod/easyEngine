@@ -78,6 +78,8 @@ type File struct {
 	Discovery string `json:"discovery"`
 	Listen    Listen `json:"listen"`
 	Yield     Yield  `json:"yield"`
+	// Vision loads the served model's vision projector, when it has one (off by default).
+	Vision bool `json:"vision"`
 }
 
 // KVTypes are the cache types llama-server takes.

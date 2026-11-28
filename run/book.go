@@ -13,6 +13,7 @@ var book = []event.Decl{
 	{Name: "phase", Kind: event.Fact, What: "where the engine stands: {phase, message}, as status says them"},
 	{Name: "model", Kind: event.Fact, What: "the selected model and the settings it runs with, as state.json holds them (no keys): {mode, model, backend, kv_type, target, previous, starter_owned, custom, sampler_policy, linger_s}"},
 	{Name: "mind.shape", Kind: event.Fact, What: "the running shape (status shape); gone when no model server is up"},
+	{Name: "vision", Kind: event.Fact, What: "the vision projector (status vision, vision_note): {vision, note}; vision is true while the running model server has it loaded, note says why not while vision is wanted"},
 	{Name: "mind.device", Kind: event.Fact, What: "what the last model server start was given to hold it to its card (status device)"},
 	{Name: "mind.exit", Kind: event.Happening, What: "the model server ended on its own: {pid, why, quick, oom}"},
 	{Name: "mind.hang", Kind: event.Happening, What: "the model server said nothing for HangSilence with requests in flight and was asked /health once: {answered}"},

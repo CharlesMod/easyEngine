@@ -28,6 +28,8 @@ type Hello struct {
 	Card          string `json:"card"`
 	Pairing       bool   `json:"pairing"`
 	TokenRequired bool   `json:"token_required"`
+	// Vision is true while the running model server has its vision projector loaded.
+	Vision bool `json:"vision"`
 	// Said only when the request sent a bearer that this engine checks.
 	Paired   *bool  `json:"paired,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
@@ -106,7 +108,7 @@ func (a *API) hello(r *http.Request) Hello {
 	}
 	if a.S != nil {
 		st := a.S.Status()
-		h.Version, h.Phase, h.ModelName = st.Version, st.Phase, st.ModelName
+		h.Version, h.Phase, h.ModelName, h.Vision = st.Version, st.Phase, st.ModelName, st.Vision
 		if h.ModelName == "" {
 			h.ModelName = st.Model
 		}

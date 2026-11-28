@@ -565,8 +565,13 @@ func (s *Supervisor) react() {
 	if reshape && idle {
 		s.mu.Lock()
 		s.reshape = false
+		why := s.reshapeWhy
+		s.reshapeWhy = ""
 		s.mu.Unlock()
-		s.reload(ctx, srv, "KV type changed")
+		if why == "" {
+			why = "KV type changed"
+		}
+		s.reload(ctx, srv, why)
 		return
 	}
 	// 2b. the clients changed (run/clients.go): an attach the running mind cannot serve grows it;

@@ -33,6 +33,8 @@ type PairedStatus struct {
 	ModelParams    int64           `json:"model_params"`
 	ModelSizeClass string          `json:"model_size_class"`
 	Held           int             `json:"held"`
+	Vision         bool            `json:"vision"`
+	VisionNote     string          `json:"vision_note"`
 }
 
 // StatusKept lists the run.Status JSON names a paired token sees; StatusRemoved the ones it does
@@ -40,7 +42,8 @@ type PairedStatus struct {
 var (
 	StatusKept = []string{"version", "api", "mode", "phase", "message", "progress", "model", "backend",
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
-		"model_note", "sampler", "model_name", "model_params", "model_size_class", "held"}
+		"model_note", "sampler", "model_name", "model_params", "model_size_class", "held",
+		"vision", "vision_note"}
 	StatusRemoved = []string{
 		"port",       // the control API's own port
 		"server_url", // the local model server's URL and port
@@ -62,6 +65,7 @@ var (
 		// attachment from the attach answer and its held stream)
 		"attachments",
 		"wants",
+		"vision_progress", // the projector's download: the owner's business (vision_note says it runs)
 	}
 )
 
@@ -78,7 +82,7 @@ func PairedStatusOf(st run.Status) PairedStatus {
 		ModelTier: st.ModelTier, ModelStage: st.ModelStage, KVType: st.KVType, Restarts: st.Restarts,
 		ModelFallback: st.ModelFallback, ModelNote: st.ModelNote, Sampler: st.Sampler,
 		ModelName: st.ModelName, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
-		Held: st.Held,
+		Held: st.Held, Vision: st.Vision, VisionNote: st.VisionNote,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/CharlesMod/easyEngine/catalog"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -48,6 +49,8 @@ type StorageModel struct {
 	Bytes   int64  `json:"bytes"`
 	InUse   bool   `json:"in_use"`
 	Partial bool   `json:"partial"`
+	// Projector marks the vision projector of the model ID (run/vision.go): deleted with it.
+	Projector bool `json:"projector,omitempty"`
 }
 
 // StorageInfo is GET /engine/v1/storage.
@@ -146,6 +149,11 @@ func (s *Supervisor) modelUse() (inUse map[string]bool, anyPartial bool) {
 		inUse[s.upg.target.File] = true
 		inUse[s.upg.target.File+".part"] = true
 	}
+	if s.st.Mode != "external" {
+		for _, f := range s.visionFilesLocked(cat, s.st.Model) {
+			inUse[f] = true
+		}
+	}
 	return
 }
 
@@ -176,6 +184,11 @@ func (s *Supervisor) storageModels() []StorageModel {
 					break
 				}
 			}
+			if m.ID == "" {
+				if cm, ok := cat.ProjectorFor(base); ok {
+					m.ID, m.Projector = cm.ID, true
+				}
+			}
 		}
 		out = append(out, m)
 	}
@@ -191,12 +204,13 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 		return 0, err
 	}
 	var catID string
+	var proj *catalog.Projector // deleted with its model (by id), when nothing holds it
 	if file == "" {
 		m, ok := cat.Model(id)
 		if !ok || m.File == "" {
 			return 0, ErrNoModel
 		}
-		file, catID = m.File, m.ID
+		file, catID, proj = m.File, m.ID, m.Projector
 	}
 	if file != filepath.Base(file) || file == "." || file == ".." || strings.ContainsAny(file, `/\`) {
 		return 0, errors.New("file must be a plain file name in models/")
@@ -229,6 +243,15 @@ func (s *Supervisor) DeleteModel(id, file string) (int64, error) {
 	if !strings.HasSuffix(file, ".part") {
 		if st, err := os.Lstat(p + ".part"); err == nil && st.Mode().IsRegular() && os.Remove(p+".part") == nil {
 			freed += st.Size()
+		}
+	}
+	if proj != nil && !use[proj.File] && !use[proj.File+".part"] && !projectorShared(cat, catID, proj.File) {
+		for _, f := range []string{proj.File, proj.File + ".part"} {
+			pp := filepath.Join(s.dir, "models", f)
+			if st, err := os.Lstat(pp); err == nil && st.Mode().IsRegular() && os.Remove(pp) == nil {
+				freed += st.Size()
+				s.logf("deleted the vision projector %s of model %s", f, catID)
+			}
 		}
 	}
 	s.mu.Lock()
@@ -421,3 +444,14 @@ func (s *Supervisor) retry(f func() error) bool {
 
 // heldLinger bounds the wait for a file a stranger holds open (retry).
 const heldLinger = 2 * time.Second
+
+// projectorShared: another model of the catalog uses the projector file too (two quants of one
+// base model share it): it stays for that model.
+func projectorShared(cat *catalog.Catalog, id, file string) bool {
+	for _, m := range cat.Models {
+		if m.ID != id && m.Projector != nil && m.Projector.File == file {
+			return true
+		}
+	}
+	return false
+}

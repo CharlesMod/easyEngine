@@ -428,6 +428,7 @@ type settingsPatch struct {
 	SamplerPolicy *string `json:"sampler_policy"`
 	Streamer      *string `json:"streamer"`
 	KeepContext   *string `json:"keep_context"`
+	Vision        *bool   `json:"vision"`
 }
 
 // apply lays the named fields over the current settings (whose api key is blank: SetSettings
@@ -462,6 +463,9 @@ func (p settingsPatch) apply(cur run.Settings) run.Settings {
 		if cur.Streamer == "" {
 			cur.Streamer = "-" // an explicit empty value is refused, not taken as "keep"
 		}
+	}
+	if p.Vision != nil {
+		cur.Vision = p.Vision
 	}
 	if p.KeepContext != nil {
 		cur.KeepContext = *p.KeepContext

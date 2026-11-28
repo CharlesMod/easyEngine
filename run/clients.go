@@ -1098,8 +1098,10 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 	}()
 	model := s.selectedID()
 	hash := profileHash(req.Profile)
+	vs := s.visionSnapNow() // read before the clients' lock (s.mu is never taken under it)
 	r := &s.clients
 	r.mu.Lock()
+	vBefore := vs.base || r.visionLocked()
 	if req.Valid != nil && !req.Valid() {
 		r.mu.Unlock()
 		return AttachView{}, nil, cerr(401, "token_revoked", "the token this attach came with was revoked")
@@ -1234,6 +1236,12 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		}
 	}
 	r.profHash[key] = hash
+	// the merged vision want changed: a restart it asks for is planned and charged like any other
+	// change of wants (run/vision.go)
+	vAfter := vs.base || r.visionLocked()
+	if vAfter != vBefore && vs.restartFor(vAfter) {
+		r.planLocked(2, a.key, charge, req.Local, a)
+	}
 	if wanting {
 		r.stale = false // a client with wants stands again
 	}
@@ -1267,6 +1275,9 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		s.logf("clients: %s's catalog overlay was not taken: %s", name, ce.Msg)
 	}
 	v.Status, v.Resumed, v.Replaced = "attached", resumed, replaced
+	if vAfter != vBefore {
+		s.visionWantChanged("an attachment's vision want changed", false)
+	}
 	s.sayClients()
 	s.agentChanged()
 	s.wakeMind(func(c *causes) { c.clients = true })
@@ -1445,8 +1456,10 @@ func (s *Supervisor) DetachRevoked(valid func(identity, cred string) bool) {
 // hold both, the first to end ends it). Its slots stay in the running mind, vacant. A leave is
 // never charged against a budget.
 func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord string) {
+	vs := s.visionSnapNow()
 	r := &s.clients
 	r.mu.Lock()
+	vBefore := vs.base || r.visionLocked()
 	idx := -1
 	for i, a := range r.list {
 		if a.id == id && !a.base {
@@ -1490,7 +1503,14 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 			r.planLocked(1, a.key, "", false, nil) // a leave is never charged
 		}
 	}
+	vAfter := vs.base || r.visionLocked()
+	if vAfter != vBefore && vs.restartFor(vAfter) {
+		r.planLocked(1, a.key, "", false, nil) // the last want of vision left: the projector is let go when idle
+	}
 	r.mu.Unlock()
+	if vAfter != vBefore {
+		s.visionWantChanged("an attachment that wanted vision left", false)
+	}
 	if end != nil && endWord != "" {
 		end <- endWord
 	}

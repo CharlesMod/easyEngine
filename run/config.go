@@ -53,6 +53,10 @@ type Profile struct {
 	// Catalog is a local client's catalog overlay: models it adds to the engine's catalog (never
 	// replacing one), checked by the catalog's own rules, kept for the engine's life once taken.
 	Catalog *CatalogOverlay `json:"catalog,omitempty"`
+	// Vision asks for the served model's vision projector (run/vision.go): merged as "any
+	// attachment wants it"; a change of the merged want that restarts the server is charged like
+	// any other change of wants.
+	Vision bool `json:"vision,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.
@@ -123,6 +127,8 @@ type Config struct {
 	DataDir string
 	Profile Profile
 	Version string
+	// Vision wants the vision projector for this run (serve --vision), whatever the setting says.
+	Vision bool
 
 	Catalog *catalog.Catalog // nil: catalog.Load(DataDir)
 

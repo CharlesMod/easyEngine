@@ -191,7 +191,7 @@ func (s *Supervisor) fileLocked() settings.File {
 		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
 		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
 		Streamer: s.sf.streamer, KeepContext: s.sf.keepContext, Name: s.sf.name, Discovery: s.sf.discovery,
-		Listen: s.sf.listen, Yield: s.sf.yield,
+		Listen: s.sf.listen, Yield: s.sf.yield, Vision: s.vis.setting,
 	}.Normalize()
 }
 
@@ -297,12 +297,13 @@ func (s *Supervisor) ReloadSettings() {
 	cur := s.fileLocked()
 	s.mu.Unlock()
 	same := f.Mode == cur.Mode && f.External == cur.External && f.LingerS == cur.LingerS &&
-		f.KVType == cur.KVType && f.SamplerPolicy == cur.SamplerPolicy
+		f.KVType == cur.KVType && f.SamplerPolicy == cur.SamplerPolicy && f.Vision == cur.Vision
 	if !same {
 		s.logf("settings.json changed: applying it")
 		s.setSettings(Settings{
 			Mode: f.Mode, External: External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey},
 			ClearAPIKey: f.External.APIKey == "", LingerS: f.LingerS, KVType: f.KVType, SamplerPolicy: f.SamplerPolicy,
+			Vision: &f.Vision,
 		}, false)
 	}
 	s.mu.Lock()

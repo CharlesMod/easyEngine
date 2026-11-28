@@ -41,9 +41,17 @@ type ctxKey struct {
 	Model string `json:"model"`
 	Build string `json:"build"`
 	KV    string `json:"kv"`
+	// Vision is the sha256 of the vision projector the server runs with ("" none): a slot saved
+	// with one is never laid back onto a server without it, nor the other way.
+	Vision string `json:"vision,omitempty"`
 }
 
-func (k ctxKey) String() string { return k.Model + "|" + k.Build + "|" + k.KV }
+func (k ctxKey) String() string {
+	if k.Vision != "" {
+		return k.Model + "|" + k.Build + "|" + k.KV + "|mmproj:" + k.Vision
+	}
+	return k.Model + "|" + k.Build + "|" + k.KV
+}
 
 // ctxKeyOf is the key a server started from lc at shape saves under.
 func ctxKeyOf(lc loadCtx, shape fit.Shape) ctxKey {
@@ -511,6 +519,8 @@ func layBackMismatch(was, now ctxKey) string {
 		return "the model changed"
 	case was.Build != now.Build:
 		return "the llama build changed"
+	case was.Vision != now.Vision:
+		return "the vision projector was added or removed"
 	default:
 		return fmt.Sprintf("the cache type changed (%s to %s)", was.KV, now.KV)
 	}

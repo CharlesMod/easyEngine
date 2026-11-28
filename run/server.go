@@ -61,6 +61,9 @@ func (s *Supervisor) roomSensed(ctx context.Context, hw probe.Hardware, ourPIDs 
 	if s.customEstimated() { // no measurement behind the footprint: a wider margin
 		r = plan.WithCustomMargin(r)
 	}
+	// the vision projector of the start being made, or of the server that runs: the fit is given
+	// that much less of the card (run/vision.go withProjectorRoom)
+	r = withProjectorRoom(r, s.visionRoomMiB())
 	return r, sn
 }
 
@@ -146,6 +149,9 @@ func (s *Supervisor) startLocked() error {
 	}
 	s.setPhase("starting", "Choosing a shape")
 	s.clearExcl() // every client is in the merge again: the shape is chosen afresh
+	if in, ok := s.resolveInstall(); ok {
+		s.planVision(in) // before the room is read: the room is given less for a projector
+	}
 	lc, room, w, err := s.loadContext(ctx)
 	if err != nil {
 		return s.failStart(err, true)
@@ -153,6 +159,10 @@ func (s *Supervisor) startLocked() error {
 	shape, err := fit.Choose(lc.fp, room, w)
 	for {
 		switch {
+		case (err != nil && errors.Is(err, fit.ErrTooBig) || err == nil && s.floorShort(shape.CtxPerSlot)) && s.visionTrying():
+			// text is never refused for vision: the projector goes before any client is left out
+			room = withoutProjectorRoom(room, s.visionRoomMiB())
+			s.dropVision("the model does not fit this card with its vision projector: serving text only")
 		case err != nil && errors.Is(err, fit.ErrTooBig):
 			// the clients' merged wants do not fit even at the floor: one client is left out
 			// (unserved, said) until the next start: remote before local, later before earlier
@@ -254,6 +264,12 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 		if !res.oom {
 			return s.failStart(res.err, true)
 		}
+		if s.visionTrying() {
+			// out of memory with the projector: the same shape once more without it (text first)
+			s.dropVision("the model server ran out of memory loading the vision projector: serving text only")
+			attempt--
+			continue
+		}
 		hw, err := s.cfg.Probe(ctx)
 		if err != nil {
 			return s.failStart(err, true)
@@ -303,6 +319,9 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	args = withOptions(args, opts.args, help)
 	if opts.ramOff { // more than one owner of the slots: no RAM prompt cache shared among them
 		args = withBefore(args, "--host", []string{"--cache-ram", "0"})
+	}
+	if va := s.visionArgs(); va != nil { // planVision checked the build knows --mmproj
+		args = withBefore(args, "--host", va)
 	}
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
@@ -433,8 +452,13 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		}
 		{
 			oomw.take() // what loading printed is not a run-time signal
+			s.mu.Lock()
+			visSHA, visMiB := s.visionUpLocked()
+			s.mu.Unlock()
+			ck := ctxKeyOf(lc, shape)
+			ck.Vision = visSHA // a saved slot goes back only onto a server with the same projector state
 			srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(),
-				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw, ctxKey: ctxKeyOf(lc, shape), build: lc.in.build}
+				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw, ctxKey: ck, build: lc.in.build, projMiB: visMiB}
 			srv.nextGrow = s.cfg.Now()
 			s.calibrate(ctx, srv)
 			s.srv = srv
@@ -536,6 +560,11 @@ func (s *Supervisor) calibrate(ctx context.Context, srv *server) {
 		return
 	}
 	srv.measured = m
+	if srv.projMiB > 0 && m > srv.projMiB {
+		// the book holds the model alone: the projector's load is the catalog's figure, which the
+		// room already gives up (withProjectorRoom), so it is not learnt into the model's footprint
+		m -= srv.projMiB
+	}
 	s.mu.Lock()
 	c, err := s.st.Book.Calibrate(srv.key, srv.seed, srv.shape, m, time.Now())
 	s.mu.Unlock()

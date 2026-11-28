@@ -122,6 +122,12 @@ type Status struct {
 	// is unserved and the vacant ranges of the running mind (run/clients.go).
 	Attachments []AttachView `json:"attachments"`
 	Wants       WantsInfo    `json:"wants"`
+	// Vision is true while the running server has the vision projector loaded; VisionNote says
+	// why not when vision is wanted ("" otherwise); VisionProgress is the projector's download
+	// (null when none runs). run/vision.go, docs/ENGINE.md "Vision".
+	Vision         bool      `json:"vision"`
+	VisionNote     string    `json:"vision_note"`
+	VisionProgress *Progress `json:"vision_progress"`
 }
 
 // Parent is a watched parent process.
@@ -144,6 +150,8 @@ type Settings struct {
 	Streamer string `json:"streamer,omitempty"`
 	// KeepContext is on | off | always; empty keeps the stored value.
 	KeepContext string `json:"keep_context,omitempty"`
+	// Vision loads the served model's vision projector (run/vision.go); nil keeps the stored value.
+	Vision *bool `json:"vision,omitempty"`
 }
 
 // Route tells the proxy where a request goes.
@@ -171,6 +179,7 @@ type server struct {
 	nextGrow  time.Time
 	measured  int
 	reserve0  int         // the reserve the shape was chosen under (run/recover.go reads a crash against it)
+	projMiB   int         // the vision projector's load (catalog load_mib) when it runs with one
 	oom       *oomWatch   // out-of-memory lines in its output, counted by request (run/recover.go)
 	drain     *drain      // a shrink waiting for the replies in flight
 	planned   atomic.Bool // stopped on purpose: its end is not a crash
@@ -223,6 +232,8 @@ type Supervisor struct {
 	retryable   bool
 	rec         recovery
 	reshape     bool
+	reshapeWhy  string      // what the queued reshape is for (the log line of its reload)
+	vis         visionState // the vision projector (run/vision.go)
 	tokS        float64
 
 	// hub is what the supervisor says (run/book.go); poke wakes the mind's reactor and door is
@@ -302,6 +313,7 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	s := &Supervisor{cfg: cfg, dir: cfg.DataDir, root: ctx, stop: cancel, log: lg, st: st, hub: hub, poke: make(chan struct{}, 1), loadAsk: make(chan struct{}, 1)}
 	s.sf.begin(file, serr)
+	s.vis.setting = file.Vision
 	s.agent.s = s
 	s.holders = &holderScan{s: s}
 	s.card = newRoomWatch(s)
@@ -372,6 +384,7 @@ func (s *Supervisor) refreshLocked() {
 	sayPtr(s, "upgrade", "", st.Upgrade)
 	sayPtr(s, "build", "", s.buildInfoLocked())
 	sayPtr(s, "recovery", "", s.recoveryLocked())
+	s.say("vision", "", s.visionInfoLocked())
 	switch {
 	case s.removing:
 		s.say("job", "", map[string]any{"kind": "remove", "running": true, "install": s.jobRunning})
@@ -466,6 +479,8 @@ func (s *Supervisor) Status() Status {
 		st.Device = &d
 	}
 	st.Recovery = s.recoveryLocked()
+	vi := s.visionInfoLocked()
+	st.Vision, st.VisionNote, st.VisionProgress = vi.Vision, vi.Note, s.visionProgressLocked()
 	st.Held = int(s.door.held.Load())
 	st.Contexts = s.kept.info()
 	st.Attachments, st.Wants = atts, wi
@@ -1012,7 +1027,8 @@ func (s *Supervisor) Settings() Settings {
 	if keepContext == "" {
 		keepContext = "on"
 	}
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext}
+	vision := s.vis.setting
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext, Vision: &vision}
 }
 
 // LingerS is the stored linger setting.
@@ -1080,6 +1096,10 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.st.KVType = in.KVType
 	}
 	kvChanged := s.st.KVType != oldKV
+	visionChanged := in.Vision != nil && *in.Vision != s.vis.setting
+	if visionChanged {
+		s.vis.setting = *in.Vision
+	}
 	s.mu.Unlock()
 	if persist {
 		s.saveSettings()
@@ -1106,7 +1126,11 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.letGoContexts("the cache type changed")
 		s.mu.Lock()
 		s.reshape = true
+		s.reshapeWhy = "KV type changed"
 		s.mu.Unlock()
+	}
+	if visionChanged && in.Mode != "external" {
+		s.visionWantChanged("the vision setting changed", true)
 	}
 	s.Nudge("settings") // after reshape is set: the reactor sees it when it wakes
 	return nil

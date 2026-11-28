@@ -91,6 +91,7 @@ func runEngine(args []string, kind launch, implicit bool) int {
 	yieldGrace := fs.Duration("yield-grace", y.Grace(), "after a game exits, wait this long before loading again")
 	yieldSteady := fs.Duration("yield-steady", y.Steady(), "load again beside a non-game program once its use has held this long")
 	yieldStrict := fs.Bool("yield-strict", y.Strict, "stay unloaded until every program that made the engine yield has exited")
+	vision := fs.Bool("vision", false, "load the model's vision projector for this run (the settings' \"vision\" keeps it on; never written back)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -133,7 +134,7 @@ func runEngine(args []string, kind launch, implicit bool) int {
 	o := app.Options{
 		Yield:       yc,
 		ProfilePath: *profile, ParentPIDs: parents, Host: *host, Port: *port,
-		Linger: *linger, LingerSet: lingerSet, Version: version, Open: *open,
+		Linger: *linger, LingerSet: lingerSet, Version: version, Open: *open, Vision: *vision,
 		DetachStdio: !setup,
 		Resident:    appMode, Tray: tr,
 		Started: func(p int) {

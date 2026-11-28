@@ -745,6 +745,7 @@ func withOptions(args []string, opts [][]string, h *Help) []string {
 // Every standing attachment's slots, unserved word and report change here. An attachment that
 // came after the merge the shape was chosen from waits for a grow.
 func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
+	model := s.selectedID() // the model this start serves (a later start may step down a tier)
 	r := &s.clients
 	r.mu.Lock()
 	var ws, late []*attachment
@@ -752,6 +753,10 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 		switch {
 		case a.seq > ls.seq:
 			late = append(late, a)
+		case requiresModel(a.prof) && !slices.Contains(a.prof.Models.CanUse, model):
+			// it required a model it can use (judged at its attach); this start serves another
+			// (a step down a tier): unserved, never given slots of a model it said it cannot use
+			r.excl[a.id] = fmt.Sprintf("the model that serves (%s) is not one it can use", model)
 		case !a.local && !a.base && a.prof.CtxPerSlot.Floor > shape.CtxPerSlot:
 			// a step down gave less than its floor: unserved, not the cause of a reshape
 			r.excl[a.id] = floorWhy(shape.CtxPerSlot, a.prof.CtxPerSlot.Floor)
@@ -1097,6 +1102,20 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 		v.RestartsLeft = &left
 	}
 	return v
+}
+
+// requiresModel: the profile names model among its required options and lists the models it can
+// use (an attach whose model is not among them is refused, 409 model_unsupported).
+func requiresModel(p Profile) bool {
+	if p.Models == nil || len(p.Models.CanUse) == 0 || p.Server == nil {
+		return false
+	}
+	for _, need := range p.Server.Required {
+		if strings.TrimSpace(need) == "model" {
+			return true
+		}
+	}
+	return false
 }
 
 // selectedID is the model a client's can_use is judged against: the one that serves (the

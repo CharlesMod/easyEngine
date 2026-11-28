@@ -1834,6 +1834,62 @@ flags (`--mmproj*`, `--image*`, `--video*`, `--audio`, `--media-*`, the vision p
 `LLAMA_ARG_IMAGE_*`, `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS`, `LLAMA_ARG_MEDIA_ALLOW_PRIVATE_URLS` and
 `LLAMA_MEDIA_MARKER` are stripped from the model server's environment.
 
+**Allow list on the chat routes.** On `/v1/chat/completions` and `/chat/completions` (paths cleaned
+like the others) a remote caller's body must also pass an allow list, on top of the deny scan
+above (which stays for every path): the top-level `messages` must be an array; each element an
+object whose `content` is a string, `null`, absent, or an array whose every element is exactly an
+object with `"type":"text"` and `"text":<string>`. The check is strict: a text part with any other
+key (`cache_control` too), any other part type (named media or not: `future_media` is refused), a
+non-object part, a `content` that is an object or a number, are all `400 images_not_offered`
+("only text content parts are offered to callers from other machines"). A `messages`, `content`,
+`type` or `text` key given twice in one object is refused too, since llama-server's JSON parser may
+take the other copy. A local caller is not checked.
+
+**The audit.** llama.cpp build `b12651-easy1` (`mediaAuditTag` in `api/media.go`); paths are under
+`tools/server/` unless they start with `common/` or `tools/mtmd/`. A test
+(`TestMediaAuditMatchesPin`) fails when the catalog's pinned build is not that tag: redo this table
+(every way media enters a request, every projector/media flag and env var) against the new source,
+update this section, `api/media.go`, `run/ownedflags.go` and `run/util.go` `mediaEnv`, then move
+`mediaAuditTag`.
+
+| # | Way in | Parsed at | Engine, for a remote caller |
+|---|---|---|---|
+| 1 | Chat content parts `image_url`, `input_audio`, `input_video`, `video_url`; remote fetch of an `http*` URL (10 MB, 10 s, private-address check), `data:` URIs, `file://` (only with `--media-path`) | `server-common.cpp` `oaicompat_content_load_media` 1415-1463 (parts 1419, 1432-1436, 1448), `handle_media` 1340 (http 1350, `file://` 1370-1381, `data:` 1388-1404), `server_resolve_public_addr` 1326 | deny scan on `type` and the part keys, `data:` prefix; allow list (text parts only) on the chat routes |
+| 2 | Anthropic `/v1/messages` image blocks (`source` base64 or url), also inside `tool_result` | `server-chat.cpp` `server_chat_convert_anthropic_to_oai` 391, images 465-481, in `tool_result` 525-537 | deny scan: `image` type, `source`/`data` strings |
+| 3 | Responses `input_image` (`image_url` a URL or data URI) | `server-chat.cpp` `server_chat_convert_responses_to_chatcmpl` 32, 105-116 (`input_file` refused by llama 118) | deny scan: `input_image` type, `image_url` key |
+| 4 | Native `/completion`, `/completions`: `{"prompt":{"prompt_string":..,"multimodal_data":[raw base64]}}` | `server-common.cpp` `tokenize_input_subprompt` 1198-1219 (keys 1199-1200) | deny scan: `multimodal_data` key |
+| 5 | The media marker in text (`<__media__>` library default `mtmd/mtmd.cpp` 579; per-process random `<__media_..__>` from `get_media_marker` `server-common.cpp` 197-206, `LLAMA_MEDIA_MARKER` pins it); marker count must match bitmaps (`mtmd.cpp` 1724, 1739) | `server-common.cpp` 197, `tools/mtmd/mtmd.cpp` 1719-1739 | deny scan: any string holding `<__media` |
+| 6 | `/embedding`, `/embeddings`, `/v1/embeddings`: `input`/`content` items with `image_url` (remote fetch reachable) | `server-context.cpp` `handle_embeddings_impl` 6747 (items 6785-6789), `tokenize_oai_content_array` `server-common.cpp` 1468 | deny scan: `image_url` type and key |
+| 7 | `/rerank`, `/reranking`, `/v1/rerank`, `/v1/reranking`: documents `{"text":..,"image":..}`; fetch happens before the projector check | `server-context.cpp` `handle_rerank_impl` 6866 (`parse_item` 6881, `add_image` 6906); `server-common.cpp` 2141 | deny scan: `image` key |
+| 8 | `/v1/systemone`: `images` or `files` (data: URIs), `input_audio`, `image_url` parts | `server-decision.cpp` 393-394 (data URIs only), 404 (audio, no http or `file://`), 417 (`videos` refused), 421-432 (`files`/`images`), 454-462 (parts); route `server.cpp` 205, router proxy 537 | deny scan: `images`, `files` keys and part types |
+| 9 | `/apply-template` (fetches, then discards), `/chat/completions/input_tokens`, `/responses/input_tokens`, `/v1/messages/count_tokens` (media parsed as in 1-3) | `server-context.cpp` `post_apply_template` 6378, `handle_count_tokens` 7211 (media 7237) | same scans as the route's body shape; no path exemption |
+| 10 | `/v1/audio/transcriptions`, `/audio/transcriptions`: multipart field `file` | `server-context.cpp` 6078; `server-chat.cpp` `convert_transcriptions_to_chatcmpl` 720 (`file` 728) | refused by path, any method, body unread; and every `multipart/` content type refused |
+| 11 | `/v1/realtime` WebSocket: base64 PCM16 in `input_audio_buffer.append` | `server-context.cpp` `ws_realtime` 6113 (event 6247), `server-realtime.cpp` 808 | refused by path (`/v1/realtime`, `/realtime`), any method |
+
+Compressed request bodies (`Content-Encoding`) are refused on every route. Routes with no media
+(`/tokenize`, `/detokenize`, `/infill`) get the same scan and are otherwise not a way in. Native
+`/completion` takes raw base64 only: no URL fetch and no path. Chat routes answer 500 for an image
+when no projector is loaded (`server-common.cpp` 1420-1421); the engine never lets it get that far
+for a remote caller.
+
+**Owned flags** (`run/ownedflags.go`, refused in `extra_args` as `flag_owned`; `common/arg.cpp`
+lines): `--mmproj`/`-mm` 2552-2559, `--mmproj-url`/`-mmu` 2561-2566, `--mmproj-auto`/`--no-mmproj`/
+`--no-mmproj-auto` 2568-2574, `--mmproj-offload`/`--no-mmproj-offload` 2576-2582, `--mmproj-device`/
+`-mmdev` 2584-2602, `--image`/`--audio`/`--video` 2604-2611, `--image-min-tokens` 2613-2618,
+`--image-max-tokens` 2620-2625, `--mtmd-batch-max-tokens` 2627-2632, `--video-fps` 2634-2639,
+`--video-timestamp-interval` 2641-2646, `--video-ffmpeg-dir` 2648-2653, `--media-path` 3677-3689,
+`--media-allow-private-urls` 3691-3696, `--vision-gemma-4b-default` 4805, `--vision-gemma-12b-default`
+4816. With `-hf`, the projector is fetched by default (`common/arg.cpp` 368-387, 647-652); the
+engine owns the projector, so that is never left to the flag.
+
+**Stripped environment** (`run/util.go` `mediaEnv`, `common/arg.cpp` `set_env` lines):
+`LLAMA_ARG_MMPROJ` 2559, `LLAMA_ARG_MMPROJ_URL` 2566, `LLAMA_ARG_MMPROJ_AUTO` 2574,
+`LLAMA_ARG_MMPROJ_OFFLOAD` 2582, `MTMD_BACKEND_DEVICE` 2602, `LLAMA_ARG_IMAGE_MIN_TOKENS` 2618,
+`LLAMA_ARG_IMAGE_MAX_TOKENS` 2625, `LLAMA_ARG_MTMD_BATCH_MAX_TOKENS` 2632, `LLAMA_ARG_VIDEO_FPS` 2639,
+`LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL` 2646, `LLAMA_ARG_VIDEO_FFMPEG_DIR` 2653,
+`LLAMA_ARG_MEDIA_ALLOW_PRIVATE_URLS` 3696, and `LLAMA_MEDIA_MARKER`
+(`server-common.cpp` 200; it has no flag).
+
 ## 8. Game profile
 
 Written by the game's mod, passed with `--profile`. Game-agnostic fields only:

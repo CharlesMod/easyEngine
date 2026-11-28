@@ -52,6 +52,98 @@ func mediaRefusal(r *http.Request) string {
 	return ""
 }
 
+// mediaAuditTag is the llama.cpp build whose source the media audit (docs/ENGINE.md section 7h,
+// "Media from remote callers", the table of ways media enters a request) was done against.
+// TestMediaAuditMatchesPin fails when the catalog's pinned build moves off it.
+const mediaAuditTag = "b12651-easy1"
+
+// textOnlyChatPath is a chat route a paired token may call: the body of a remote caller there must
+// pass the allow list of textOnlyChat as well as the deny scan.
+func textOnlyChatPath(p string) bool {
+	switch path.Clean("/" + p) {
+	case "/v1/chat/completions", "/chat/completions":
+		return true
+	}
+	return false
+}
+
+// textOnlyChat is the allow list for a remote caller's chat body: every element of the top-level
+// "messages" array is an object whose "content" is a string, null, absent, or an array of parts that
+// each carry exactly "type":"text" and "text":<string> (strict: no other key, cache_control too). A key
+// repeated in one of the objects read here is refused, since llama-server's parser may take the other
+// copy. A body that is not one JSON object, or nests too deep, is left to the existing handling.
+// Returns a reason, or "" when the body passes.
+func textOnlyChat(body []byte) string {
+	const only = "only text content parts are offered to callers from other machines"
+	if len(bytes.TrimSpace(body)) == 0 || jsonDepth(body) > maxJSONDepth {
+		return ""
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	root, err := readNode(dec)
+	if err != nil || !root.obj {
+		return ""
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return ""
+	}
+	var msgs *mediaNode
+	for i, k := range root.keys {
+		if k == "messages" {
+			if msgs != nil {
+				return only + ": \"messages\" is given twice"
+			}
+			msgs = &root.items[i]
+		}
+	}
+	if msgs == nil {
+		return ""
+	}
+	if !isArrayNode(*msgs) {
+		return only + ": \"messages\" is not an array"
+	}
+	for _, m := range msgs.items {
+		if !m.obj {
+			return only + ": a message is not an object"
+		}
+		var content *mediaNode
+		for i, k := range m.keys {
+			if k == "content" {
+				if content != nil {
+					return only + ": \"content\" is given twice"
+				}
+				content = &m.items[i]
+			}
+		}
+		if content == nil || content.null || content.str != nil {
+			continue
+		}
+		if !isArrayNode(*content) {
+			return only + ": \"content\" is not a string or an array of parts"
+		}
+		for _, p := range content.items {
+			if !p.obj || len(p.keys) != 2 {
+				return only + ": a content part is not exactly a type and a text"
+			}
+			var typ, text *mediaNode
+			for i, k := range p.keys {
+				switch k {
+				case "type":
+					typ = &p.items[i]
+				case "text":
+					text = &p.items[i]
+				}
+			}
+			if typ == nil || text == nil || typ.str == nil || *typ.str != "text" || text.str == nil {
+				return only + ": a content part is not exactly a type and a text"
+			}
+		}
+	}
+	return ""
+}
+
+// isArrayNode tells an array node from a scalar or an object (a scalar has no items either).
+func isArrayNode(n mediaNode) bool { return n.arr }
+
 func mediaRefused(reason string) *run.ClientError {
 	return &run.ClientError{Status: 400, Code: "images_not_offered",
 		Msg: "images, audio, video and files are not offered to callers from other machines (" + reason + ")"}
@@ -85,6 +177,7 @@ type mediaNode struct {
 	items []mediaNode // array elements, or object values
 	keys  []string    // object keys, parallel to items
 	obj   bool
+	arr   bool
 }
 
 func readNode(dec *json.Decoder) (mediaNode, error) {
@@ -98,7 +191,7 @@ func readNode(dec *json.Decoder) (mediaNode, error) {
 	case nil:
 		return mediaNode{null: true}, nil
 	case json.Delim:
-		n := mediaNode{obj: v == '{'}
+		n := mediaNode{obj: v == '{', arr: v == '['}
 		for dec.More() {
 			if n.obj {
 				kt, err := dec.Token()

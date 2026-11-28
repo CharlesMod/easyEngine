@@ -134,3 +134,76 @@ func TestLocalImageBodyUnchanged(t *testing.T) {
 		t.Fatalf("local marker: %d %s", c, upstreamBytes(t, e))
 	}
 }
+
+// A remote caller's chat body passes the allow list only with text content: a string, null, absent
+// content, or parts that are exactly a type "text" and a text string.
+func TestRemoteChatTextShapesPass(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	growRemote(t, e, s, rs, 1, "a", 1)
+	for name, body := range map[string]string{
+		"string content": `{"messages":[{"role":"user","content":"hi"}]}`,
+		"null content":   `{"messages":[{"role":"assistant","content":null,"tool_calls":[]}]}`,
+		"absent content": `{"messages":[{"role":"assistant","tool_calls":[]}]}`,
+		"text parts":     `{"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"text":"b","type":"text"}]}]}`,
+		"empty messages": `{"messages":[]}`,
+	} {
+		c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
+		if c != 200 {
+			t.Errorf("%s: %d %s", name, c, b)
+			continue
+		}
+		// the engine adds its own id_slot: the messages arrive as sent
+		want := body[strings.Index(body, `"messages"`) : len(body)-1]
+		if got := upstreamBytes(t, e); !strings.Contains(got, want) {
+			t.Errorf("%s: the model server saw %s", name, got)
+		}
+	}
+}
+
+// Anything else in a remote caller's chat body is refused, whatever it is called, and nothing is forwarded.
+func TestRemoteChatNonTextRefused(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	post := fromElsewhere(t, s)
+	before := upstreamBytes(t, e)
+	cases := map[string]string{
+		"unknown part type":      `{"messages":[{"role":"user","content":[{"type":"future_media"}]}]}`,
+		"unknown type with text": `{"messages":[{"role":"user","content":[{"type":"future_media","text":"x"}]}]}`,
+		"extra key in text part": `{"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}]}`,
+		"text not a string":      `{"messages":[{"role":"user","content":[{"type":"text","text":5}]}]}`,
+		"text part without text": `{"messages":[{"role":"user","content":[{"type":"text"}]}]}`,
+		"part not an object":     `{"messages":[{"role":"user","content":["x"]}]}`,
+		"content object":         `{"messages":[{"role":"user","content":{"type":"text","text":"x"}}]}`,
+		"content number":         `{"messages":[{"role":"user","content":7}]}`,
+		"duplicate content":      `{"messages":[{"role":"user","content":"a","content":[{"type":"future_media"}]}]}`,
+		"duplicate type":         `{"messages":[{"role":"user","content":[{"type":"future_media","type":"text","text":"x"}]}]}`,
+		"duplicate messages":     `{"messages":[],"messages":[{"role":"user","content":[{"type":"future_media"}]}]}`,
+		"messages an object":     `{"messages":{"role":"user","content":"x"}}`,
+		"messages a string":      `{"messages":"x"}`,
+		"message not an object":  `{"messages":["x"]}`,
+	}
+	for name, body := range cases {
+		for _, p := range []string{"/v1/chat/completions", "/v1//chat/completions"} {
+			c, b := post("POST", p, body)
+			if c != 400 || codeOf(b) != "images_not_offered" {
+				t.Errorf("%s %s: %d %s", name, p, c, b)
+			}
+		}
+	}
+	if got := upstreamBytes(t, e); got != before {
+		t.Fatalf("a refused body reached the model server: %s", got)
+	}
+}
+
+// The allow list is for remote callers: a local caller's unknown part type reaches the model server unchanged.
+func TestLocalUnknownPartTypePasses(t *testing.T) {
+	e, _, srv := clientsEnv(t, true, nil)
+	body := `{"messages":[{"role":"user","content":[{"type":"future_media"}]}]}`
+	c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", body, jsonCT)
+	if c != 200 {
+		t.Fatalf("local unknown part: %d %s", c, b)
+	}
+	if got := upstreamBytes(t, e); got != body {
+		t.Fatalf("the model server saw %s", got)
+	}
+}

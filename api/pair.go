@@ -258,13 +258,16 @@ type namer interface {
 // longer stands (revoked, or the file replaced). The app calls it when tokens.json changes (the
 // kernel's word, host.Changes), so a revoke is shown at once, like the gate's refusal.
 func (a *API) ForgetRevoked() {
-	v, ok := a.Tokens.(interface{ Valid(id string) bool })
-	if !ok || a.S == nil || a.S.Hub() == nil {
+	if a.S == nil || a.S.Hub() == nil || a.Tokens == nil {
 		return
 	}
-	// a revoked token's attachments end at once: held streams end with {"end":"revoked"}, slots
-	// go vacant, the facts say them gone (only a paired token's id is asked about)
+	// a revoked token's attachments end at once (and a replaced master's): held streams end with
+	// {"end":"revoked"}, slots go vacant, the facts say them gone
 	a.S.DetachRevoked(func(id, cred string) bool { return a.credValid(id, cred) })
+	v, ok := a.Tokens.(interface{ Valid(id string) bool })
+	if !ok {
+		return
+	}
 	a.seen.Range(func(k, _ any) bool {
 		id := k.(string)
 		if !v.Valid(id) {

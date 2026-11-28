@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,8 +515,9 @@ func TestRemoteGrowWaitsForIdle(t *testing.T) {
 		t.Fatalf("not told it waits for idle: %v", sl)
 	}
 	// well past DrainMax the stream still runs: a remote grow never drains
-	mark := testkit.Mark(t, s, "the stream still runs")
-	_ = mark
+	time.Sleep(3 * 300 * time.Millisecond) // named moment: three DrainMax pass before the gate opens
+	s.Nudge("test")                        // the reactor looks again
+	testkit.Mark(t, s, "past DrainMax")
 	for i := 1; i <= 4; i++ {
 		if len(e.Starts()) != n0 || s.Phase() != "ready" {
 			t.Fatalf("the engine was restarted or drained for a remote client with a reply in flight (phase %s)", s.Phase())
@@ -562,5 +565,456 @@ func TestServerThatWillNotStartWithExtraArgs(t *testing.T) {
 	f, _ := s.Hub().Fact("attachment", h.id)
 	if !strings.Contains(string(f.Body), "the model server did not start with them") {
 		t.Fatalf("the fact does not say it: %s", f.Body)
+	}
+}
+
+// restartsLeft is a held line's restarts_left (-1: absent).
+func restartsLeft(m map[string]any) int {
+	v, ok := m["restarts_left"].(float64)
+	if !ok {
+		return -1
+	}
+	return int(v)
+}
+
+const loneR = `{"hold":true,"name":"r","profile":{"slots":2,"ctx_per_slot":{"max":8192,"floor":4096}}}`
+
+// A lone remote client that drops and returns, idle: no restart, no charge, its cache.
+func TestLoneClientDropAndReturnIdle(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	n0 := len(e.Starts())
+	R := growRemote(t, e, s, rs, 1, "r", 2)
+	if got := len(e.Starts()); got != n0+1 || restartsLeft(R.first) != 3 {
+		t.Fatalf("the grow: starts %d (from %d), restarts left %d", got, n0, restartsLeft(R.first))
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"id_slot":0,"messages":[{"role":"user","content":"one two three"}]}`, as(1)); c != 200 {
+		t.Fatalf("warm: %d %s", c, b)
+	}
+	R.cancel()
+	attachmentGone(t, s, R.id)
+	s.Nudge("test") // the reactor looks once after the leave: nothing to do
+	testkit.Mark(t, s, "after the leave")
+	R2 := openHold(t, rs, loneR, tok(1))
+	if R2.status != 200 || R2.first["resumed"] != true || restartsLeft(R2.first) != 3 {
+		t.Fatalf("return: %d %v", R2.status, R2.first)
+	}
+	if got := len(e.Starts()); got != n0+1 {
+		t.Fatalf("a drop and return restarted the model: %d", got)
+	}
+	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"id_slot":0,"messages":[{"role":"user","content":"one two three four five six seven eight nine ten eleven"}]}`, as(1))
+	var rep struct {
+		Timings struct {
+			CacheN int `json:"cache_n"`
+		}
+	}
+	json.Unmarshal([]byte(b), &rep)
+	if c != 200 || rep.Timings.CacheN <= 0 {
+		t.Fatalf("after the return: %d %s", c, b)
+	}
+}
+
+// Drop and return while another caller's reply is in flight: still no restart, no charge.
+func TestLoneClientDropAndReturnBusy(t *testing.T) {
+	e, s, srv := gatedEnv(t, 300*time.Millisecond)
+	_, rs, _ := remoteSrv(t, s)
+	R := growRemote(t, e, s, rs, 1, "r", 2)
+	n1 := len(e.Starts())
+	_, br := streamGated(t, srv.URL)
+	R.cancel()
+	attachmentGone(t, s, R.id)
+	R2 := openHold(t, rs, loneR, tok(1))
+	if R2.status != 200 || R2.first["resumed"] != true || restartsLeft(R2.first) != 3 {
+		t.Fatalf("return: %d %v", R2.status, R2.first)
+	}
+	for i := 1; i <= 4; i++ {
+		os.WriteFile(filepath.Join(e.Ctl, "go."+strconv.Itoa(i)), nil, 0o644)
+		br.ReadString('\n')
+	}
+	s.Nudge("test") // the reactor looks again
+	testkit.Mark(t, s, "after the stream")
+	if got := len(e.Starts()); got != n1 {
+		t.Fatalf("restarted: %d -> %d", n1, got)
+	}
+}
+
+// The model stops for another reason (an unload): the next start uses the wants that stand (no
+// client), and the client's return grows it again, uncharged.
+func TestLoneClientReturnAfterAnUnload(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	R := growRemote(t, e, s, rs, 1, "r", 2)
+	R.cancel()
+	attachmentGone(t, s, R.id)
+	if err := s.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitFor(t, 15*time.Second, "stopped", func() bool { return s.Phase() != "ready" })
+	n := len(e.Starts())
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitFor(t, 15*time.Second, "started with the standing wants", func() bool { return len(e.Starts()) > n && s.Phase() == "ready" })
+	if sl := s.Status().Shape.Slots; sl != 3 {
+		t.Fatalf("the start after the unload has %d slots, want the base's 3", sl)
+	}
+	n = len(e.Starts())
+	R2 := openHold(t, rs, loneR, tok(1))
+	m := R2.untilGiven(2)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 3 {
+		t.Fatalf("return after an unload: starts %d (from %d), restarts left %d", got, n, restartsLeft(m))
+	}
+}
+
+// Another caller reshaped the client's range away (a local client that wanted more); the
+// client's return grows the model again, uncharged.
+func TestLoneClientReturnAfterAnotherReshaped(t *testing.T) {
+	e, s, srv := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	R := growRemote(t, e, s, rs, 1, "r", 2)
+	R.cancel()
+	attachmentGone(t, s, R.id)
+	n := len(e.Starts())
+	L := openHold(t, srv, `{"hold":true,"name":"l","profile":{"slots":3,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	L.untilGiven(3)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if got := len(e.Starts()); got != n+1 {
+		t.Fatalf("the local grow: %d starts (from %d)", got, n)
+	}
+	R2 := openHold(t, rs, loneR, tok(1))
+	if R2.first["resumed"] == true {
+		t.Fatalf("resumed a range that is gone: %v", R2.first)
+	}
+	m := R2.untilGiven(2)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if got := len(e.Starts()); got != n+2 || restartsLeft(m) != 3 {
+		t.Fatalf("return: starts %d (from %d), restarts left %d", got, n+1, restartsLeft(m))
+	}
+	// a change of its wants is charged
+	R3 := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":3,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
+	m = R3.untilGiven(3)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if restartsLeft(m) != 2 {
+		t.Fatalf("a change of wants: restarts left %d", restartsLeft(m))
+	}
+}
+
+// A remote grow with no other traffic happens at once, and the client's own held request does
+// not block the idle it waits for.
+func TestRemoteGrowAtOnceWhenIdle(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	n := len(e.Starts())
+	R := openHold(t, rs, loneR, tok(1))
+	if R.status != 200 {
+		t.Fatalf("attach: %d %v", R.status, R.first)
+	}
+	// its request, sent before the grow is done, is held at the door (not in flight) and served
+	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"id_slot":1,"messages":[]}`, as(1))
+	if c != 200 || upstreamSlot(t, e) != float64(4) {
+		t.Fatalf("its request: %d %s upstream %v", c, b, upstreamSlot(t, e))
+	}
+	if got := len(e.Starts()); got != n+1 {
+		t.Fatalf("starts %d (from %d)", got, n)
+	}
+}
+
+func convLog(e *testkit.Env) []string {
+	b, _ := os.ReadFile(filepath.Join(e.Ctl, "convs.log"))
+	return strings.Fields(strings.ReplaceAll(string(b), "\n", " "))
+}
+
+// Conversation ids are the engine's name space: B cannot replay or cancel A's stream with A's id.
+func TestConversationIDsCarryTheirOwner(t *testing.T) {
+	e, s, srv := clientsEnv(t, true, nil)
+	A := openHold(t, srv, `{"hold":true,"name":"a","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	A.untilGiven(1)
+	B := openHold(t, srv, `{"hold":true,"name":"b","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	B.untilGiven(1)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	withConv := func(att string) map[string]string {
+		h := asClient(att)
+		h["X-Conversation-Id"] = "abc"
+		return h
+	}
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, withConv(A.id)); c != 200 {
+		t.Fatalf("A: %d %s", c, b)
+	}
+	do(t, "GET", srv.URL+"/v1/stream?conv_id=abc", "", asClient(B.id))
+	do(t, "DELETE", srv.URL+"/v1/stream?conv_id=abc", "", asClient(B.id))
+	do(t, "GET", srv.URL+"/v1/stream?conv_id=abc&from=0", "", asClient(A.id))
+	do(t, "GET", srv.URL+"/v1/stream?conv_id=abc", "", nil) // the commons
+	l := convLog(e)
+	if len(l) != 10 || l[0] != "HEADER" || l[2] != "GET" || l[4] != "DELETE" || l[6] != "GET" || l[8] != "GET" {
+		t.Fatalf("log %v", l)
+	}
+	idA, idB, idA2, idC := l[1], l[3], l[7], l[9]
+	if idA == "abc" || idB == idA || l[5] != idB || idA2 != idA || idC == idA || idC == idB {
+		t.Fatalf("ids: A %s, B %s/%s, A again %s, commons %s", idA, idB, l[5], idA2, idC)
+	}
+	// the lookup's ids go in owned and come back as the client sent them
+	c, b, _ := do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(A.id)))
+	if c != 200 || !strings.Contains(b, `"conversation_id":"abc"`) || strings.Contains(b, idA) {
+		t.Fatalf("lookup: %d %s", c, b)
+	}
+	if l := convLog(e); l[len(l)-1] != idA {
+		t.Fatalf("lookup sent %s, want %s", l[len(l)-1], idA)
+	}
+	// a remote caller never reaches the stream paths
+	_, rs, _ := remoteSrv(t, s)
+	for _, m := range []string{"GET", "DELETE"} {
+		if c, b, _ := do(t, m, rs.URL+"/v1/stream?conv_id=abc", "", as(1)); c != 403 {
+			t.Fatalf("remote %s /v1/stream: %d %s", m, c, b)
+		}
+	}
+}
+
+// n / n_cmpl above 1 is refused in a confined request; one completion passes; unconfined, as before.
+func TestNAboveOneNotOffered(t *testing.T) {
+	e, s, srv := clientsEnv(t, true, nil)
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"n":2,"messages":[]}`, jsonCT); c != 200 {
+		t.Fatalf("unconfined n 2: %d %s", c, b)
+	}
+	_, rs, _ := remoteSrv(t, s)
+	growRemote(t, e, s, rs, 1, "a", 2)
+	before := upstreamBytes(t, e)
+	for _, body := range []string{`{"n":2,"messages":[]}`, `{"n_cmpl":3,"messages":[]}`, `{"n":"2","messages":[]}`, `{"n":1.5,"messages":[]}`} {
+		c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
+		if c != 400 || codeOf(b) != "n_not_offered" {
+			t.Fatalf("%s: %d %s", body, c, b)
+		}
+	}
+	if upstreamBytes(t, e) != before {
+		t.Fatal("a refused n reached the model server")
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/completions", `{"n":1,"prompt":"x"}`, as(1)); c == 400 {
+		t.Fatalf("n 1: %d %s", c, b)
+	}
+}
+
+// A client whose budget is spent is answered at once (503 no_room with the why), never held.
+func TestBudgetSpentIsAnsweredAtOnce(t *testing.T) {
+	e, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	var h *held
+	for i := 1; i <= 4; i++ { // four changes of wants: four charged restarts
+		h = openHold(t, rs, fmt.Sprintf(`{"hold":true,"name":"r","profile":{"slots":%d,"ctx_per_slot":{"max":8192,"floor":4096}}}`, i), tok(1))
+		m := h.untilGiven(i)
+		testkit.WaitPhase(t, s, "ready", 15*time.Second)
+		if restartsLeft(m) != 4-i {
+			t.Fatalf("change %d: restarts left %d", i, restartsLeft(m))
+		}
+	}
+	n := len(e.Starts())
+	h = openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":5,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
+	sl, _ := h.first["slots"].(map[string]any)
+	if h.status != 200 || sl["pending"] != false || sl["why"] != "restart_budget_spent" || sl["given"] != float64(4) {
+		t.Fatalf("over budget: %d %v", h.status, h.first) // it keeps what it had
+	}
+	// a new attachment of the spent client: nothing coming for it, answered at once
+	h2 := openHold(t, rs, `{"hold":true,"name":"r2","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
+	if sl, _ := h2.first["slots"].(map[string]any); h2.status != 200 || sl["pending"] != false {
+		t.Fatalf("r2: %d %v", h2.status, h2.first)
+	}
+	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1, asClient(h2.id)))
+	if c != 503 || codeOf(b) != "no_room" || !strings.Contains(b, "restart_budget_spent") {
+		t.Fatalf("its request: %d %s", c, b)
+	}
+	if len(e.Starts()) != n {
+		t.Fatal("a spent budget restarted the model")
+	}
+}
+
+// Every reason a request is held, and the event that ends it; nothing else holds.
+func TestEveryHoldHasItsEvent(t *testing.T) {
+	// 1. the model is on its way up: the phase's word (ready) ends it: TestHeldUntilReady and the
+	//    door's own tests (api/hold_test.go).
+	// 2. its attachment's reshape is asked (a local grow drains; a remote one waits for idle): the
+	//    start that serves it (the attachment and wants facts) ends it: TestLocalGrowDrainsWithinDrainMax,
+	//    TestRemoteGrowWaitsForIdle, TestRemoteGrowAtOnceWhenIdle.
+	// 3. a local caller under-served by a stale shape: the reshape it asked for ends it
+	//    (run: TestLastClientLeavingReshapesNothing).
+	// Not held: a client with no restart coming (budget spent, floor short, no room): 503 at once
+	// (TestBudgetSpentIsAnsweredAtOnce, run: TestRestartBudget); here, a client left out for room.
+	// here: a remote client whose floor the owner's ceiling cannot reach (unserved, short)
+	_, s, _ := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	h := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":1,"ctx_per_slot":{"max":65536,"floor":16384}}}`, tok(1))
+	if h.status != 200 {
+		t.Fatalf("attach: %d %v", h.status, h.first)
+	}
+	testkit.WaitFor(t, 20*time.Second, "unserved", func() bool {
+		v, _ := s.ClientView(h.id)
+		return v.Slots.Unserved != ""
+	})
+	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1))
+	if c != 503 || codeOf(b) != "no_room" || !strings.Contains(b, "below its floor") {
+		t.Fatalf("a client with nothing coming: %d %s", c, b)
+	}
+}
+
+// The RAM prompt cache is off when the slots have two owners, on with one; a second owner is
+// never served from vacant slots while it is on.
+func TestRAMCacheOffWithTwoOwners(t *testing.T) {
+	// no base: the commons own the slots; a client that would be served from them is not while
+	// the cache is on: it restarts the server (where it is then the one owner, the cache on)
+	e, s, srv := clientsEnv(t, false, func(e *testkit.Env) { e.Llama["FAKELLAMA_CACHE_RAM"] = "1" })
+	if st := e.Starts(); strings.Contains(st[len(st)-1], "--cache-ram") {
+		t.Fatalf("one owner: %s", st[len(st)-1])
+	}
+	if w := s.Status().Wants; !w.RAMCache {
+		t.Fatal("wants does not say the RAM cache is on")
+	}
+	n := len(e.Starts())
+	A := openHold(t, srv, `{"hold":true,"name":"a","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	A.untilGiven(1)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if st := e.Starts(); len(st) != n+1 || strings.Contains(st[len(st)-1], "--cache-ram") {
+		t.Fatalf("a second owner was served from vacant slots, or a lone owner lost the cache: %q", st[n:])
+	}
+	// the base and a client are two owners: the cache is off
+	e2, s2, srv2 := clientsEnv(t, true, func(e *testkit.Env) { e.Llama["FAKELLAMA_CACHE_RAM"] = "1" })
+	n = len(e2.Starts())
+	B := openHold(t, srv2, `{"hold":true,"name":"b","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	B.untilGiven(1)
+	testkit.WaitPhase(t, s2, "ready", 15*time.Second)
+	if st := e2.Starts(); len(st) != n+1 || !strings.Contains(st[len(st)-1], "--cache-ram 0") {
+		t.Fatalf("two owners: %q", st[n:])
+	}
+	if w := s2.Status().Wants; w.RAMCache {
+		t.Fatal("wants says the RAM cache is on")
+	}
+}
+
+// A help is read only for an attach that brings extra_args.
+func TestAttachReadsNoHelpWithoutExtraArgs(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	e.InstallFake()
+	cfg := e.Config()
+	cfg.StartSleeping = true // no launch: no help read yet
+	s, srv := serve(t, e, cfg)
+	helps := func() int {
+		b, _ := os.ReadFile(filepath.Join(e.Ctl, "help.log"))
+		return strings.Count(string(b), "help")
+	}
+	_, rs, _ := remoteSrv(t, s)
+	if h := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":1}}`, tok(1)); h.status != 200 {
+		t.Fatalf("remote: %d %v", h.status, h.first)
+	}
+	if n := helps(); n != 0 {
+		t.Fatalf("an attach with no extra_args read the help %d times", n)
+	}
+	if h := openHold(t, srv, `{"hold":true,"name":"l","profile":{"server":{"extra_args":["--top-n-sigma","1.5"]}}}`, nil); h.status != 200 {
+		t.Fatalf("local: %d %v", h.status, h.first)
+	}
+	if n := helps(); n != 1 {
+		t.Fatalf("an attach with extra_args read the help %d times", n)
+	}
+}
+
+// masterStore is a token checker with a master token that can be replaced.
+type masterStore struct {
+	mu  sync.Mutex
+	tok string
+}
+
+func (m *masterStore) Check(b string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return "master", b == m.tok
+}
+
+func (m *masterStore) MasterIs(sha string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sum := sha256.Sum256([]byte(m.tok))
+	return hex.EncodeToString(sum[:]) == sha
+}
+
+// A new master token ends every master@<ip> attachment; a token revoked before the attach
+// registers does not stand.
+func TestNewMasterEndsItsRemoteAttachments(t *testing.T) {
+	_, s, _ := clientsEnv(t, true, nil)
+	ms := &masterStore{tok: "m1"}
+	a := &api.API{S: s, AnyHost: true, Tokens: ms}
+	srv := httptest.NewServer(a.Handler())
+	t.Cleanup(srv.Close)
+	h := openHold(t, srv, `{"hold":true,"name":"m","profile":{}}`, map[string]string{"Authorization": "Bearer m1", "X-Forwarded-For": "10.1.1.1"})
+	if h.status != 200 || h.first["client_id"] != "master@127.0.0.1" {
+		t.Fatalf("master attach: %d %v", h.status, h.first)
+	}
+	if _, ok := h.first["restarts_left"]; ok {
+		t.Fatal("the master key from another machine is budgeted")
+	}
+	ms.mu.Lock()
+	ms.tok = "m2"
+	ms.mu.Unlock()
+	a.ForgetRevoked()
+	for {
+		m, ok := h.next("the revoked end")
+		if !ok {
+			t.Fatal("no end line")
+		}
+		if m["end"] != nil {
+			if m["end"] != "revoked" {
+				t.Fatalf("end %v", m["end"])
+			}
+			break
+		}
+	}
+	attachmentGone(t, s, h.id)
+	// revoked between the gate and the registration
+	_, _, ce := s.AttachClient(run.AttachRequest{Hold: true, Name: "late", Profile: &run.Profile{}, Identity: "client-1",
+		Valid: func() bool { return false }})
+	if ce == nil || ce.Code != "token_revoked" || s.Attached() != 0 {
+		t.Fatalf("a revoked token's attach: %+v (attached %d)", ce, s.Attached())
+	}
+}
+
+// At most eight remote bodies are read at once; a drip is cut by the total bound.
+func TestRemoteBodyReadsBounded(t *testing.T) {
+	testkit.SkipWindows(t)
+	e := testkit.New(t)
+	e.InstallFake()
+	s := e.StartSup(e.Config())
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 2 * time.Second}
+	srv := httptest.NewServer(a.Handler())
+	t.Cleanup(srv.Close)
+	open := func() net.Conn {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+		return conn
+	}
+	answer := func(conn net.Conn) int {
+		// network timeout: the engine must answer long before this
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("no answer: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	var conns []net.Conn
+	for i := 0; i < 8; i++ {
+		conns = append(conns, open())
+	}
+	testkit.WaitFor(t, 10*time.Second, "eight bodies being read", func() bool { return a.RemoteReadsNow() == 8 })
+	ninth := open()
+	if c := answer(ninth); c != 429 {
+		t.Fatalf("the ninth: %d", c)
+	}
+	// each of the eight is cut by the total bound (it never finished)
+	for _, c := range conns {
+		if code := answer(c); code != 400 {
+			t.Fatalf("a drip: %d", code)
+		}
 	}
 }

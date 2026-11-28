@@ -290,6 +290,12 @@ func main() {
 			}
 			return
 		case "--help", "-h":
+			if ctl := os.Getenv("FAKELLAMA_CTL"); ctl != "" { // each help read is logged: <ctl>/help.log
+				if f, err := os.OpenFile(filepath.Join(ctl, "help.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+					fmt.Fprintln(f, "help")
+					f.Close()
+				}
+			}
 			fmt.Print(helpText(hidden))
 			return
 		}
@@ -620,11 +626,45 @@ func main() {
 		js(w, reply)
 	}
 	mux.HandleFunc("/completion", completion)
+	// resumable streams, as far as a test needs: every conversation id asked is logged to
+	// <ctl>/convs.log ("<what> <id>"); the lookup answers each id it was given
+	convLog := func(what, id string) {
+		if ctl == "" {
+			return
+		}
+		if f, err := os.OpenFile(filepath.Join(ctl, "convs.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			fmt.Fprintf(f, "%s %s\n", what, id)
+			f.Close()
+		}
+	}
+	mux.HandleFunc("/v1/stream", func(w http.ResponseWriter, r *http.Request) {
+		convLog(r.Method, r.URL.Query().Get("conv_id"))
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(204)
+			return
+		}
+		http.Error(w, `{"error":"Stream not found or expired"}`, 404)
+	})
+	mux.HandleFunc("/v1/streams/lookup", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			IDs []string `json:"conversation_ids"`
+		}
+		json.NewDecoder(r.Body).Decode(&in)
+		var out []map[string]any
+		for _, id := range in.IDs {
+			convLog("LOOKUP", id)
+			out = append(out, map[string]any{"conversation_id": id, "alive": true})
+		}
+		js(w, map[string]any{"sessions": out})
+	})
 	mux.HandleFunc("/infill", completion)
 	addr := vals["--host"] + ":" + vals["--port"]
 	// Like the real server, reflect Origin in CORS headers; and say what Authorization arrived,
 	// so the engine's proxy tests can check it neither leaks nor lets CORS through.
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get("X-Conversation-Id"); id != "" {
+			convLog("HEADER", id)
+		}
 		if o := r.Header.Get("Origin"); o != "" {
 			w.Header().Set("Access-Control-Allow-Origin", o)
 		}

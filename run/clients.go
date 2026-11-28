@@ -988,8 +988,8 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 		if r.run != nil {
 			v.Ctx.Given = r.run.ctx
 			v.Slots.Pending = len(a.slots) == 0 && a.unserved == "" && r.plans[a.key].level > 0
-			if len(a.slots) == 0 && a.unserved == "" {
-				v.Slots.Why = a.why
+			if a.why == whyBudget || (len(a.slots) == 0 && a.unserved == "") {
+				v.Slots.Why = a.why // a change its budget cannot pay for is said even while it keeps its slots
 			}
 		}
 	}
@@ -1693,18 +1693,9 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		s.wakeMind(func(c *causes) { c.clients = true })
 		return d, true
 	}
-	holders := false // anyone besides the base holds slots (the caller included)
-	if m != nil {
-		for _, x := range r.list {
-			if !x.base && len(x.slots) > 0 {
-				holders = true
-			}
-		}
-	}
-	if m == nil || !holders {
-		return d, false // nothing is confined: as before clients
-	}
-	if q.Att == "" && !q.Local {
+	// rule 2, before anything else is looked at: a remote caller's own attachment with wants is
+	// its, held or answered as one (it is never served beside the others as if anonymous)
+	if q.Att == "" && !q.Local && m != nil {
 		var mine []*attachment
 		for _, x := range r.list {
 			if !x.base && x.wanting && x.identity == q.Identity {
@@ -1718,6 +1709,17 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 			d.Err = cerr(400, "client_required", "this client holds %d attachments with slots: say which in %s", len(mine), "X-Easy-Client")
 			return d, false
 		}
+	}
+	holders := false // anyone besides the base holds slots (the caller included)
+	if m != nil {
+		for _, x := range r.list {
+			if !x.base && len(x.slots) > 0 {
+				holders = true
+			}
+		}
+	}
+	if m == nil || !holders {
+		return d, false // nothing is confined: as before clients
 	}
 	for _, x := range r.list {
 		if x.base && len(x.slots) > 0 {

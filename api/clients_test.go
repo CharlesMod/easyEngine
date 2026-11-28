@@ -161,20 +161,6 @@ func growB(t *testing.T, e *testkit.Env, s *run.Supervisor, srv *httptest.Server
 	return b
 }
 
-// stayD attaches a client "d" (one slot, after b's) that stays: while a wanting client stands, a
-// leave leaves its range vacant (a lone last client's leave reshapes to the base's when idle).
-func stayD(t *testing.T, e *testkit.Env, s *run.Supervisor, srv *httptest.Server) *held {
-	t.Helper()
-	n0 := len(e.Starts())
-	d := openHold(t, srv, `{"hold":true,"name":"d","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
-	if d.status != 200 {
-		t.Fatalf("attach d: %d %v", d.status, d.first)
-	}
-	d.untilGiven(1)
-	testkit.WaitFor(t, 15*time.Second, "the start for d", func() bool { return len(e.Starts()) > n0 && s.Phase() == "ready" })
-	return d
-}
-
 func asClient(id string) map[string]string {
 	return hdr(map[string]string{"X-Easy-Client": id})
 }
@@ -432,8 +418,7 @@ func TestClientAnonymousPassesThroughWithNoBase(t *testing.T) {
 func TestAttachResumesAfterADrop(t *testing.T) {
 	e, s, srv := clientsEnv(t, true, nil)
 	const body = `{"hold":true,"name":"b","profile":{"slots":2,"ctx_per_slot":{"max":8192,"floor":4096}}}`
-	b := growB(t, e, s, srv)
-	stayD(t, e, s, srv)
+	b := growB(t, e, s, srv) // a lone client: its leave reshapes nothing, its range waits for it
 	if c, rb, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"id_slot":0,"messages":[{"role":"user","content":"one two three"}]}`, asClient(b.id)); c != 200 {
 		t.Fatalf("warm: %d %s", c, rb)
 	}
@@ -536,7 +521,6 @@ func TestDeleteAttachment(t *testing.T) {
 func TestAttachServedFromAVacantRange(t *testing.T) {
 	e, s, srv := clientsEnv(t, true, nil)
 	b := growB(t, e, s, srv)
-	stayD(t, e, s, srv)
 	starts := len(e.Starts())
 	b.cancel()
 	attachmentGone(t, s, b.id)

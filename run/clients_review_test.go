@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,4 +145,26 @@ func TestClientCatalogOverlay(t *testing.T) {
 	if m, _ := s.CatalogNow().Model(builtin.ID); m.URL != builtin.URL {
 		t.Fatal("a built-in was replaced")
 	}
+}
+
+// Each pid watch ends with its attachment (a detach, a replace): its stop is called, its
+// goroutine does not wait for the pid.
+func TestClientPidWatchEndsWithItsAttachment(t *testing.T) {
+	e := testkit.New(t)
+	e.InstallFake()
+	cfg := e.Config()
+	var mu sync.Mutex
+	stops := 0
+	cfg.ExitsOf = func(int, string) (<-chan struct{}, func(), error) {
+		return make(chan struct{}), func() { mu.Lock(); stops++; mu.Unlock() }, nil
+	}
+	s := e.StartSup(cfg)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	k := newKid(t)
+	v, _ := clAttach(t, s, clReq("x", k, false, nil))
+	clAttach(t, s, clReq("x", k, false, nil)) // a replace: the first watch stops
+	if err := s.Detach(v.Attachment, "loopback"); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitFor(t, 10*time.Second, "both watches stopped", func() bool { mu.Lock(); defer mu.Unlock(); return stops == 2 })
 }

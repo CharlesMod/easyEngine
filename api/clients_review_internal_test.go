@@ -131,3 +131,40 @@ func TestIdentityOfCallersWithNoIDOfTheirOwn(t *testing.T) {
 		t.Fatal("a forwarding header made a remote caller local")
 	}
 }
+
+// The body confine writes back keeps every value as the client sent it.
+func TestSlotRequestKeepsOtherValues(t *testing.T) {
+	in := `{"z":{"b":1,"a":[3,2,{"y":0,"x":1}]},"messages":[{"role":"user","content":"aé  b <tag> & é"}],"temperature":0.70,"id_slot":1,"big":12345678901234567890}`
+	obj, why := oneObject([]byte(in))
+	if why != "" {
+		t.Fatal(why)
+	}
+	obj["id_slot"] = json.RawMessage("11")
+	out, err := marshalObject(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frag := range []string{`"z":{"b":1,"a":[3,2,{"y":0,"x":1}]}`, `"content":"aé  b <tag> & é"`, `"temperature":0.70`,
+		`"big":12345678901234567890`, `"id_slot":11`} {
+		if !strings.Contains(string(out), frag) {
+			t.Errorf("missing %s in %s", frag, out)
+		}
+	}
+}
+
+func TestBufferedOnlyWhereTheDoorLooks(t *testing.T) {
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{"POST", "/v1/chat/completions", true}, {"POST", "/completion", true}, {"POST", "/infill", true},
+		{"POST", "/v1/streams/lookup", true},
+		{"POST", "/v1/audio/transcriptions", false}, {"POST", "/v1/embeddings", false}, {"POST", "/tokenize", false},
+		{"GET", "/v1/chat/completions", false}, {"GET", "/slots", false}, {"POST", "/v1/responses", false},
+	} {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		if got := bufferedBody(r); got != c.want {
+			t.Errorf("%s %s: %v", c.method, c.path, got)
+		}
+	}
+}

@@ -636,32 +636,32 @@ func TestLoneClientDropAndReturnBusy(t *testing.T) {
 	}
 }
 
-// The model stops for another reason (an unload): the next start uses the wants that stand (no
-// client), and the client's return grows it again: a restart its own attach causes, charged as an
-// attach is (a free return is only one served from its standing range).
+// The model is unloaded (a sleep, as the linger's): the budget is whole again, and the client's
+// return while the model is down costs nothing (rule 1: no running server is restarted); its
+// first request loads the model with its wants, one start, uncharged.
 func TestLoneClientReturnAfterAnUnload(t *testing.T) {
 	e, s, _ := clientsEnv(t, true, nil)
 	_, rs, _ := remoteSrv(t, s)
 	R := growRemote(t, e, s, rs, 1, "r", 2)
+	if restartsLeft(R.first) != 3 {
+		t.Fatalf("the grow while running: restarts left %d", restartsLeft(R.first))
+	}
 	R.cancel()
 	attachmentGone(t, s, R.id)
-	if err := s.Stop(); err != nil {
+	if err := s.Sleep(); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WaitFor(t, 15*time.Second, "stopped", func() bool { return s.Phase() != "ready" })
+	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
 	n := len(e.Starts())
-	if err := s.Start(); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WaitFor(t, 15*time.Second, "started with the standing wants", func() bool { return len(e.Starts()) > n && s.Phase() == "ready" })
-	if sl := s.Status().Shape.Slots; sl != 3 {
-		t.Fatalf("the start after the unload has %d slots, want the base's 3", sl)
-	}
-	n = len(e.Starts())
 	R2 := openHold(t, rs, loneR, tok(1))
+	if R2.status != 200 || restartsLeft(R2.first) != 4 {
+		t.Fatalf("return while down: %d %v", R2.status, R2.first)
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1)); c != 200 {
+		t.Fatalf("the first request after the unload: %d %s", c, b)
+	}
 	m := R2.untilGiven(2)
-	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 2 {
+	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 4 {
 		t.Fatalf("return after an unload: starts %d (from %d), restarts left %d", got, n, restartsLeft(m))
 	}
 }

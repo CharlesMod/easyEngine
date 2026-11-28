@@ -5,6 +5,7 @@ package run_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,11 +47,14 @@ func spend(t *testing.T, s *run.Supervisor, who, name string) {
 	}
 }
 
-// S2: every restart is a local caller's, the engine's own, or charged to the remote identity that
-// caused it. A seeded walk of attach, detach, return and change of wants by two remote identities
-// with no local traffic never restarts the model more than their two budgets.
+// S2 and rules 1-2: within one waking period (between two stops the engine or the person makes),
+// restarts of a running model server caused by remote identities alone never exceed what was
+// charged, and the charge never exceeds their budgets. A seeded walk of attach, detach, return and
+// change of wants by two remote identities, with unloads (the linger's) and returns while down,
+// no local traffic. The unload makes every budget whole; the wake's start from down is the
+// period's own and never charged; a remote caller's sleep never refills.
 func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
-	for _, seed := range []uint64{1, 2, 3, 4} {
+	for _, seed := range []uint64{1, 2, 3, 4, 5, 6} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			e := testkit.New(t)
 			s := ready(t, e)
@@ -63,8 +67,53 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 			}
 			on := map[string]*state{} // who/name -> standing attachment
 			last := map[string]int{}  // who/name -> the slots it last attached with
-			n0 := len(e.Starts())
-			for step := 0; step < 60; step++ {
+			charged := func() int { return s.RestartsOf("client-1") + s.RestartsOf("client-2") }
+			from, woke, periods, down, remoteDown := len(e.Starts()), 0, 0, false, false
+			endPeriod := func(step int) {
+				restarts := len(e.Starts()) - from - woke
+				if c := charged(); restarts > c || c > 8 {
+					t.Fatalf("step %d: a waking period had %d restarts by remote acts, %d charged (budgets 8)", step, restarts, c)
+				}
+				periods++
+			}
+			for step := 0; step < 80; step++ {
+				switch {
+				case !down && rng.IntN(8) == 0: // the linger unloads the model: the period ends
+					endPeriod(step)
+					if err := s.Sleep(); err != nil {
+						t.Fatal(err)
+					}
+					testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+					if charged() != 0 {
+						t.Fatalf("step %d: the unload left %d charged", step, charged())
+					}
+					down = true
+					continue
+				case down && rng.IntN(4) == 0: // a first request loads it
+					if remoteDown {
+						// the period goes on (a remote caller's sleep refilled nothing); the start
+						// from down is not a reshape's (said in the report: --open callers only)
+						woke++
+					} else {
+						from, woke = len(e.Starts()), 1 // a new period
+					}
+					remoteDown = false
+					go s.Wake()
+					testkit.WaitPhase(t, s, "ready", 15*time.Second)
+					down = false
+					continue
+				case !down && rng.IntN(12) == 0: // a remote caller asks a sleep: never a refill
+					before := charged()
+					if err := s.SleepBy(false); err != nil {
+						t.Fatal(err)
+					}
+					testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+					if charged() != before {
+						t.Fatalf("step %d: a remote caller's sleep refilled", step)
+					}
+					down, remoteDown = true, true
+					continue
+				}
 				who, name := whos[rng.IntN(2)], names[rng.IntN(2)]
 				k := who + "/" + name
 				switch st := on[k]; {
@@ -74,25 +123,27 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 					}
 					delete(on, k)
 				case st != nil: // change of wants, or the same again
-					n := 1 + rng.IntN(2)
+					n := 1 + rng.IntN(6)
 					v, _ := clAttach(t, s, remoteReq(who, name, n))
 					on[k], last[k] = &state{v.Attachment, n}, n
 				default: // a return (its last profile) or a new attach
 					n := last[k]
 					if n == 0 || rng.IntN(3) == 0 {
-						n = 1 + rng.IntN(2)
+						n = 1 + rng.IntN(6)
 					}
 					v, _ := clAttach(t, s, remoteReq(who, name, n))
 					on[k], last[k] = &state{v.Attachment, n}, n
 				}
+				if down && charged() != 0 && len(e.Starts()) == from {
+					// nothing runs: an attach, return or change while down is never charged
+					t.Fatalf("step %d: charged %d while the model was down", step, charged())
+				}
 				settle(t, s)
 			}
-			starts := len(e.Starts()) - n0
-			charged := s.RestartsOf("client-1") + s.RestartsOf("client-2")
-			if starts > charged || charged > 8 {
-				t.Fatalf("%d restarts by remote acts alone, %d charged (budgets 8)", starts, charged)
+			if !down {
+				endPeriod(80)
 			}
-			t.Logf("seed %d: %d restarts, %d charged", seed, starts, charged)
+			t.Logf("seed %d: %d waking periods", seed, periods)
 		})
 	}
 }
@@ -189,4 +240,136 @@ func TestRemoteGrowWaitsForIdleByTheReactor(t *testing.T) {
 	if s.Phase() != "resizing" {
 		t.Fatalf("a local grow with a reply in flight: phase %s, want a drain (resizing)", s.Phase())
 	}
+}
+
+// left is the restarts_left an attachment's view says.
+func left(t *testing.T, s *run.Supervisor, id string) int {
+	t.Helper()
+	v, ok := s.ClientView(id)
+	if !ok || v.RestartsLeft == nil {
+		t.Fatalf("no restarts_left for %s: %+v", id, v)
+	}
+	return *v.RestartsLeft
+}
+
+// sleepThenWake unloads the model as the linger does and loads it again as a first request does,
+// between them running between (attaches, returns, changes while down).
+func sleepThenWake(t *testing.T, s *run.Supervisor, between func()) {
+	t.Helper()
+	if err := s.Sleep(); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+	between()
+	go s.Wake()
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+}
+
+// Rules 1 and 2, the real use: one remote client (a game on a laptop) attaches, the laptop
+// sleeps (its attachment leaves), the engine's linger unloads the model, the laptop comes back
+// (a return while the model is down) and its first request loads it. Ten times over: never
+// charged, restarts_left 4 each time, exactly one model start per wake.
+func TestLoneRemoteUnloadAndReturnNeverCharged(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	v, _ := clAttach(t, s, remoteReq("client-1", "game", 6))
+	settle(t, s) // a grow of a running server: charged once
+	if l := left(t, s, v.Attachment); l != 3 {
+		t.Fatalf("the first grow: restarts left %d", l)
+	}
+	for i := 0; i < 10; i++ {
+		if err := s.Detach(v.Attachment, "client-1"); err != nil {
+			t.Fatal(err)
+		}
+		n := len(e.Starts())
+		sleepThenWake(t, s, func() {
+			v, _ = clAttach(t, s, remoteReq("client-1", "game", 6)) // the return, while down
+		})
+		settle(t, s)
+		if got := len(e.Starts()); got != n+1 {
+			t.Fatalf("cycle %d: %d starts (from %d), want the wake's one", i, got, n)
+		}
+		if l := left(t, s, v.Attachment); l != 4 || s.RestartsOf("client-1") != 0 {
+			t.Fatalf("cycle %d: restarts left %d, charged %d", i, l, s.RestartsOf("client-1"))
+		}
+		if got, _ := s.ClientView(v.Attachment); got.Slots.Given != 6 {
+			t.Fatalf("cycle %d: given %+v", i, got.Slots)
+		}
+	}
+}
+
+// Rule 2: four changes of wants while the model runs are charged (four restarts), a fifth is
+// refused with the why; a linger unload makes the budget whole, and a change reshapes again.
+func TestRemoteBudgetWholeAgainAfterAnUnload(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	spend(t, s, "client-1", "x")
+	id := attID(t, s, "client-1", "x")
+	n := len(e.Starts())
+	v, _ := clAttach(t, s, remoteReq("client-1", "x", 8))
+	settle(t, s)
+	if v.Slots.Why != "restart_budget_spent" || len(e.Starts()) != n || left(t, s, id) != 0 {
+		t.Fatalf("the fifth change: %+v, starts %d (from %d)", v.Slots, len(e.Starts()), n)
+	}
+	sleepThenWake(t, s, func() {})
+	if l := left(t, s, id); l != 4 {
+		t.Fatalf("after the unload: restarts left %d", l)
+	}
+	n = len(e.Starts())
+	clAttach(t, s, remoteReq("client-1", "x", 3))
+	settle(t, s)
+	if len(e.Starts()) != n+1 || left(t, s, id) != 3 {
+		t.Fatalf("a change after the refill: starts %d (from %d), left %d", len(e.Starts()), n, left(t, s, id))
+	}
+}
+
+// Rule 2: no stop a remote client causes refills: a sleep or stop a remote caller asked, a failed
+// start after its own change, an out-of-memory walk after its own grow.
+func TestRemoteCausedStopsNeverRefill(t *testing.T) {
+	t.Run("a sleep or stop asked from another machine", func(t *testing.T) {
+		e := testkit.New(t)
+		s := ready(t, e)
+		clAttach(t, s, remoteReq("client-1", "x", 6))
+		settle(t, s)
+		if err := s.SleepBy(false); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+		if err := s.StopBy(false); err != nil {
+			t.Fatal(err)
+		}
+		if s.RestartsOf("client-1") != 1 {
+			t.Fatalf("refilled by a remote caller's sleep/stop: charged %d", s.RestartsOf("client-1"))
+		}
+	})
+	t.Run("a failed start after its change", func(t *testing.T) {
+		e := testkit.New(t)
+		s := ready(t, e)
+		clAttach(t, s, remoteReq("client-1", "x", 6))
+		e.Touch("loadfail")
+		s.React()
+		testkit.WaitFor(t, 15*time.Second, "the start after its change failed", func() bool { return s.Phase() == "error" })
+		e.Remove("loadfail")
+		s.Route() // a request at the door is the word
+		testkit.WaitPhase(t, s, "ready", 15*time.Second)
+		if s.RestartsOf("client-1") != 1 {
+			t.Fatalf("charged %d after a failed start of its own change, want 1", s.RestartsOf("client-1"))
+		}
+	})
+	t.Run("an out-of-memory walk after its grow", func(t *testing.T) {
+		e := testkit.New(t)
+		s := ready(t, e)
+		c0 := ctxOf(t, e.Starts()[0])
+		writeCtl(t, e, "oom_above", strconv.Itoa(c0/3)) // the grow's shape runs out of memory: a walk down
+		clAttach(t, s, remoteReq("client-1", "x", 12))
+		n := len(e.Starts())
+		s.React()
+		testkit.WaitFor(t, 20*time.Second, "ready after the walk", func() bool {
+			l := e.Starts()
+			return len(l) >= n+2 && ctxOf(t, l[len(l)-1]) <= c0/3 && s.Phase() == "ready"
+		})
+		if s.RestartsOf("client-1") != 1 {
+			t.Fatalf("charged %d after the walk its grow led to, want 1", s.RestartsOf("client-1"))
+		}
+	})
 }

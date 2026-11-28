@@ -844,6 +844,23 @@ func (r *clientReg) unplanLocked(key string) {
 	r.replanLocked()
 }
 
+// refillBudgets ends a waking period: the model server stopped for the engine's own reason or the
+// person's (a linger unload or a sleep asked from this machine, the person's stop, a yield of the
+// card), so every remote client's restart budget is whole again. The stop itself is the event; no
+// clock. Never called for a stop a remote client could cause: a crash, an out-of-memory walk or a
+// failed start after a reshape, a reshape's own stop, or a sleep or stop a remote caller asked.
+func (s *Supervisor) refillBudgets(why string) {
+	r := &s.clients
+	r.mu.Lock()
+	spent := len(r.restarts) > 0
+	clear(r.restarts)
+	r.mu.Unlock()
+	if spent {
+		s.logf("clients: %s: every restart budget is whole again", why)
+		s.sayClients()
+	}
+}
+
 // countRestartCauses is a reshape for the clients going ahead: each budget key a plan names
 // spends one of its restarts; the plans are spent.
 func (s *Supervisor) countRestartCauses() {
@@ -997,7 +1014,7 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 			mv.Advice = "prefers " + strings.Join(mp.Prefer, ", ")
 		}
 		if !mv.Usable {
-			mv.Advice = strings.TrimPrefix(mv.Advice+"; the selected model is not one it can use", "; ")
+			mv.Advice = strings.TrimPrefix(mv.Advice+"; the model that serves is not one it can use", "; ")
 		}
 		v.Model = mv
 	}
@@ -1196,7 +1213,7 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 			if need == "model" {
 				if mp := prof.Models; mp != nil && len(mp.CanUse) > 0 && !slices.Contains(mp.CanUse, model) {
 					r.mu.Unlock()
-					e := cerr(409, "model_unsupported", "the selected model %q is not one this client can use; the selection is the person's", model)
+					e := cerr(409, "model_unsupported", "the model that serves (%q) is not one this client can use; the selection is the person's", model)
 					e.Extra = map[string]any{"selected": model, "can_use": mp.CanUse}
 					return AttachView{}, nil, e
 				}

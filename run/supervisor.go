@@ -935,8 +935,13 @@ func (s *Supervisor) Start() error {
 	return s.startLocked()
 }
 
-// Stop stops the model server and keeps it stopped.
-func (s *Supervisor) Stop() error {
+// Stop stops the model server and keeps it stopped: the person's act, which ends a waking period
+// (every remote client's restart budget is whole again: refillBudgets).
+func (s *Supervisor) Stop() error { return s.StopBy(true) }
+
+// StopBy is Stop asked by a caller of this machine (local) or not: a stop a remote caller asked
+// never refills a restart budget (a remote client never causes the refill itself).
+func (s *Supervisor) StopBy(byLocal bool) error {
 	s.mu.Lock()
 	s.userStopped = true
 	lc := s.loadCancel
@@ -960,11 +965,19 @@ func (s *Supervisor) Stop() error {
 	if local && !installed && !s.customMissingPhase() {
 		s.setPhase("not_installed", "No model installed")
 	}
+	if byLocal {
+		s.refillBudgets("the model was stopped")
+	}
 	return nil
 }
 
-// Sleep unloads the model; a proxied request or Wake loads it again.
-func (s *Supervisor) Sleep() error {
+// Sleep unloads the model (the linger's unload, or a sleep asked); a proxied request or Wake loads
+// it again. It ends a waking period: every remote client's restart budget is whole again.
+func (s *Supervisor) Sleep() error { return s.SleepBy(true) }
+
+// SleepBy is Sleep asked by a caller of this machine (local) or not: one a remote caller asked
+// never refills a restart budget.
+func (s *Supervisor) SleepBy(byLocal bool) error {
 	s.mu.Lock()
 	lc := s.loadCancel
 	local := s.st.Mode == "local"
@@ -981,6 +994,9 @@ func (s *Supervisor) Sleep() error {
 	s.setPhase("sleeping", "Model unloaded")
 	s.keepContexts("a sleep", false)
 	s.stopServerLocked()
+	if byLocal {
+		s.refillBudgets("the model was unloaded")
+	}
 	return nil
 }
 

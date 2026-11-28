@@ -307,12 +307,12 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "stop":
 		if need("POST") {
-			a.S.Stop()
+			a.S.StopBy(localCaller(r)) // a remote caller's stop never refills a restart budget
 			writeJSON(w, 200, map[string]string{"status": "stopped"})
 		}
 	case "sleep":
 		if need("POST") {
-			a.S.Sleep()
+			a.S.SleepBy(localCaller(r)) // a remote caller's sleep never refills a restart budget
 			writeJSON(w, 200, map[string]string{"status": "sleeping"})
 		}
 	case "wake":

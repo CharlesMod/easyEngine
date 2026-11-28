@@ -23,6 +23,13 @@ import (
 // projector's detail table is low 64, high 128, max 256 and its look kwargs say enable_thinking false.
 func lookEnv(t *testing.T, mut func(*run.Config)) (*testkit.Env, *run.Supervisor, string) {
 	t.Helper()
+	return lookEnvE(t, nil, mut, true)
+}
+
+// lookEnvE is lookEnv with a say before the engine starts (pre: the fake's env, the catalog) and
+// the wait for the projector optional (wait false: the caller waits, or the engine sleeps).
+func lookEnvE(t *testing.T, pre func(*testkit.Env), mut func(*run.Config), wait bool) (*testkit.Env, *run.Supervisor, string) {
+	t.Helper()
 	testkit.SkipWindows(t)
 	e := testkit.New(t)
 	e.InstallFake()
@@ -32,14 +39,19 @@ func lookEnv(t *testing.T, mut func(*run.Config)) (*testkit.Env, *run.Supervisor
 	if err := os.WriteFile(filepath.Join(e.Data, "models", visionProjFile), bytes.Repeat([]byte{1}, visionProjSize), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if pre != nil {
+		pre(e)
+	}
 	cfg := e.Config()
 	cfg.Vision = true
 	if mut != nil {
 		mut(&cfg)
 	}
 	s, srv := serve(t, e, cfg)
-	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	testkit.WaitFor(t, 20*time.Second, "vision loaded", func() bool { return s.VisionLoaded() })
+	if wait {
+		testkit.WaitPhase(t, s, "ready", 15*time.Second)
+		testkit.WaitFor(t, 20*time.Second, "vision loaded", func() bool { return s.VisionLoaded() })
+	}
 	return e, s, srv.URL
 }
 

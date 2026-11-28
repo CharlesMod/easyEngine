@@ -155,3 +155,56 @@ func TestEmbeddedCampfireProjectorPinned(t *testing.T) {
 		t.Errorf("ProjectorFor(%q) = %v %v", p.File, pm.ID, isProj)
 	}
 }
+
+// checkKwargs: at most MaxKwargs keys, each a plain identifier, each value one JSON scalar.
+func TestCheckKwargs(t *testing.T) {
+	raw := func(s string) json.RawMessage { return json.RawMessage(s) }
+	ok := map[string]map[string]json.RawMessage{
+		"none":   nil,
+		"bool":   {"enable_thinking": raw("false")},
+		"true":   {"a": raw("true")},
+		"number": {"budget": raw("1024"), "temp": raw("0.5")},
+		"short":  {"mode": raw(`"fast"`)},
+		"256":    {"s": raw(`"` + strings.Repeat("x", 256) + `"`)},
+	}
+	for name, kw := range ok {
+		if err := checkKwargs("m", kw); err != nil {
+			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+	nine := map[string]json.RawMessage{}
+	for i := 0; i <= MaxKwargs; i++ {
+		nine["k"+strings.Repeat("a", i)] = raw("1")
+	}
+	eight := map[string]json.RawMessage{}
+	for k, v := range nine {
+		if len(eight) < MaxKwargs {
+			eight[k] = v
+		}
+	}
+	if err := checkKwargs("m", eight); err != nil {
+		t.Errorf("%d keys refused: %v", MaxKwargs, err)
+	}
+	bad := map[string]struct {
+		kw   map[string]json.RawMessage
+		want string
+	}{
+		"nine keys":   {nine, "more than"},
+		"upper key":   {map[string]json.RawMessage{"Bad": raw("1")}, "plain identifier"},
+		"dash key":    {map[string]json.RawMessage{"a-b": raw("1")}, "plain identifier"},
+		"digit first": {map[string]json.RawMessage{"1a": raw("1")}, "plain identifier"},
+		"empty key":   {map[string]json.RawMessage{"": raw("1")}, "plain identifier"},
+		"long key":    {map[string]json.RawMessage{strings.Repeat("a", 65): raw("1")}, "plain identifier"},
+		"object":      {map[string]json.RawMessage{"a": raw(`{"x":1}`)}, "must be"},
+		"array":       {map[string]json.RawMessage{"a": raw(`[1]`)}, "must be"},
+		"null":        {map[string]json.RawMessage{"a": raw(`null`)}, "must be"},
+		"long string": {map[string]json.RawMessage{"a": raw(`"` + strings.Repeat("x", 257) + `"`)}, "longer than"},
+		"not JSON":    {map[string]json.RawMessage{"a": raw(`{`)}, "not JSON"},
+	}
+	for name, c := range bad {
+		err := checkKwargs("m", c.kw)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v (want an error with %q)", name, err, c.want)
+		}
+	}
+}

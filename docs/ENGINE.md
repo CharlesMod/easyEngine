@@ -942,7 +942,7 @@ stays hidden until it is classified; a test fails until it is). Kept: `version`,
 `shape`, `tok_s`, `model_tier`, `model_stage`, `kv_type`, `restarts`, `model_fallback`,
 `model_note`, `sampler`, `model_name`, `model_params`, `model_size_class`, `held`. Removed:
 `port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `upgrade`,
-`contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield` (paths, pids, the local
+`contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield`, `build` (paths, pids, the local
 model server's address, error texts, other clients, host program detail). Everything else needs
 the master token or the engine's own machine.
 

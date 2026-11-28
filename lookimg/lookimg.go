@@ -64,7 +64,6 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
-	"strings"
 )
 
 // Limits bounds what Prepare will accept.
@@ -115,7 +114,16 @@ var dataPrefixes = []string{"data:image/png;base64,", "data:image/jpeg;base64,"}
 // aspect kept, each side at least 1) and re-encodes it. Re-encoding drops
 // all metadata (EXIF, text chunks, profiles). The caller's bytes are never
 // returned. A panic inside a decoder is recovered and reported as image_bad.
-func Prepare(ctx context.Context, b64 string, longEdge int, lim Limits) (res Result, perr *Error) {
+func Prepare(ctx context.Context, b64 string, longEdge int, lim Limits) (Result, *Error) {
+	if len(b64) > lim.MaxBase64 {
+		return Result{}, fail("image_too_large", "base64 text is %d bytes, limit %d", len(b64), lim.MaxBase64)
+	}
+	return PrepareBytes(ctx, []byte(b64), longEdge, lim)
+}
+
+// PrepareBytes is Prepare on the base64 text as bytes, which it only reads: a caller holding the
+// text inside a larger buffer (the look body) passes a view of it and no copy is made.
+func PrepareBytes(ctx context.Context, b64 []byte, longEdge int, lim Limits) (res Result, perr *Error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res, perr = Result{}, fail("image_bad", "image could not be decoded")
@@ -127,10 +135,10 @@ func Prepare(ctx context.Context, b64 string, longEdge int, lim Limits) (res Res
 	if len(b64) > lim.MaxBase64 {
 		return Result{}, fail("image_too_large", "base64 text is %d bytes, limit %d", len(b64), lim.MaxBase64)
 	}
-	if strings.HasPrefix(b64, "data:") {
+	if bytes.HasPrefix(b64, []byte("data:")) {
 		stripped := false
 		for _, p := range dataPrefixes {
-			if strings.HasPrefix(b64, p) {
+			if bytes.HasPrefix(b64, []byte(p)) {
 				b64, stripped = b64[len(p):], true
 				break
 			}
@@ -217,7 +225,7 @@ func Prepare(ctx context.Context, b64 string, longEdge int, lim Limits) (res Res
 
 // decodeBase64 decodes standard base64 with optional padding, refusing it
 // before allocating when the decoded size would pass max.
-func decodeBase64(s string, max int) ([]byte, *Error) {
+func decodeBase64(s []byte, max int) ([]byte, *Error) {
 	n := len(s)
 	for pad := 0; pad < 2 && n > 0 && s[n-1] == '='; pad++ {
 		n--
@@ -227,7 +235,7 @@ func decodeBase64(s string, max int) ([]byte, *Error) {
 		return nil, fail("image_too_large", "image is about %d bytes, limit %d", size, max)
 	}
 	buf := make([]byte, base64.RawStdEncoding.DecodedLen(n))
-	m, err := base64.RawStdEncoding.Decode(buf, []byte(s))
+	m, err := base64.RawStdEncoding.Decode(buf, s)
 	if err != nil {
 		return nil, fail("image_bad", "invalid base64")
 	}

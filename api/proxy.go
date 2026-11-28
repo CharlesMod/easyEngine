@@ -79,7 +79,7 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if bufferedBody(r) || scan {
+	if (bufferedBody(r) || scan) && !look { // a look's built request is held and counted (look.go)
 		give, ok := a.readBody(w, r, local)
 		if !ok {
 			return

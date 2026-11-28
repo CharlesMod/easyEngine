@@ -410,21 +410,39 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) (func
 		clientFail(w, &run.ClientError{Status: 400, Code: "body_unread", Msg: "the request body did not arrive: " + err.Error()})
 		return nil, false
 	}
-	give := func() {}
-	if !local {
-		n := int64(len(body))
-		if a.remoteKept.Add(n) > maxRemoteKept {
-			a.remoteKept.Add(-n)
-			busy(w, fmt.Sprintf("the request bodies from other machines kept now are at the engine's bound (%d MiB)", maxRemoteKept>>20))
-			return nil, false
-		}
-		var once sync.Once
-		give = func() { once.Do(func() { a.remoteKept.Add(-n) }) }
+	give, ok := a.keepRemote(w, len(body), local)
+	if !ok {
+		return nil, false
 	}
 	_ = rc.SetReadDeadline(time.Time{})
 	r.Body.Close()
 	setBody(r, body)
 	return give, true
+}
+
+// keepRemote counts n bytes a remote request keeps against maxRemoteKept (429 busy over it, and
+// false); the result gives them back, once. A local request keeps nothing counted.
+func (a *API) keepRemote(w http.ResponseWriter, n int, local bool) (func(), bool) {
+	if local {
+		return func() {}, true
+	}
+	k := int64(n)
+	if a.keptAdd(k) > maxRemoteKept {
+		a.keptAdd(-k)
+		busy(w, fmt.Sprintf("the request bodies from other machines kept now are at the engine's bound (%d MiB)", maxRemoteKept>>20))
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(func() { a.keptAdd(-k) }) }, true
+}
+
+// keptAdd changes remoteKept by k and says the new count to a test listening (keptSaid).
+func (a *API) keptAdd(k int64) int64 {
+	n := a.remoteKept.Add(k)
+	if f := a.keptSaid.Load(); f != nil {
+		(*f)(n)
+	}
+	return n
 }
 
 // replyTooLarge is a JSON reply over the cap the door maps slot numbers in: answered 502 with a

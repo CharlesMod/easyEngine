@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"regexp"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/lookimg"
 	"github.com/CharlesMod/easyEngine/run"
 )
@@ -103,7 +103,10 @@ type lookCtxKey struct{}
 func isLook(r *http.Request) bool { return r.Context().Value(lookCtxKey{}) != nil }
 
 type lookImage struct {
-	data, label string
+	// data is the base64 text: a view into the look body, never a copy of it (a copy only when the
+	// caller escaped a character in it, which base64 never needs)
+	data  []byte
+	label string
 }
 
 type lookReq struct {
@@ -116,76 +119,76 @@ type lookReq struct {
 }
 
 // parseLook reads a look request strictly: one JSON object, no unknown or repeated key at any
-// level, numbers as integer tokens in range (never floats), strings as strings.
+// level, numbers as integer tokens in range (never floats), strings as strings. The body is
+// walked in place (lookWalk): each image's base64 is a view of it, so the body is the only copy
+// of the caller's images held, until each is decoded.
 func parseLook(body []byte) (lookReq, *run.ClientError) {
 	q := lookReq{detail: defLookDetail, maxTok: defLookTokens, idSlot: -1}
 	if jsonDepth(body) > 8 {
 		return q, lookBad("bad_request", "a look body nests at most 8 deep")
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var root map[string]json.RawMessage
-	keys, err := objectKeys(dec, &root)
-	if err != nil {
-		return q, lookBad("bad_request", "the look body is not one JSON object: %v", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return q, lookBad("bad_request", "the look body has data after its object")
-	}
-	seen := map[string]bool{}
-	for _, k := range keys {
-		if seen[k] {
-			return q, lookBad("bad_request", "%q is given twice", k)
+	if !json.Valid(body) {
+		// refused bodies only: the decoder's own buffer is a second copy, for the one answer
+		dec := json.NewDecoder(bytes.NewReader(body))
+		if err := dec.Decode(&struct{}{}); err == nil {
+			return q, lookBad("bad_request", "the look body has data after its object")
 		}
-		seen[k] = true
+		return q, lookBad("bad_request", "the look body is not one JSON object")
 	}
-	for k, v := range root {
+	ce := lookMembers(body, "the look body", func(k string, v []byte) *run.ClientError {
 		switch k {
 		case "images":
-			var raws []json.RawMessage
-			if err := json.Unmarshal(v, &raws); err != nil || raws == nil {
-				return q, lookBad("bad_request", "images must be an array")
+			if !isJSONArray(v) {
+				return lookBad("bad_request", "images must be an array")
 			}
-			if len(raws) == 0 {
-				return q, lookBad("bad_request", "images must hold at least one image")
-			}
-			if len(raws) > maxLookImages {
-				return q, lookBad("too_many_images", "a look takes at most %d images, not %d", maxLookImages, len(raws))
-			}
-			for i, raw := range raws {
-				im, ce := parseLookImage(i, raw)
-				if ce != nil {
-					return q, ce
+			n := 0
+			if ce := lookElements(v, func(raw []byte) *run.ClientError {
+				if n++; n > maxLookImages {
+					return lookBad("too_many_images", "a look takes at most %d images", maxLookImages)
 				}
-				q.images = append(q.images, im)
+				im, ce := parseLookImage(n-1, raw)
+				if ce == nil {
+					q.images = append(q.images, im)
+				}
+				return ce
+			}); ce != nil {
+				return ce
+			}
+			if n == 0 {
+				return lookBad("bad_request", "images must hold at least one image")
 			}
 		case "question":
 			if err := jsonString(v, &q.question); err != nil {
-				return q, lookBad("bad_request", "question must be a string")
+				return lookBad("bad_request", "question must be a string")
 			}
 		case "detail":
 			if err := jsonString(v, &q.detail); err != nil || (q.detail != "low" && q.detail != "high" && q.detail != "max") {
-				return q, lookBad("bad_request", "detail must be low, high or max")
+				return lookBad("bad_request", "detail must be low, high or max")
 			}
 		case "max_tokens":
 			n, ok := jsonInt(v, 1, maxLookTokens)
 			if !ok {
-				return q, lookBad("bad_request", "max_tokens must be an integer from 1 to %d", maxLookTokens)
+				return lookBad("bad_request", "max_tokens must be an integer from 1 to %d", maxLookTokens)
 			}
 			q.maxTok = n
 		case "id_slot":
 			n, ok := jsonInt(v, 0, maxLookSlot)
 			if !ok {
-				return q, lookBad("bad_request", "id_slot must be an integer from 0 to %d", maxLookSlot)
+				return lookBad("bad_request", "id_slot must be an integer from 0 to %d", maxLookSlot)
 			}
 			q.idSlot = n
 		case "stream":
-			if err := json.Unmarshal(v, &q.stream); err != nil || !isJSONBool(v) {
-				return q, lookBad("bad_request", "stream must be true or false")
+			if !isJSONBool(v) {
+				return lookBad("bad_request", "stream must be true or false")
 			}
+			q.stream = string(v) == "true"
 		default:
-			return q, lookBad("bad_request", "unknown field %q", k)
+			return lookBad("bad_request", "unknown field %q", k)
 		}
+		return nil
+	})
+	if ce != nil {
+		return q, ce
 	}
 	if q.images == nil {
 		return q, lookBad("bad_request", "images is required")
@@ -199,75 +202,154 @@ func parseLook(body []byte) (lookReq, *run.ClientError) {
 	return q, nil
 }
 
-func parseLookImage(i int, raw json.RawMessage) (lookImage, *run.ClientError) {
+func parseLookImage(i int, raw []byte) (lookImage, *run.ClientError) {
 	var im lookImage
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	var obj map[string]json.RawMessage
-	keys, err := objectKeys(dec, &obj)
-	if err != nil {
-		return im, lookBad("bad_request", "images[%d] must be an object", i)
-	}
-	seen := map[string]bool{}
-	for _, k := range keys {
-		if seen[k] {
-			return im, lookBad("bad_request", "images[%d]: %q is given twice", i, k)
-		}
-		seen[k] = true
-	}
-	for k, v := range obj {
+	ce := lookMembers(raw, fmt.Sprintf("images[%d]", i), func(k string, v []byte) *run.ClientError {
 		switch k {
 		case "data":
-			if err := jsonString(v, &im.data); err != nil {
-				return im, lookBad("bad_request", "images[%d].data must be a base64 string", i)
+			if len(v) < 2 || v[0] != '"' {
+				return lookBad("bad_request", "images[%d].data must be a base64 string", i)
+			}
+			if in := v[1 : len(v)-1]; bytes.IndexByte(in, '\\') < 0 {
+				im.data = in // a view of the body
+			} else {
+				var t string // an escaped character: decoded, the one case that copies
+				if err := json.Unmarshal(v, &t); err != nil {
+					return lookBad("bad_request", "images[%d].data must be a base64 string", i)
+				}
+				im.data = []byte(t)
 			}
 		case "label":
 			if err := jsonString(v, &im.label); err != nil {
-				return im, lookBad("bad_request", "images[%d].label must be a string", i)
+				return lookBad("bad_request", "images[%d].label must be a string", i)
 			}
 			if len(im.label) > maxLookLabel {
-				return im, lookBad("bad_request", "images[%d].label is longer than %d bytes", i, maxLookLabel)
+				return lookBad("bad_request", "images[%d].label is longer than %d bytes", i, maxLookLabel)
 			}
 		default:
-			return im, lookBad("bad_request", "images[%d]: unknown field %q", i, k)
+			return lookBad("bad_request", "images[%d]: unknown field %q", i, k)
 		}
+		return nil
+	})
+	if ce != nil {
+		return im, ce
 	}
-	if im.data == "" {
+	if len(im.data) == 0 {
 		return im, lookBad("bad_request", "images[%d].data is required", i)
 	}
 	return im, nil
 }
 
-// objectKeys decodes one JSON object into into and returns its keys in order, repeated ones
-// included (a map alone would keep only the last).
-func objectKeys(dec *json.Decoder, into *map[string]json.RawMessage) ([]string, error) {
-	t, err := dec.Token()
-	if err != nil {
-		return nil, err
-	}
-	if d, ok := t.(json.Delim); !ok || d != '{' {
-		return nil, fmt.Errorf("not an object")
-	}
-	m := map[string]json.RawMessage{}
-	var keys []string
-	for dec.More() {
-		kt, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		k, _ := kt.(string)
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, err
-		}
-		keys = append(keys, k)
-		m[k] = v
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	*into = m
-	return keys, nil
+// lookWalk walks JSON that json.Valid has passed, in place: every value it gives is a view of the
+// walked bytes, never a copy.
+type lookWalk struct {
+	b []byte
+	i int
 }
+
+func (w *lookWalk) ws() {
+	for w.i < len(w.b) && (w.b[w.i] == ' ' || w.b[w.i] == '\t' || w.b[w.i] == '\n' || w.b[w.i] == '\r') {
+		w.i++
+	}
+}
+
+func (w *lookWalk) str() {
+	for w.i++; w.b[w.i] != '"'; w.i++ {
+		if w.b[w.i] == '\\' {
+			w.i++
+		}
+	}
+	w.i++
+}
+
+// value gives the extent of the next value.
+func (w *lookWalk) value() []byte {
+	w.ws()
+	start := w.i
+	switch w.b[w.i] {
+	case '"':
+		w.str()
+	case '{', '[':
+		for depth := 0; ; {
+			switch w.b[w.i] {
+			case '"':
+				w.str()
+				continue
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					w.i++
+					return w.b[start:w.i]
+				}
+			}
+			w.i++
+		}
+	default:
+		for w.i < len(w.b) && !strings.ContainsRune(" \t\n\r,]}", rune(w.b[w.i])) {
+			w.i++
+		}
+	}
+	return w.b[start:w.i]
+}
+
+// lookMembers calls f with each member of the object v (valid JSON) in order; a key given twice,
+// or v not an object, is refused.
+func lookMembers(v []byte, what string, f func(k string, v []byte) *run.ClientError) *run.ClientError {
+	w := &lookWalk{b: v}
+	w.ws()
+	if w.i >= len(v) || v[w.i] != '{' {
+		return lookBad("bad_request", "%s must be an object", what)
+	}
+	w.i++
+	seen := map[string]bool{}
+	for {
+		w.ws()
+		if v[w.i] == '}' {
+			return nil
+		}
+		raw := w.value()
+		var k string
+		if len(raw) > 2+256 || json.Unmarshal(raw, &k) != nil {
+			k = "(a key too long to name)"
+		}
+		if seen[k] {
+			return lookBad("bad_request", "%s: %q is given twice", what, k)
+		}
+		seen[k] = true
+		w.ws()
+		w.i++ // the colon
+		if ce := f(k, w.value()); ce != nil {
+			return ce
+		}
+		w.ws()
+		if v[w.i] == ',' {
+			w.i++
+		}
+	}
+}
+
+// lookElements calls f with each element of the array v (valid JSON) in order.
+func lookElements(v []byte, f func(e []byte) *run.ClientError) *run.ClientError {
+	w := &lookWalk{b: v}
+	w.ws()
+	w.i++ // the bracket
+	for {
+		w.ws()
+		if v[w.i] == ']' {
+			return nil
+		}
+		if ce := f(w.value()); ce != nil {
+			return ce
+		}
+		w.ws()
+		if v[w.i] == ',' {
+			w.i++
+		}
+	}
+}
+
+func isJSONArray(v []byte) bool { return len(v) > 0 && v[0] == '[' }
 
 func jsonString(v json.RawMessage, s *string) error {
 	if len(v) == 0 || v[0] != '"' {
@@ -301,6 +383,14 @@ func jsonInt(v json.RawMessage, lo, hi int) (int, bool) {
 func (a *API) look(w http.ResponseWriter, r *http.Request) {
 	local := localCaller(r)
 	who := identity(r)
+	// the body counts against the remote bodies kept (readBody) until the request built from it
+	// takes its place, counted before the body's count is given back (never uncounted). The body
+	// is read before the look's gate is taken: a slow sender holds only its read.
+	give, ok := a.readBody(w, r, local)
+	if !ok {
+		return
+	}
+	defer give()
 	if !a.looks.enter(who, local) {
 		clientFail(w, lookBusy("looks are being decoded now, or this caller has a look running: ask again when it ends"))
 		return
@@ -312,13 +402,6 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		}
 		a.looks.release(who, local)
 	}()
-	// the body counts against the remote bodies kept (readBody) until the request built from it
-	// takes its place: the proxy's own read of that request counts it
-	give, ok := a.readBody(w, r, local)
-	if !ok {
-		return
-	}
-	defer give()
 	q, ce := parseLook(bodyOf(r))
 	if ce != nil {
 		clientFail(w, ce)
@@ -335,55 +418,21 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		clientFail(w, &run.ClientError{Status: 409, Code: "vision_off", Msg: "the served model's projector has no detail table"})
 		return
 	}
-	content := make([]map[string]any, 0, 2*len(q.images)+1)
-	builtSize := 0
-	for i, im := range q.images {
-		res, ie := lookimg.Prepare(r.Context(), im.data, edge, lookimg.Default)
-		q.images[i].data = "" // each caller image is let go once it is built
-		if ie != nil {
-			clientFail(w, &run.ClientError{Status: 400, Code: ie.Code, Msg: fmt.Sprintf("images[%d]: %s", i, ie.Msg), Extra: map[string]any{"image": i}})
-			return
-		}
-		if im.label != "" {
-			content = append(content, map[string]any{"type": "text", "text": im.label})
-		}
-		// a remote look's built images are bounded as they are made, not only once all are built
-		builtSize += base64.StdEncoding.EncodedLen(len(res.Data))
-		if !local && builtSize > maxRemoteBody {
-			clientFail(w, lookTooLarge(builtSize))
-			return
-		}
-		uri := "data:" + res.MIME + ";base64," + base64.StdEncoding.EncodeToString(res.Data)
-		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": uri}})
-	}
-	content = append(content, map[string]any{"type": "text", "text": q.question})
-	child := map[string]any{
-		"messages":   []map[string]any{{"role": "user", "content": content}},
-		"max_tokens": q.maxTok,
-		"stream":     q.stream,
-	}
-	if q.stream {
-		child["stream_options"] = map[string]any{"include_usage": true}
-	}
-	if q.idSlot >= 0 {
-		child["id_slot"] = q.idSlot
-	}
-	if len(spec.ChatTemplateKwargs) > 0 {
-		child["chat_template_kwargs"] = spec.ChatTemplateKwargs
-	}
-	built, err := json.Marshal(child)
-	content, child = nil, nil
-	if err != nil {
-		clientFail(w, &run.ClientError{Status: 500, Code: "look_failed", Msg: err.Error()})
-		return
-	}
-	if !local && len(built) > maxRemoteBody {
-		clientFail(w, lookTooLarge(len(built)))
+	built, ce := buildLook(r.Context(), &q, spec, edge, local)
+	if ce != nil {
+		clientFail(w, ce)
 		return
 	}
 	a.looks.decoded()
 	decoding = false
-	give() // the caller's body is let go; the built request is counted by the proxy's read below
+	// the hand-over: the built request is counted, then the body's count is given back; the
+	// proxy reads no body for a look (it is held already) and counts nothing more
+	keepBuilt, ok := a.keepRemote(w, len(built), local)
+	if !ok {
+		return
+	}
+	defer keepBuilt()
+	give()
 
 	r2 := r.Clone(context.WithValue(r.Context(), lookCtxKey{}, true))
 	r2.Method = http.MethodPost
@@ -392,7 +441,6 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 	r2.Header.Del("Content-Encoding")
 	r2.Header.Set("Content-Type", "application/json")
 	setBody(r2, built)
-	built = nil
 	if q.stream {
 		lw := &lookStream{w: w}
 		a.proxy(lw, r2)
@@ -402,6 +450,99 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 	rec := &lookRecorder{w: w, h: http.Header{}}
 	a.proxy(rec, r2)
 	rec.answer()
+}
+
+// buildLook builds the child chat request into one buffer as each image is decoded: each image's
+// base64 is let go once its part is written, the parts are never held apart from the buffer, and
+// a remote look's buffer is bounded as it grows (maxRemoteBody, look_too_large). The request's
+// context is asked between images (and by Prepare between its own steps).
+func buildLook(ctx context.Context, q *lookReq, spec catalog.Projector, edge int, local bool) ([]byte, *run.ClientError) {
+	var buf lookBuf
+	str := func(v string) { b, _ := json.Marshal(v); buf.Write(b) }
+	buf.WriteString(`{"messages":[{"role":"user","content":[`)
+	for i := range q.images {
+		if err := ctx.Err(); err != nil {
+			return nil, &run.ClientError{Status: 400, Code: "image_cancelled", Msg: "the look was cancelled", Extra: map[string]any{"image": i}}
+		}
+		if ce := lookPart(ctx, &buf, i, &q.images[i], edge, local); ce != nil {
+			return nil, ce
+		}
+	}
+	buf.WriteString(`{"type":"text","text":`)
+	str(q.question)
+	fmt.Fprintf(&buf, `}]}],"max_tokens":%d,"stream":%t`, q.maxTok, q.stream)
+	if q.stream {
+		buf.WriteString(`,"stream_options":{"include_usage":true}`)
+	}
+	if q.idSlot >= 0 {
+		fmt.Fprintf(&buf, `,"id_slot":%d`, q.idSlot)
+	}
+	if len(spec.ChatTemplateKwargs) > 0 {
+		kw, err := json.Marshal(spec.ChatTemplateKwargs)
+		if err != nil {
+			return nil, &run.ClientError{Status: 500, Code: "look_failed", Msg: err.Error()}
+		}
+		buf.WriteString(`,"chat_template_kwargs":`)
+		buf.Write(kw)
+	}
+	buf.WriteByte('}')
+	if !local && buf.Len() > maxRemoteBody {
+		return nil, lookTooLarge(buf.Len())
+	}
+	return buf.b, nil
+}
+
+// lookBuf is the built request's buffer. It grows by what is asked plus a little (never doubled
+// like a bytes.Buffer), so the request kept is about its own length, and a moment's copy while
+// it grows is at most the old bytes beside the new.
+type lookBuf struct{ b []byte }
+
+func (l *lookBuf) Len() int { return len(l.b) }
+
+func (l *lookBuf) Grow(n int) {
+	if cap(l.b)-len(l.b) < n {
+		nb := make([]byte, len(l.b), len(l.b)+n+4<<10)
+		copy(nb, l.b)
+		l.b = nb
+	}
+}
+
+func (l *lookBuf) Write(p []byte) (int, error) {
+	l.Grow(len(p))
+	l.b = append(l.b, p...)
+	return len(p), nil
+}
+
+func (l *lookBuf) WriteString(s string) { l.Grow(len(s)); l.b = append(l.b, s...) }
+
+func (l *lookBuf) WriteByte(c byte) error { l.Grow(1); l.b = append(l.b, c); return nil }
+
+// lookPart decodes image i, writes its label and image parts into buf and lets the caller's
+// base64 go.
+func lookPart(ctx context.Context, buf *lookBuf, i int, im *lookImage, edge int, local bool) *run.ClientError {
+	res, ie := lookimg.PrepareBytes(ctx, im.data, edge, lookimg.Default)
+	im.data = nil // the caller's image is let go once it is built
+	if ie != nil {
+		return &run.ClientError{Status: 400, Code: ie.Code, Msg: fmt.Sprintf("images[%d]: %s", i, ie.Msg), Extra: map[string]any{"image": i}}
+	}
+	if im.label != "" {
+		buf.WriteString(`{"type":"text","text":`)
+		b, _ := json.Marshal(im.label)
+		buf.Write(b)
+		buf.WriteString(`},`)
+	}
+	// a remote look's built images are bounded as they are made, not only once all are built
+	n := base64.StdEncoding.EncodedLen(len(res.Data))
+	if !local && buf.Len()+n > maxRemoteBody {
+		return lookTooLarge(buf.Len() + n)
+	}
+	buf.Grow(n + 64)
+	buf.WriteString(`{"type":"image_url","image_url":{"url":"data:` + res.MIME + `;base64,`)
+	enc := base64.NewEncoder(base64.StdEncoding, buf)
+	enc.Write(res.Data)
+	enc.Close()
+	buf.WriteString(`"}},`)
+	return nil
 }
 
 // lookTotals are the figures a look answer reports, read from the model server's own answer:

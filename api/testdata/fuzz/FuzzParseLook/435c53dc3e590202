@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"images\":[{\"data\":\"\xee\"}],\"question\":\"0\"}")

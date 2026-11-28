@@ -55,6 +55,8 @@ type API struct {
 	remoteReads atomic.Int32
 	// looks bounds the look calls (api/look.go).
 	looks lookGate
+	// keptSaid, when set (tests), is told each new count of remoteKept, in the order it changed.
+	keptSaid atomic.Pointer[func(int64)]
 	// readsSaid, when set (tests), is told each new count of remoteReads: the event a test
 	// waits on, since the count itself says nothing to any hub.
 	readsSaid func(int32)

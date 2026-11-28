@@ -348,7 +348,8 @@ func TestForwardingHeaderIsNeverLocal(t *testing.T) {
 	body := fmt.Sprintf(`{"pid":%d,"profile":{}}`, os.Getpid())
 	for _, h := range []string{"X-Forwarded-For", "Forwarded", "X-Real-IP", "Via", "X-Forwarded-Host", "Tailscale-User-Login"} {
 		c, b, _ := do(t, "POST", srv.URL+"/engine/v1/attach", body, hdr(map[string]string{"X-Easy-Engine": "1", h: "10.1.2.3"}))
-		if c != 400 || codeOf(b) != "pid_remote" {
+		// remote at the gate too (D7): a forwarded request on the loopback listener needs a token
+		if c != 401 || codeOf(b) != "token_required" {
 			t.Fatalf("%s: %d %s", h, c, b)
 		}
 	}

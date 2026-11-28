@@ -88,7 +88,12 @@ func bearerOf(r *http.Request) string {
 //     (GET / and /index.html, a fixed file that reads the token from the address), unless it
 //     was started with --open. With neither a token store nor Open it refuses everything.
 //
-// A loopback listener never asks for a token. The accepted client id goes on the request context.
+// A loopback listener never asks for a token of a request from this machine. A request on it that
+// carries a forwarding header (Forwarded, X-Forwarded-*, X-Real-IP, Via, Tailscale-*) is something
+// on this machine passing on another machine's request: it is remote, and asked for a token as on
+// a non-loopback listener (the master key, or a paired token scoped as everywhere); without one it
+// is 401. A reverse proxy in front of the engine must pass a token. The accepted client id goes on
+// the request context.
 func (a *API) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.AnyHost && !loopbackHost(r.Host) {
@@ -108,8 +113,14 @@ func (a *API) gate(next http.Handler) http.Handler {
 			return
 		}
 		client, used, verdict := ClientLoopback, false, tokenNone
+		fwd := forwarded(r)
 		switch {
-		case !a.AnyHost:
+		case !a.AnyHost && !fwd:
+		case !a.AnyHost && a.Tokens == nil && !keyless(r):
+			// forwarded to a loopback listener that has no token store: a token is required and
+			// none can be accepted
+			unauthorized(w, CodeTokenRequired, "bearer token required (easy-engine token prints it)")
+			return
 		case a.Tokens != nil && setupPage(r):
 			// The page itself is a fixed file with nothing secret in it; the browser cannot send
 			// the token with a navigation, and the page's script needs to load to read it from

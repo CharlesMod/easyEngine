@@ -422,6 +422,11 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		}}
 	if tk != nil {
 		a.Tokens = tk
+	} else if loopback {
+		// a request forwarded to the loopback listener from another machine (a reverse proxy on
+		// this machine) needs a token like any remote caller (api/gate.go): read the token file if
+		// one exists, never made here; no pairing on loopback
+		a.Tokens = tokens.Open(dir)
 	}
 	// Who this engine is to a client on the network (hello, mDNS), and pairing where tokens are
 	// in force on a non-loopback listener (with --open there is nothing to pair for).

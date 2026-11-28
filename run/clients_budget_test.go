@@ -82,9 +82,10 @@ func TestStartThatNeverListenedIsOneRestart(t *testing.T) {
 			t.Logf("phase %s, starts %d (from %d), bind failures %d (from %d), charged %d", s.Phase(), len(e.Starts()), n, bindFails(e), f, s.RestartsOf("client-1"))
 		}
 	})
-	// (under load another process may take a port too: each lost one is a start that never listened)
+	// Starts leaves out each start that never listened (under load another process may take a
+	// port too): the change is one start
 	testkit.WaitFor(t, 15*time.Second, "ready after the retry", func() bool {
-		return s.Phase() == "ready" && len(e.Starts()) == n+1+bindFails(e)-f
+		return s.Phase() == "ready" && len(e.Starts()) == n+1
 	})
 	if bindFails(e) < f+1 || s.RestartsOf("client-1") != c+1 {
 		t.Fatalf("bind failures %d (from %d), charged %d (from %d)", bindFails(e), f, s.RestartsOf("client-1"), c)
@@ -92,7 +93,7 @@ func TestStartThatNeverListenedIsOneRestart(t *testing.T) {
 	if r := s.Status().Recovery; r != nil {
 		t.Fatalf("a lost port was counted as a failure: %+v", r)
 	}
-	if restarts := len(e.Starts()) - n - (bindFails(e) - f); restarts != 1 {
+	if restarts := len(e.Starts()) - n; restarts != 1 {
 		t.Fatalf("the walk's count: %d restarts for one change", restarts)
 	}
 }
@@ -132,11 +133,11 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 			on := map[string]*state{} // who/name -> standing attachment
 			last := map[string]int{}  // who/name -> the slots it last attached with
 			charged := func() int { return s.RestartsOf("client-1") + s.RestartsOf("client-2") }
-			from, failed, woke, periods, down := len(e.Starts()), bindFails(e), 0, 0, false
+			from, woke, periods, down := len(e.Starts()), 0, 0, false
 			endPeriod := func(step int) {
-				// a start that never listened (its port taken between the engine's pick and its bind,
-				// as under load) is retried: the retry is the same restart, not another
-				restarts := len(e.Starts()) - from - woke - (bindFails(e) - failed)
+				// (Starts leaves out a start that never listened: its port taken between the
+				// engine's pick and its bind, as under load; the launch's retry is the same restart)
+				restarts := len(e.Starts()) - from - woke
 				if c := charged(); restarts > c || c > 8 {
 					t.Fatalf("step %d: a waking period had %d restarts by remote acts, %d charged (budgets 8)", step, restarts, c)
 				}
@@ -156,7 +157,7 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 					down = true
 					continue
 				case down && rng.IntN(4) == 0: // a first request loads it: a new period
-					from, failed, woke = len(e.Starts()), bindFails(e), 1
+					from, woke = len(e.Starts()), 1
 					go s.Wake()
 					testkit.WaitPhase(t, s, "ready", 15*time.Second)
 					down = false
@@ -464,5 +465,21 @@ func TestChangeWhileLoadingIsNotLost(t *testing.T) {
 	settle(t, s)
 	if got, _ := s.ClientView(v.Attachment); got.Slots.Given != 8 || s.RestartsOf("client-1") != 1 {
 		t.Fatalf("the change made while loading: %+v, charged %d", got.Slots, s.RestartsOf("client-1"))
+	}
+}
+
+// A test that counts starts is not disturbed by a lost port (TestBusyCardWaitsRatherThanStepping
+// failed once under -race and load with "started [bon.gguf bon.gguf]"): testkit's Starts leaves
+// out a process that never listened, so the first start of a supervisor whose port was taken is
+// one start.
+func TestStartsLeaveOutALostPort(t *testing.T) {
+	e := testkit.New(t)
+	e.Touch("bindfail")
+	s := ready(t, e)
+	if bindFails(e) != 1 || len(e.Starts()) != 1 {
+		t.Fatalf("bind failures %d, starts %v", bindFails(e), e.Starts())
+	}
+	if r := s.Status().Recovery; r != nil {
+		t.Fatalf("a lost port was counted as a failure: %+v", r)
 	}
 }

@@ -210,13 +210,31 @@ func (e *Env) Config() run.Config {
 	return cfg
 }
 
-// Starts returns the fake server's start log (one line per start attempt).
+// Starts returns the fake server's start log: one line per start the supervisor made, less the
+// processes that could not bind their port (the fake's bindfails.log, by pid). A lost port is
+// started again at once on a new one within the same launch (run/server.go launch): the same
+// start, never counted twice, so a test that counts starts is not disturbed by another process
+// taking a port under load.
 func (e *Env) Starts() []string {
 	b, err := os.ReadFile(filepath.Join(e.Ctl, "starts.log"))
 	if err != nil {
 		return nil
 	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
+	lost := map[string]bool{}
+	if f, err := os.ReadFile(filepath.Join(e.Ctl, "bindfails.log")); err == nil {
+		for _, l := range strings.Split(string(f), "\n") {
+			if pid, _, ok := strings.Cut(l, " "); ok {
+				lost[pid] = true
+			}
+		}
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if pid, _, _ := strings.Cut(l, " "); !lost[pid] {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // Touch creates, Remove deletes a control file.

@@ -188,7 +188,7 @@ func TestPairedClientDoesNotReachSlotsOrProps(t *testing.T) {
 }
 
 // What a paired token sees of status, populated: the full status has the removed fields and the
-// reduced one has none of them and every kept key the RimWorld mod reads.
+// reduced one has none of them and every kept key a client reads.
 func TestPairedStatusIsReduced(t *testing.T) {
 	pe, paired := scopeEnv(t)
 	// populate: a custom file with a path, parents, and the agent are all in the full status
@@ -214,7 +214,7 @@ func TestPairedStatusIsReduced(t *testing.T) {
 	}
 	for _, k := range []string{"phase", "sampler", "model", "model_tier", "model_size_class", "model_name"} {
 		if _, ok := pm[k]; !ok {
-			t.Errorf("paired status lacks %q, which the RimWorld mod reads", k)
+			t.Errorf("paired status lacks %q, which a client reads", k)
 		}
 	}
 	for _, k := range api.StatusKept {

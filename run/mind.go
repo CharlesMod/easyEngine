@@ -78,7 +78,10 @@ func (s *Supervisor) nudge(why string) {
 // Nudge is a client's or the keeper's word that could change an outcome (an attach, a settings
 // change, a client's own retry): a failed start that waits for an event tries again, and so do an
 // agent and a download that wait for one. The API calls it.
-func (s *Supervisor) Nudge(why string) { s.nudge(why) }
+func (s *Supervisor) Nudge(why string) {
+	s.words.Add(1) // a person's or a client's word: a move that waits for one tries again (build.go)
+	s.nudge(why)
+}
 
 // Begin marks a request at the door in flight; call the result when it ends.
 func (s *Supervisor) Begin() func() {
@@ -375,6 +378,7 @@ func (s *Supervisor) watchNetwork() {
 			case <-s.root.Done():
 				return
 			case <-ch:
+				s.words.Add(1) // the network came back: a word for a move that waits (build.go)
 				s.say("network", "", nil)
 			}
 		}

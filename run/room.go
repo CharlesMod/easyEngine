@@ -101,7 +101,7 @@ func (rw *roomWatch) read() (roomRead, bool) {
 		if hw, err = s.cfg.Probe(s.root); err != nil {
 			return
 		}
-		room, sn = s.roomSensed(s.root, hw, s.launching.pids())
+		room, sn = s.roomSensed(s.root, hw, append(s.launching.pids(), s.smoking.pids()...)) // a smoke test is ours too
 	})
 	if err != nil {
 		return roomRead{}, false

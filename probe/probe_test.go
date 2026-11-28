@@ -88,7 +88,23 @@ func TestLinuxNvidia(t *testing.T) {
 	if hw.RAMTotalMiB != 31951 || hw.RAMAvailMiB != 23551 || !hw.AVX2 || hw.CPUName != "AMD Ryzen 7 9800X3D 8-Core Processor" || hw.Cores != 16 || hw.DiskFreeMiB != 500000 {
 		t.Errorf("%+v", hw)
 	}
-	if len(hw.GPUs) != 1 || hw.GPUs[0].VRAMTotalMiB != 16303 {
+	if len(hw.GPUs) != 1 || hw.GPUs[0].VRAMTotalMiB != 16303 || hw.GPUs[0].Driver != "" {
+		t.Errorf("gpus %+v", hw.GPUs)
+	}
+}
+
+// The driver version is asked apart and given to every NVIDIA card (it picks the CUDA build).
+func TestLinuxNvidiaDriver(t *testing.T) {
+	t.Setenv("EASY_ENGINE_HOME", t.TempDir())
+	f := &fake{goos: "linux", goarch: "amd64", cpus: 16, disk: 500000,
+		cmds: map[string]string{smiQuery: "0, Tesla P40, 24576, 10\n1, Tesla P40, 24576, 3000\n",
+			"nvidia-smi --query-gpu=driver_version --format=csv,noheader": "575.57.08\n575.57.08\n"},
+		files: map[string]string{"/proc/meminfo": meminfo, "/proc/cpuinfo": cpuinfo}}
+	hw, err := ProbeWith(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hw.GPUs) != 2 || hw.GPUs[0].Driver != "575.57.08" || hw.GPUs[1].Driver != "575.57.08" {
 		t.Errorf("gpus %+v", hw.GPUs)
 	}
 }

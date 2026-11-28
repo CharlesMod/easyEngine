@@ -11,7 +11,7 @@ import (
 
 func TestPlanOptInIsNeverRecommended(t *testing.T) {
 	c := &catalog.Catalog{Models: []catalog.Model{
-		{ID: "mid", Name: "Mid", Codename: "Lantern", Size: 6 << 30, Quality: 60, URL: "https://x"},
+		{ID: "mid", Name: "Mid", Codename: "Flashlight", Size: 6 << 30, Quality: 60, URL: "https://x"},
 		{ID: "small", Size: 2 << 30, Quality: 40, URL: "https://x"},
 		{ID: "bonfire", Name: "Big", Codename: "Bonfire", Size: 7 << 30, Quality: 120, URL: "https://x", OptIn: true},
 	}}
@@ -25,7 +25,7 @@ func TestPlanOptInIsNeverRecommended(t *testing.T) {
 	if p.Recommended != "mid" {
 		t.Errorf("recommended %q, want the best non-opt-in that fits", p.Recommended)
 	}
-	if v["bonfire"].Codename != "Bonfire" || v["mid"].Codename != "Lantern" || v["small"].Codename != "" {
+	if v["bonfire"].Codename != "Bonfire" || v["mid"].Codename != "Flashlight" || v["small"].Codename != "" {
 		t.Errorf("codenames not copied: %+v", v)
 	}
 	// installed or not, the opt-in model is not recommended
@@ -47,7 +47,7 @@ func TestPlanOptInIsNeverRecommended(t *testing.T) {
 	// the verdict JSON carries codename always and opt_in only when set
 	b, _ := json.Marshal(v["bonfire"])
 	s, _ := json.Marshal(v["mid"])
-	if !strings.Contains(string(b), `"opt_in":true`) || strings.Contains(string(s), "opt_in") || !strings.Contains(string(s), `"codename":"Lantern"`) {
+	if !strings.Contains(string(b), `"opt_in":true`) || strings.Contains(string(s), "opt_in") || !strings.Contains(string(s), `"codename":"Flashlight"`) {
 		t.Errorf("verdict JSON: %s / %s", b, s)
 	}
 }

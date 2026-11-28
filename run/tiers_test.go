@@ -1,9 +1,11 @@
 package run_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,8 @@ import (
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/probe"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // tierEnv is the fake install with a ladder of four models on disk: m1 (quality 50), a Campfire
@@ -135,5 +139,124 @@ func TestNoTierBelowWaits(t *testing.T) {
 	}
 	if got := starts(); len(got) != 0 {
 		t.Fatalf("started %v", got)
+	}
+}
+
+// stepped is the tier env with Bonfire too big for the card, ready on Campfire by a step.
+func stepped(t *testing.T) (*testkit.Env, *run.Supervisor, func() []string) {
+	e, starts := tierEnv(t)
+	cfg := e.Config()
+	cfg.Seed = tierSeed(20000)
+	s := e.StartSup(cfg)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if st := s.Status(); st.Model != "camp" {
+		t.Fatalf("serving %q, want camp by a step", st.Model)
+	}
+	return e, s, starts
+}
+
+// lastModelFact is the body of the last model fact s said.
+func lastModelFact(t *testing.T, s *run.Supervisor) map[string]any {
+	var last map[string]any
+	for _, ev := range testkit.Said(t, s, 0, 0, "model") {
+		if ev.Name == "model" {
+			last = nil
+			if err := json.Unmarshal(ev.Body, &last); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return last
+}
+
+// The step says what is selected beside what serves: status model_selected, and the model fact's
+// serving.
+func TestStepSaysSelectedAndServing(t *testing.T) {
+	testkit.SkipWindows(t)
+	_, s, _ := stepped(t)
+	st := s.Status()
+	if st.ModelSelected != "bon" || st.Model != "camp" {
+		t.Fatalf("model_selected %q model %q", st.ModelSelected, st.Model)
+	}
+	b, _ := json.Marshal(st)
+	if !strings.Contains(string(b), `"model_selected":"bon"`) {
+		t.Fatalf("json %s", b)
+	}
+	if f := lastModelFact(t, s); f["model"] != "bon" || f["serving"] != "camp" {
+		t.Fatalf("model fact %v", f)
+	}
+}
+
+// The file of the tier that serves under a step is in use: it cannot be deleted (nor the
+// selection's).
+func TestStepServedFileIsInUse(t *testing.T) {
+	testkit.SkipWindows(t)
+	_, s, _ := stepped(t)
+	if _, err := s.DeleteModel("camp", ""); !errors.Is(err, run.ErrInUse) {
+		t.Fatalf("delete of the serving tier: %v, want ErrInUse", err)
+	}
+	if _, err := s.DeleteModel("bon", ""); !errors.Is(err, run.ErrInUse) {
+		t.Fatalf("delete of the selection: %v, want ErrInUse", err)
+	}
+	if _, err := s.DeleteModel("m1", ""); err != nil {
+		t.Fatalf("a model neither selected nor serving can go: %v", err)
+	}
+}
+
+// Selecting the tier that already serves for a step moves the selection and ends the step with no
+// restart.
+func TestSelectingTheServedTierDoesNotRestart(t *testing.T) {
+	testkit.SkipWindows(t)
+	e, s, starts := stepped(t)
+	if err := s.Install("camp", ""); err != nil {
+		t.Fatal(err)
+	}
+	st := s.Status()
+	if st.Model != "camp" || st.ModelSelected != "camp" || st.ModelFallback || st.Phase != "ready" {
+		t.Fatalf("after selecting camp: model %q selected %q fallback %v phase %q", st.Model, st.ModelSelected, st.ModelFallback, st.Phase)
+	}
+	if got := starts(); len(got) != 1 {
+		t.Fatalf("starts %v: selecting the serving tier must not restart it", got)
+	}
+	if ss := run.LoadState(e.Data); ss.Model != "camp" {
+		t.Fatalf("state.json model %q", ss.Model)
+	}
+	if f := lastModelFact(t, s); f["model"] != "camp" || f["serving"] != "camp" {
+		t.Fatalf("model fact %v", f)
+	}
+}
+
+// A model that fits this card, with its expert layers in the machine's memory, but not in the
+// memory free today, is not stepped down: the engine waits as before.
+func TestShortFreeMemoryWaitsRatherThanStepping(t *testing.T) {
+	testkit.SkipWindows(t)
+	e, starts := tierEnv(t)
+	for i := range e.Cat.Models {
+		if e.Cat.Models[i].ID == "bon" {
+			e.Cat.Models[i].MoE = true
+		}
+	}
+	cfg := e.Config()
+	seed := tierSeed(20000)
+	cfg.Seed = func(m catalog.Model, path, kv string) (fit.Footprint, error) {
+		fp, err := seed(m, path, kv)
+		if m.ID == "bon" { // the card holds it with most expert layers in RAM: up to 16000 MiB of them
+			fp.MoE, fp.ExpertLayers, fp.ExpertMiBPerLayer = true, 40, 400
+		}
+		return fp, err
+	}
+	sensed := cfg.Probe
+	cfg.Probe = func(ctx context.Context) (probe.Hardware, error) {
+		hw, err := sensed(ctx)
+		hw.RAMAvailMiB = 3000 // the machine has 32 GiB, little of it free today
+		return hw, err
+	}
+	s := e.StartSup(cfg)
+	testkit.WaitPhase(t, s, "error", 10*time.Second)
+	if st := s.Status(); !strings.Contains(st.Message, "does not fit") || st.Model != "bon" || st.ModelFallback {
+		t.Fatalf("status %q %q %v", st.Message, st.Model, st.ModelFallback)
+	}
+	if got := starts(); len(got) != 0 {
+		t.Fatalf("started %v: a passing memory shortage is not a card too small", got)
 	}
 }

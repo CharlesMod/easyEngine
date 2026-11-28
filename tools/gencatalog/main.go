@@ -616,7 +616,7 @@ type hfEntry struct {
 
 type modelSpec struct {
 	id, name, repo, file, chat, notes, fallbackNote string
-	codename                                        string // short display name of the tier
+	codename, codenameFull                          string // the tier's short and full display names
 	optIn                                           bool   // never auto-picked
 	moe, useMain, fallback                          bool   // useMain: url says resolve/main (the keeper's own repo)
 	quality                                         int
@@ -624,9 +624,9 @@ type modelSpec struct {
 
 var modelSpecs = []modelSpec{
 	// The keeper's rp build of E4B (QAT-exact Q4_0, refusals removed, vocabulary pruned); replaced stock E4B Q4_K_M on 2026-11-25.
-	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP", codename: "Lantern", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
+	{id: "gemma4-e4b-rp-q40", name: "Gemma 4 E4B RP", codename: "Lantern", codenameFull: "Lantern-4B", repo: "cmod/gemma4-e4b-rp-GGUF", file: "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
 		useMain: true, quality: 60, chat: "gemma4"},
-	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", codename: "Flashlight", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
+	{id: "gemma4-e2b-q4km", name: "Gemma 4 E2B (Q4_K_M)", codename: "Flashlight", codenameFull: "Flashlight-2B", repo: "unsloth/gemma-4-E2B-it-GGUF", file: "gemma-4-E2B-it-Q4_K_M.gguf", quality: 40, chat: "gemma4",
 		fallback: true, fallbackNote: "Smallest model: expect repeated lines and weaker understanding of what was said."},
 }
 
@@ -672,7 +672,7 @@ func (c *client) hfModel(sp modelSpec) (catalog.Model, error) {
 			rev = "main"
 		}
 		return catalog.Model{
-			ID: sp.id, Name: sp.name, Codename: sp.codename, OptIn: sp.optIn, File: sp.file,
+			ID: sp.id, Name: sp.name, Codename: sp.codename, CodenameFull: sp.codenameFull, OptIn: sp.optIn, File: sp.file,
 			URL:    c.hfBase() + "/" + sp.repo + "/resolve/" + rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size, MoE: sp.moe, Quality: sp.quality, Chat: sp.chat, Notes: sp.notes,
 			Fallback: sp.fallback, FallbackNote: sp.fallbackNote,
@@ -709,7 +709,7 @@ func (c *client) checkSums(sp modelSpec, sha, oid string) error {
 	return nil
 }
 
-var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", codename: "Campfire", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
+var refSpec = modelSpec{id: refID, name: "Gemma 4 26B RP", codename: "Campfire", codenameFull: "Campfire-26B", repo: "cmod/gemma4-rp-maxxed-GGUF", file: refFile,
 	moe: true, useMain: true, quality: 100, chat: "gemma4", notes: "reference model"}
 
 func main() {
@@ -797,7 +797,7 @@ func buildModels(c *client, refPath string, refFallback bool) ([]catalog.Model, 
 		if serr != nil {
 			return nil, fmt.Errorf("reference model is not on Hugging Face (%v) and the local file is missing: %w", err, serr)
 		}
-		refModel = catalog.Model{ID: refID, Name: refSpec.name, Codename: refSpec.codename, File: refFile, SHA256: refSHA256, Size: st.Size(),
+		refModel = catalog.Model{ID: refID, Name: refSpec.name, Codename: refSpec.codename, CodenameFull: refSpec.codenameFull, File: refFile, SHA256: refSHA256, Size: st.Size(),
 			MoE: true, Quality: 100, Chat: "gemma4", Notes: "reference model; import-only"}
 	case refModel.SHA256 != refSHA256:
 		return nil, fmt.Errorf("reference model on Hugging Face has sha256 %s, expected %s", refModel.SHA256, refSHA256)

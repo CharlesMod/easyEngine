@@ -22,7 +22,7 @@ func TestCodenameValidation(t *testing.T) {
 	}{
 		{"plain", "Campfire", false},
 		{"digit and space", "Bonfire 2", false},
-		{"hyphen and apostrophes", "Jack-o'-Lantern", false},
+		{"hyphen and apostrophes", "Jack-o'-Lamp", false},
 		{"dot", "v1.5", false},
 		{"empty", "", false},
 		{"24 runes", strings.Repeat("a", 24), false},
@@ -81,23 +81,49 @@ func TestEmbeddedCodenames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"gemma4-rp-maxxed-q3kxl": "Campfire", "gemma4-e4b-rp-q40": "Lantern", "gemma4-e2b-q4km": "Flashlight"}
-	got := map[string]string{}
+	// exactly these code names on exactly these ids (Bonfire joins with its entry)
+	want := map[string][2]string{"gemma4-rp-maxxed-q3kxl": {"Campfire", "Campfire-26B"}, "gemma4-e4b-rp-q40": {"Lantern", "Lantern-4B"},
+		"gemma4-e2b-q4km": {"Flashlight", "Flashlight-2B"}}
+	got := map[string][2]string{}
 	for _, m := range c.Models {
-		if m.Codename != "" {
-			got[m.ID] = m.Codename
+		if m.Codename != "" || m.CodenameFull != "" {
+			got[m.ID] = [2]string{m.Codename, m.CodenameFull}
 		}
 		if m.OptIn {
 			t.Errorf("embedded model %s is opt_in", m.ID)
 		}
 	}
-	if len(got) != len(want) {
+	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("codenames %v want %v", got, want)
 	}
-	for id, cn := range want {
-		if got[id] != cn {
-			t.Errorf("model %s codename %q want %q", id, got[id], cn)
+	if m, ok := c.Model("gemma4-e2b-q4km"); !ok || m.Label() != "Flashlight-2B (Gemma 4 E2B (Q4_K_M))" || !m.Fallback {
+		t.Errorf("E2B: %q %+v", m.Label(), m)
+	}
+}
+
+func TestCodenameFullValidation(t *testing.T) {
+	doc := func(code, full string) string {
+		return fmt.Sprintf(`{"version":999,"llamacpp":{"tag":"t","assets":[]},"uv":[],"models":[{"id":"m","name":"m","file":"m.gguf","url":"https://example.com/m","sha256":%q,"size":5,"codename":%q,"codename_full":%q}]}`, goodSHA, code, full)
+	}
+	cases := []struct {
+		code, full string
+		bad        bool
+	}{
+		{"Campfire", "Campfire-26B", false},
+		{"Campfire", "", false},
+		{"", "", false},
+		{"", "Campfire-26B", true},           // a full name with no code name
+		{"Campfire", "Bonfire-27B", true},    // does not begin with the code name
+		{"Campfire", "Campfire <26B>", true}, // not plain text
+		{"Campfire", "Campfire-" + strings.Repeat("x", 16), true},
+	}
+	for _, c := range cases {
+		if _, err := Parse([]byte(doc(c.code, c.full))); (err != nil) != c.bad {
+			t.Errorf("codename %q codename_full %q: err=%v, want bad=%v", c.code, c.full, err, c.bad)
 		}
+	}
+	if l := (Model{Name: "Gemma 4 26B RP", Codename: "Campfire", CodenameFull: "Campfire-26B"}).Label(); l != "Campfire-26B (Gemma 4 26B RP)" {
+		t.Errorf("Label %q", l)
 	}
 }
 

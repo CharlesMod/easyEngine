@@ -25,6 +25,9 @@ func gb(mib int) float64 { return float64(mib) / 1024 }
 // trySwitch handles an install of a different catalog model while one is serving. handled is
 // false when the normal install path applies (nothing serves, same model, external mode).
 func (s *Supervisor) trySwitch(model, backend string) (handled bool, err error) {
+	if s.selectServed(model) { // the asked model already serves for a step (tiers.go)
+		return true, nil
+	}
 	s.mu.Lock()
 	cur, be := s.st.Model, s.st.Backend
 	local := s.st.Mode == "local"

@@ -145,9 +145,7 @@ func (s *Supervisor) startLocked() error {
 		return nil
 	}
 	s.setPhase("starting", "Choosing a shape")
-	s.mu.Lock()
-	s.step = nil // every start tries the selected model first (tiers.go)
-	s.mu.Unlock()
+	s.dropStep() // every start tries the selected model first (tiers.go)
 	lc, room, w, err := s.loadContext(ctx)
 	if err != nil {
 		return s.failStart(err, true)

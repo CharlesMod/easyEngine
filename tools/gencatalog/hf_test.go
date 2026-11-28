@@ -146,13 +146,13 @@ func TestModelsOnlyKeepsTheRest(t *testing.T) {
 	if !reflect.DeepEqual(pb.Llama, pa.Llama) || !reflect.DeepEqual(pb.UV, pa.UV) || !reflect.DeepEqual(pb.AgentRuntime, pa.AgentRuntime) {
 		t.Error("llama, uv or agent_runtime changed")
 	}
-	want := map[string]string{refID: "Campfire", "gemma4-e4b-rp-q40": "Lantern", "gemma4-e2b-q4km": "Flashlight"}
+	want := map[string][2]string{refID: {"Campfire", "Campfire-26B"}, "gemma4-e4b-rp-q40": {"Lantern", "Lantern-4B"}, "gemma4-e2b-q4km": {"Flashlight", "Flashlight-2B"}}
 	if len(pa.Models) != len(want) || pa.Models[0].ID != refID {
 		t.Fatalf("models %+v", pa.Models)
 	}
 	for _, m := range pa.Models {
-		if want[m.ID] == "" || m.Codename != want[m.ID] {
-			t.Errorf("model %s codename %q", m.ID, m.Codename)
+		if w, ok := want[m.ID]; !ok || m.Codename != w[0] || m.CodenameFull != w[1] {
+			t.Errorf("model %s codename %q %q", m.ID, m.Codename, m.CodenameFull)
 		}
 	}
 

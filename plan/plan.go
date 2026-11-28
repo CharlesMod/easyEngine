@@ -55,6 +55,8 @@ type Verdict struct {
 	Name string `json:"name"`
 	// Codename is the tier's code name, shown before Name ("" when the catalog has none).
 	Codename string `json:"codename"`
+	// CodenameFull is the full code name (Campfire-26B); "" when the catalog has none.
+	CodenameFull string `json:"codename_full"`
 	// OptIn: a person picks this model; it is never Recommended.
 	OptIn bool   `json:"opt_in,omitempty"`
 	Size  int64  `json:"size"`
@@ -156,7 +158,7 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 	res.Device = &pin
 	bestYes, bestTight := -1, -1
 	for _, m := range c.Models {
-		v := Verdict{ID: m.ID, Name: m.Name, Codename: m.Codename, OptIn: m.OptIn, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
+		v := Verdict{ID: m.ID, Name: m.Name, Codename: m.Codename, CodenameFull: m.CodenameFull, OptIn: m.OptIn, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
 		if installed != nil {
 			v.Installed = installed(m)
 		}

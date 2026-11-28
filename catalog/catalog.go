@@ -65,9 +65,11 @@ func PatchedTag(tag string) bool { return strings.Contains(tag, "-easy") }
 type Model struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// Codename is the tier's short display name (Flashlight, Lantern, Campfire, Bonfire), shown
-	// before Name where it is set. Plain text (checkCodename); empty in an older catalog.
-	Codename string `json:"codename,omitempty"`
+	// Codename is the tier's short display name (Flashlight, Lantern, Campfire, Bonfire); CodenameFull its
+	// full one ("Campfire-26B"), which begins with Codename. Shown before Name where set, the full
+	// one first (Label). Plain text (checkCodename); empty in an older catalog.
+	Codename     string `json:"codename,omitempty"`
+	CodenameFull string `json:"codename_full,omitempty"`
 	// OptIn marks a model a person picks: nothing chooses it by itself (the recommendation, the
 	// first-run starter, the tier step-down). Once selected it serves like any other model.
 	OptIn   bool   `json:"opt_in,omitempty"`
@@ -308,6 +310,12 @@ func (c *Catalog) validate() error {
 		if err := checkCodename(m.ID, m.Codename); err != nil {
 			return err
 		}
+		if err := checkCodename(m.ID, m.CodenameFull); err != nil {
+			return err
+		}
+		if m.CodenameFull != "" && (m.Codename == "" || !strings.HasPrefix(m.CodenameFull, m.Codename)) {
+			return fmt.Errorf("model %q: codename_full %q must begin with its codename %q", m.ID, m.CodenameFull, m.Codename)
+		}
 	}
 	return nil
 }
@@ -332,14 +340,18 @@ func checkCodename(id, v string) error {
 	return nil
 }
 
-// Label is the model's display name: the code name, then the model's name, where a code name is
-// set ("Campfire (Gemma 4 26B RP)"); else the name; else the id.
+// Label is the model's display name: the code name (the full one where set), then the model's
+// name, where a code name is set ("Campfire-26B (Gemma 4 26B RP)"); else the name; else the id.
 func (m Model) Label() string {
+	code := m.CodenameFull
+	if code == "" {
+		code = m.Codename
+	}
 	switch {
-	case m.Codename != "" && m.Name != "":
-		return m.Codename + " (" + m.Name + ")"
-	case m.Codename != "":
-		return m.Codename
+	case code != "" && m.Name != "":
+		return code + " (" + m.Name + ")"
+	case code != "":
+		return code
 	case m.Name != "":
 		return m.Name
 	}

@@ -2,7 +2,6 @@ package run
 
 import (
 	"context"
-	"errors"
 	"os"
 
 	"github.com/CharlesMod/easyEngine/catalog"
@@ -57,12 +56,14 @@ type UpgradeInfo struct {
 	Target     string `json:"target"`
 	TargetName string `json:"target_name"`
 	// TargetCodename is the target tier's code name; "" when it has none.
-	TargetCodename string    `json:"target_codename"`
-	State          string    `json:"state"`
-	Progress       *Progress `json:"progress"`
-	Error          string    `json:"error,omitempty"`
-	Attempt        int       `json:"attempt"`
-	RetryInS       int       `json:"retry_in_s,omitempty"` // always 0 (omitted): there is no retry cadence
+	TargetCodename string `json:"target_codename"`
+	// TargetCodenameFull is its full code name (Campfire-26B); "" when it has none.
+	TargetCodenameFull string    `json:"target_codename_full"`
+	State              string    `json:"state"`
+	Progress           *Progress `json:"progress"`
+	Error              string    `json:"error,omitempty"`
+	Attempt            int       `json:"attempt"`
+	RetryInS           int       `json:"retry_in_s,omitempty"` // always 0 (omitted): there is no retry cadence
 	// Switch is true when the user switched models (the current one is not a starter).
 	Switch bool `json:"switch,omitempty"`
 }
@@ -79,7 +80,7 @@ func (s *Supervisor) stagingLocked(st *Status) {
 	if u == nil {
 		return
 	}
-	info := &UpgradeInfo{Switch: u.switching, Target: u.target.ID, TargetName: u.target.Name, TargetCodename: u.target.Codename, State: u.state, Error: u.err, Attempt: u.attempt}
+	info := &UpgradeInfo{Switch: u.switching, Target: u.target.ID, TargetName: u.target.Name, TargetCodename: u.target.Codename, TargetCodenameFull: u.target.CodenameFull, State: u.state, Error: u.err, Attempt: u.attempt}
 	if u.progress != nil {
 		p := *u.progress
 		info.Progress = &p
@@ -341,6 +342,17 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 		s.setUpgrade(func(u *upgrade) { u.state = upCancelled })
 		return
 	}
+	// A swap never steps down a tier (tiers.go): a target the card cannot hold fails at the fit
+	// in a moment, and the starter comes back with one load. Held until the swap is judged, the
+	// start at a yield's end included.
+	s.mu.Lock()
+	s.noStepFor = target.ID
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.noStepFor = ""
+		s.mu.Unlock()
+	}()
 	s.mu.Lock()
 	starterID := s.st.Model
 	stopped := s.userStopped
@@ -402,13 +414,6 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 		return
 	}
 	err := s.startLocked()
-	s.mu.Lock()
-	if t := s.steppedLocked(); t != nil && err == nil {
-		// the card cannot hold the target whole: a lower tier serves for it, and the starter (which
-		// that tier may be) is kept; the swap has failed
-		err = errors.New(t.note)
-	}
-	s.mu.Unlock()
 	if err == nil && s.yielded() != nil {
 		// the card was yielded before the target could load: the yield's end starts the selected
 		// model (resumeYield), and the swap is judged by how that start ends

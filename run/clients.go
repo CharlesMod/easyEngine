@@ -866,8 +866,10 @@ func (s *Supervisor) refillBudgets(why string) {
 func (s *Supervisor) countRestartCauses() {
 	r := &s.clients
 	r.mu.Lock()
+	charged := map[string]bool{} // one restart costs each budget key one, however many of its plans asked
 	for _, p := range r.plans {
-		if p.who != "" {
+		if p.who != "" && !charged[p.who] {
+			charged[p.who] = true
 			r.restarts[p.who]++
 		}
 	}
@@ -1249,6 +1251,12 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		}
 		old.pid = 0
 		if !sameWants || !r.optsSameLocked(h) {
+			// a change: it comes after every merge made before it, so a start that is loading
+			// now (its merge taken before the change) grows for it once the model is up, charged
+			// as an attach in a loading window is; with no model running it is folded into the
+			// next start, free
+			r.seq++
+			old.seq = r.seq
 			r.planLocked(2, a.key, charge, req.Local, a)
 		}
 	} else {

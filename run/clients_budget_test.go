@@ -5,7 +5,10 @@ package run_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -366,4 +369,49 @@ func TestRemoteCausedStopsNeverRefill(t *testing.T) {
 			t.Fatalf("charged %d after the walk its grow led to, want 1", s.RestartsOf("client-1"))
 		}
 	})
+}
+
+// D3: one restart costs a budget key one, however many of its attachments asked for it.
+func TestOneRestartChargesAnIdentityOnce(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	clAttach(t, s, remoteReq("client-1", "x", 1))
+	clAttach(t, s, remoteReq("client-1", "y", 1))
+	settle(t, s)
+	r0, n0 := s.RestartsOf("client-1"), len(e.Starts())
+	clAttach(t, s, remoteReq("client-1", "x", 2)) // both change before the reactor acts
+	clAttach(t, s, remoteReq("client-1", "y", 2))
+	settle(t, s)
+	if charged, starts := s.RestartsOf("client-1")-r0, len(e.Starts())-n0; starts != 1 || charged != 1 {
+		t.Fatalf("one restart for two plans of one identity: %d starts, charged %d", starts, charged)
+	}
+}
+
+// D6: a change of wants by a standing key while a start is loading is not lost: it stands, and
+// once the model is up it gets its own reshape, charged as an attach in a loading window is.
+func TestChangeWhileLoadingIsNotLost(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	v, _ := clAttach(t, s, remoteReq("client-1", "x", 6))
+	settle(t, s)
+	gate := filepath.Join(e.Ctl, "loadgate")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sleep(); err != nil { // the budget is whole again
+		t.Fatal(err)
+	}
+	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+	go s.Wake()
+	testkit.WaitPhase(t, s, "loading", 15*time.Second) // its merge is taken; the server loads
+	clAttach(t, s, remoteReq("client-1", "x", 8)) // the change, while the start loads
+	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil { // the load goes on
+		t.Fatal(err)
+	}
+	os.Remove(gate)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	settle(t, s)
+	if got, _ := s.ClientView(v.Attachment); got.Slots.Given != 8 || s.RestartsOf("client-1") != 1 {
+		t.Fatalf("the change made while loading: %+v, charged %d", got.Slots, s.RestartsOf("client-1"))
+	}
 }

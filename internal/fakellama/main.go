@@ -39,6 +39,8 @@
 //	             print the CUDA out-of-memory lines (the server survives)
 //	  oom_above  like FAKELLAMA_OOM_ABOVE, read at each start (it wins over the env)
 //	  loadfail   while present, every start fails while loading with a non-memory error
+//	  loadgate   while present (a FIFO the test made), a start waits while loading until the test
+//	             writes to it and closes it: a start held in its loading window, by an event
 //	  savefail / restorefail  while present, slot save / restore answer 500 (nothing written)
 //	  slots.log  written: one line per slot save ("save <id> <name> <n>") and restore attempt
 //	             ("restore <id> <name> ok|fail"); needs --slot-save-path to be served at all
@@ -351,6 +353,10 @@ func main() {
 		if _, err := os.Stat(filepath.Join(ctl, "loadfail")); err == nil {
 			fmt.Println("llama_model_load: error loading model: tensor 'blk.0.attn_q.weight' data is not within the file bounds")
 			os.Exit(1)
+		}
+		if f, err := os.Open(filepath.Join(ctl, "loadgate")); err == nil { // blocks until the test writes
+			io.ReadAll(f)
+			f.Close()
 		}
 	}
 	above, _ := strconv.Atoi(os.Getenv("FAKELLAMA_OOM_ABOVE"))

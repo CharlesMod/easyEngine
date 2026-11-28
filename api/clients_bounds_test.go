@@ -196,25 +196,6 @@ func TestDepartedPromptsNeverReachAnotherRemote(t *testing.T) {
 			}
 		}
 	})
-	t.Run("two owners, cache off", func(t *testing.T) {
-		e, s, _ := clientsEnv(t, false, nil)
-		_, rs, _ := remoteSrv(t, s)
-		A := growRemote(t, e, s, rs, 1, "a", 2)
-		growRemote(t, e, s, rs, 3, "c", 1)
-		A.cancel()
-		attachmentGone(t, s, A.id)
-		n := len(e.Starts())
-		// D wants what A's vacant range holds: never given it; a grow (its own, charged) instead
-		D := openHold(t, rs, `{"hold":true,"name":"d","profile":{"slots":2,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(4))
-		if sl, _ := D.first["slots"].(map[string]any); D.status != 200 || sl["given"] != float64(0) || sl["pending"] != true {
-			t.Fatalf("D: %d %v", D.status, D.first)
-		}
-		m := D.untilGiven(2)
-		testkit.WaitPhase(t, s, "ready", 15*time.Second)
-		if len(e.Starts()) != n+1 || restartsLeft(m) != 3 {
-			t.Fatalf("D's grow: starts %d (from %d), restarts left %d", len(e.Starts()), n, restartsLeft(m))
-		}
-	})
 }
 
 // D1: a confined /v1/messages body may not carry extra_params, which llama-server unpacks over

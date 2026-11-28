@@ -140,7 +140,9 @@ func slotDigits(s string) (int, bool) {
 // (absent, null or -1: the least recently used free slot of the range, taken atomically), or the
 // slot of /slots/{n}?action=erase. It answers the client's number (cs, -1 for the commons), the
 // engine slot, the release of the slot's mark, and ok false after it has answered the client.
-func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoor) (cs, es int, release func(), ok bool) {
+// A slot that holds another owner's prompt is erased first (erase: the model server's
+// /slots/{n}?action=erase); one that cannot be is answered 502 and left marked as anyone's.
+func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoor, erase func(es int) bool) (cs, es int, release func(), ok bool) {
 	slots := door.Slots
 	cs = -1
 	toEngine := func(n int) (int, *run.ClientError) {
@@ -182,7 +184,7 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			clientFail(w, ce)
 			return 0, -1, nil, false
 		}
-		es, release = a.S.TakeSlot(slots, e)
+		es, release, _, _ = a.S.TakeSlotAs(slots, e, door.Tag) // the client's own erase clears it
 		r.URL.Path, r.URL.RawPath = "/slots/"+strconv.Itoa(es), ""
 		return clientOf(es), es, release, true
 	case pathSlot:
@@ -230,7 +232,14 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			want = e
 		}
 	}
-	es, release = a.S.TakeSlot(slots, want)
+	es, release, mustErase, unclean := a.S.TakeSlotAs(slots, want, door.Tag)
+	if mustErase && !erase(es) {
+		// the slot still holds another's prompt: never run there
+		unclean()
+		release()
+		clientFail(w, &run.ClientError{Status: 502, Code: "slot_not_cleared", Msg: "the slot this request was given holds another caller's prompt and the model server did not clear it: send again"})
+		return 0, -1, nil, false
+	}
 	obj["id_slot"] = json.RawMessage(strconv.Itoa(es))
 	out, err := marshalObject(obj)
 	if err != nil {

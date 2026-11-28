@@ -211,9 +211,32 @@ type runMap struct {
 	args  [][]string // the options' args as launched, in order
 	help  *Help      // the build's help the options were checked against
 	base  bool       // the base attachment has a range
-	// ramCache: the server runs with llama-server's RAM prompt cache (one owner at its start);
-	// a second owner is then never served from vacant slots (run/clients.go serveFromVacantLocked)
+	// ramCache: the server runs with llama-server's RAM prompt cache (one owner at its start, and
+	// no listener for other machines); a second owner is then never served from vacant slots
 	ramCache bool
+	// tags: engine slot -> whose prompt it holds (the last one the door sent there, or laid back
+	// at the start). A slot changes hands only through an erase (TakeSlot says when).
+	tags []SlotTag
+}
+
+// SlotTag is whose prompt a slot holds: an attachment's key, "commons" (this machine's callers
+// and the owner's, who trust each other), or "anon:<identity>" (a remote caller with no
+// attachment); Trusted: this machine or the master key. Who "" is a slot nobody has used.
+type SlotTag struct {
+	Who     string
+	Trusted bool
+}
+
+// needsErase: a slot that holds cur's prompt must be erased before tag's request runs in it. The
+// trusted share among themselves (this machine's callers and the owner's key); everyone else
+// only what is their own.
+func needsErase(cur, tag SlotTag) bool {
+	return cur.Who != "" && cur.Who != tag.Who && !(cur.Trusted && tag.Trusted)
+}
+
+// trustedIdentity: this machine, the engine itself, or the master key from another machine.
+func trustedIdentity(identity string, local bool) bool {
+	return local || identity == "engine" || strings.HasPrefix(identity, "master@")
 }
 
 // clientReg is the attachments and the running map, on the Supervisor (no package state).
@@ -234,6 +257,12 @@ type clientReg struct {
 	plans    map[string]reshapePlan // whose change a reshape is asked for: attachment key -> plan
 	restarts map[string]int         // budget key -> restarts its own changes caused in this life
 	revokes  uint64                 // revokes begun (DetachRevoked): an attach's token read before one is read again
+	// commons: a caller of this machine asked for the commons (rule 3-4) and the map gave it none:
+	// every merge since gives it the defaults' slots (with no base), for the engine's life.
+	// commonsShort: a start made with it still gave the commons nothing (no room): this machine's
+	// anonymous requests are answered 503 until the next start, never held for a reshape that
+	// cannot give it room.
+	commons, commonsShort bool
 	// stale: the last client with wants left; the shape it grew stands (its range vacant) until
 	// it returns, the model stops for another reason, or an under-served caller's request comes
 	stale bool
@@ -407,11 +436,27 @@ func (s *Supervisor) mergedWants() (w fit.Wants, from []string) {
 	r := &s.clients
 	r.mu.Lock()
 	ws := r.wantingLocked()
+	commons := r.commons
 	r.mu.Unlock()
 	if len(ws) == 0 {
 		p := s.cfg.Profile
 		return fit.Wants{Slots: p.Slots, MinSlots: p.MinSlots, CtxMax: p.CtxPerSlot.Max, CtxFloor: p.CtxPerSlot.Floor}, nil
 	}
+	defer func() {
+		// this machine's anonymous callers asked for the commons and no base gives it a range:
+		// the defaults' slots beside the attachments' (left unassigned at the start: the commons)
+		hasBase := false
+		for _, a := range ws {
+			hasBase = hasBase || a.base
+		}
+		if commons && !hasBase {
+			p := s.cfg.Profile
+			w.Slots += max(1, p.Slots)
+			w.MinSlots += max(1, p.MinSlots)
+			w.CtxMax = max(w.CtxMax, p.CtxPerSlot.Max)
+			w.CtxFloor = max(w.CtxFloor, p.CtxPerSlot.Floor)
+		}
+	}()
 	// a remote client's floor never raises the others': it is clamped to the local attachments'
 	// and the base's merged floor (the defaults' when there are none)
 	localFloor, anyLocal := 0, false
@@ -578,7 +623,9 @@ func (s *Supervisor) clientOpts(h *Help, shape fit.Shape, known map[string]bool)
 	// slot and loads the best match into whichever slot asks: with more than one owner of the
 	// slots (the base and a client are two; the commons count as one) it is turned off
 	if has(known, "--cache-ram", "-cram") {
-		ls.ramOff = r.ownersLocked(shape) > 1
+		// the RAM prompt cache is not tied to a slot (server-slot-sched.cpp:167-206): on only when
+		// no other machine can reach the engine and the map has one owner
+		ls.ramOff = r.ownersLocked(shape) > 1 || s.cfg.RemoteListener
 		ls.ramCache = !ls.ramOff
 	}
 	return ls
@@ -746,6 +793,28 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 		a.poke()
 	}
 	m.ramCache = ls.ramCache
+	// whose prompt each slot holds at the start: the server is new, so only what the lay-back puts
+	// back (a key's own contexts into its range; unowned ones into unowned slots: the commons')
+	m.tags = make([]SlotTag, shape.Slots)
+	commonsRange := false
+	for e := range m.tags {
+		m.tags[e] = SlotTag{Who: "commons", Trusted: true}
+		if m.keys[e] == "" {
+			commonsRange = true
+		}
+	}
+	for _, a := range r.list {
+		if a.base && len(a.slots) > 0 {
+			commonsRange = true
+		}
+		if a.base {
+			continue
+		}
+		for _, e := range a.slots {
+			m.tags[e] = SlotTag{Who: a.key, Trusted: trustedIdentity(a.identity, a.local)}
+		}
+	}
+	r.commonsShort = r.commons && !commonsRange
 	r.run = m
 	r.gen++
 	r.stale = false
@@ -1345,9 +1414,6 @@ func (r *clientReg) serveFromVacantLocked(a *attachment, h *Help) (resumed bool)
 		if m.keys[e] == a.key {
 			own = append(own, e)
 		}
-		if m.keys[e] != "" && m.keys[e] != a.key && !a.local {
-			continue // another client's prompts are still in it: never a remote client's to read
-		}
 		free = append(free, e)
 	}
 	optsOK := r.optsSameLocked(h)
@@ -1668,6 +1734,9 @@ type ClientDoor struct {
 	Slots []int
 	Own   bool
 	Err   *ClientError
+	// Tag is whose prompt a confined request leaves in its slot (TakeSlot erases a slot that
+	// holds another's first).
+	Tag SlotTag
 }
 
 // clientDoorLocked decides who a request belongs to (docs/ENGINE.md section 7g, "Whose slots"):
@@ -1675,13 +1744,18 @@ type ClientDoor struct {
 //     not_yours; a local caller may name the base).
 //  2. no header, a remote caller, one attachment of its own with slots: that one; more: 400
 //     client_required.
-//  3. none of its own with slots: the base's range (the commons), when the base has one.
-//  4. no base: the slots no attachment owns, if the running map has any.
-//  5. every slot owned: a local caller passes as before; a remote one gets 409 attach_required.
+//  3. none of its own with slots: the commons, the base's range when the base has one.
+//  4. no base: the commons is the slots never given to an attachment.
+//  5. no commons: a caller of this machine is held while the engine reshapes to give the
+//     commons a range; any other gets 409 attach_required.
 //
-// While no attachment besides the base holds slots, nothing is confined. A request that touches
-// no slot is only attributed; one that cannot be confined is refused to a remote caller while
-// another client holds slots (403 path_not_offered). Caller holds s.mu (lock order: s.mu, then
+// The invariant (docs/ENGINE.md §7g): a request runs only in slots of its own range, its
+// attachment's or the commons; while the map holds any attachment's range, standing or vacant,
+// no caller is run unconfined; a slot changes hands only through an erase (TakeSlot). Nothing is
+// confined only while the map holds no attachment's range and no untrusted caller's prompt, and
+// only for a trusted caller (this machine, the master key). A request that touches no slot is
+// only attributed; one that cannot be confined is refused while the map holds an attachment's
+// range or an untrusted prompt, and always to an untrusted caller. Caller holds s.mu (lock order: s.mu, then
 // clients.mu). pending: it wants slots the running mind has not given it yet (a grow comes).
 func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 	r := &s.clients
@@ -1703,25 +1777,29 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		d.ID, d.Key = a.id, a.key
 	}
 	m := r.run
-	others := false // a client besides the base holds slots in the running mind
-	if m != nil {
-		for _, x := range r.list {
-			if !x.base && len(x.slots) > 0 && x.identity != q.Identity {
-				others = true
-			}
-		}
-	}
+	trusted := trustedIdentity(q.Identity, q.Local)
 	switch q.Touch {
 	case TouchNone:
 		return d, false
 	case TouchUnconfinable:
-		if others && !q.Local {
-			d.Err = cerr(403, "path_not_offered", "this path takes a slot the engine cannot hold to one client's, and another client holds slots: it is offered to this machine's callers only")
+		// the server picks the slot (or takes every slot): it cannot be kept to a range, nor
+		// can its slot be erased first. Run only for a trusted caller while the map holds no
+		// attachment's range and no untrusted caller's prompt; every slot is then the commons'.
+		switch {
+		case m != nil && r.claimedLocked(m):
+			d.Err = cerr(403, "path_not_offered", "this path lets the model server pick the slot, and attached clients hold slots: it cannot be kept to this caller's own slots")
+		case m != nil && !trusted:
+			d.Err = cerr(403, "path_not_offered", "this path lets the model server pick the slot, which may hold another caller's prompt: it is offered to this machine's callers only")
+		case m != nil:
+			for e := range m.tags {
+				m.tags[e] = SlotTag{Who: "commons", Trusted: true}
+			}
 		}
 		return d, false
 	}
 	own := func(a *attachment) (ClientDoor, bool) {
 		d.ID, d.Key = a.id, a.key
+		d.Tag = SlotTag{Who: a.key, Trusted: trustedIdentity(a.identity, a.local)}
 		switch {
 		case len(a.slots) > 0:
 			d.Slots, d.Own = append([]int{}, a.slots...), true
@@ -1769,50 +1847,71 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 			return d, false
 		}
 	}
-	holders := false // anyone besides the base holds slots (the caller included)
-	if m != nil {
-		for _, x := range r.list {
-			if !x.base && len(x.slots) > 0 {
-				holders = true
-			}
-		}
+	if m == nil {
+		return d, false // no model runs: the route holds or answers it
 	}
-	// a vacant slot that a client held still carries its prompts (llama-server keeps a slot's
-	// cache, and the RAM prompt cache any slot's): a remote caller with no slots of its own is never
-	// sent where it could read another's prefixes by its cache hits. Callers of this machine trust
-	// each other (docs/ENGINE.md §7g).
-	tainted := func(e int) bool { return m.owner[e] == "" && m.keys[e] != "" }
-	anyTaint := false
-	if m != nil {
-		for e := range m.owner {
-			anyTaint = anyTaint || tainted(e)
-		}
-	}
-	if m == nil || (!holders && (q.Local || !anyTaint)) {
+	if trusted && !r.claimedLocked(m) {
 		return d, false // nothing is confined: as before clients
 	}
-	if !q.Local && anyTaint && m.ramCache {
-		d.Err = cerr(409, "attach_required", "another client's prompts are still in this model's prompt cache: attach to be given slots of your own")
-		return d, false
-	}
-	for _, x := range r.list {
-		if x.base && len(x.slots) > 0 {
-			d.Slots = append([]int{}, x.slots...) // the commons
+	d.Tag = SlotTag{Who: "commons", Trusted: true}
+	if !trusted {
+		d.Tag = SlotTag{Who: "anon:" + q.Identity}
+		if m.ramCache {
+			// the RAM prompt cache is one for all slots and an erase keeps it (only a request
+			// forwarded to the loopback listener gets here): an untrusted caller is served only
+			// in its own attachment's range, whose attach restarts the server without the cache
+			d.Err = cerr(409, "attach_required", "this caller has no slots of its own in the running model: attach to be given slots")
 			return d, false
 		}
 	}
-	for e, o := range m.owner {
-		if o == "" && (q.Local || !tainted(e)) {
-			d.Slots = append(d.Slots, e)
+	baseKey := ""
+	for _, x := range r.list {
+		if x.base {
+			baseKey = x.key
+			if len(x.slots) > 0 {
+				d.Slots = append([]int{}, x.slots...) // the commons
+				return d, false
+			}
 		}
 	}
-	if d.Slots != nil {
+	for e := range m.owner {
+		if m.keys[e] == "" || m.keys[e] == baseKey {
+			d.Slots = append(d.Slots, e) // never given to an attachment: the commons
+		}
+	}
+	switch {
+	case d.Slots != nil:
 		return d, false
+	case q.Local && r.commonsShort:
+		d.Err = cerr(503, "no_room", "the model has no room for this machine's requests beside the attached clients")
+		return d, false
+	case q.Local:
+		// the commons has no range: held while the engine reshapes to give it one, as a local
+		// grow is (never run in an attachment's slots)
+		r.commons = true
+		r.planLocked(2, commonsKey, "", true, nil)
+		s.wakeMind(func(c *causes) { c.clients = true })
+		return d, true
 	}
-	if !q.Local {
-		d.Err = cerr(409, "attach_required", "every slot belongs to an attached client: attach to be given slots of your own")
-	}
+	d.Err = cerr(409, "attach_required", "this caller has no slots of its own in the running model: attach to be given slots")
 	return d, false
+}
+
+// claimedLocked: the map holds an attachment's range (standing or vacant, the base's aside) or a
+// slot that holds an untrusted caller's prompt: then every request is confined.
+func (r *clientReg) claimedLocked(m *runMap) bool {
+	baseKey := ""
+	for _, x := range r.list {
+		if x.base {
+			baseKey = x.key
+		}
+	}
+	for e := range m.keys {
+		if (m.keys[e] != "" && m.keys[e] != baseKey) || (e < len(m.tags) && !m.tags[e].Trusted && m.tags[e].Who != "") {
+			return true
+		}
+	}
+	return false
 }
 
 // underServedLocked: with no client standing, the running shape gives the base (or, with no base,
@@ -1862,25 +1961,59 @@ func (s *Supervisor) EnterAs(q DoorAsk) (Route, ClientDoor, func(*RequestEnd)) {
 	return rt, d, s.beginAs(q.ReqID, d.ID)
 }
 
-// TakeSlot is the engine slot a confined request goes to, marked busy until release: want (an
-// engine slot) when it names one, else the least recently used of slots with no request on it
-// (all busy: the least recently used; the server queues it there). The pick and the mark are one
-// step under one lock, so two requests never take the same free slot.
+// TakeSlot is TakeSlotAs with no owner named (tests of the pick alone).
 func (s *Supervisor) TakeSlot(slots []int, want int) (e int, release func()) {
+	e, release, _, _ = s.TakeSlotAs(slots, want, SlotTag{})
+	return e, release
+}
+
+// TakeSlotAs is the engine slot a confined request goes to, marked busy until release: want (an
+// engine slot) when it names one, else, of slots with no request on it, one that holds tag's own
+// prompt, then one it may use without an erase, then the least recently used (all busy: the least
+// recently used; the server queues it there). The pick and the mark are one step under one lock,
+// so two requests never take the same free slot. erase: the slot holds another owner's prompt
+// (needsErase) and must be erased before the request runs; the slot is tagged tag's from now on.
+// unclean says the erase failed: the slot is then taken to hold anyone's (every next owner
+// erases it first).
+func (s *Supervisor) TakeSlotAs(slots []int, want int, tag SlotTag) (e int, release func(), erase bool, unclean func()) {
 	r := &s.clients
 	r.mu.Lock()
 	gen := r.gen // a release after a restart is not the new map's
+	m := r.run
+	cur := func(x int) SlotTag {
+		if m == nil || x < 0 || x >= len(m.tags) {
+			return SlotTag{}
+		}
+		return m.tags[x]
+	}
+	rank := func(x int) int { // lower is better
+		c := cur(x)
+		switch {
+		case tag.Who != "" && c.Who == tag.Who:
+			return 0
+		case !needsErase(c, tag):
+			return 1
+		}
+		return 2
+	}
 	e = want
 	if e < 0 {
-		best, bestFree := -1, false
+		best, bestFree, bestRank := -1, false, 0
 		for _, x := range slots {
-			free := r.busy[x] == 0
+			free, rk := r.busy[x] == 0, rank(x)
 			switch {
-			case best < 0, free && !bestFree, free == bestFree && r.used[x] < r.used[best]:
-				best, bestFree = x, free
+			case best < 0,
+				free && !bestFree,
+				free == bestFree && free && rk < bestRank,
+				free == bestFree && (!free || rk == bestRank) && r.used[x] < r.used[best]:
+				best, bestFree, bestRank = x, free, rk
 			}
 		}
 		e = best
+	}
+	if tag.Who != "" && m != nil && e >= 0 && e < len(m.tags) {
+		erase = needsErase(m.tags[e], tag)
+		m.tags[e] = tag
 	}
 	r.tick++
 	r.used[e] = r.tick
@@ -1888,14 +2021,20 @@ func (s *Supervisor) TakeSlot(slots []int, want int) (e int, release func()) {
 	r.mu.Unlock()
 	var once sync.Once
 	return e, func() {
-		once.Do(func() {
+			once.Do(func() {
+				r.mu.Lock()
+				if r.gen == gen && r.busy[e] > 0 {
+					r.busy[e]--
+				}
+				r.mu.Unlock()
+			})
+		}, erase, func() {
 			r.mu.Lock()
-			if r.gen == gen && r.busy[e] > 0 {
-				r.busy[e]--
+			if r.gen == gen && r.run != nil && e < len(r.run.tags) {
+				r.run.tags[e] = SlotTag{Who: "?"} // anyone's: every next owner erases it first
 			}
 			r.mu.Unlock()
-		})
-	}
+		}
 }
 
 // ClientSamplers is an attachment's own sampler profiles (looked up before the base's and the

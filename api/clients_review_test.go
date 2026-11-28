@@ -223,8 +223,9 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	}
 	c, b = lpost("/infill", "\xEF\xBB\xBF"+`{"id_slot":0}`)
 	refused("/infill BOM", c, b, "bad_request", 400)
-	// a local caller passes the door on a path that cannot be confined
-	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c == 403 {
+	// while clients hold ranges no caller is run unconfined: a local caller is refused a path
+	// that cannot be confined too
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c != 403 || codeOf(b) != "path_not_offered" {
 		t.Fatalf("a local caller's embeddings: %d %s", c, b)
 	}
 	C.cancel()
@@ -257,8 +258,8 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 func TestClientRequiredAndAttachRequired(t *testing.T) {
 	e, s, srv := clientsEnv(t, false, nil) // no base
 	_, rs, _ := remoteSrv(t, s)
-	growRemote(t, e, s, rs, 1, "a", 2)
-	growRemote(t, e, s, rs, 1, "a2", 1)
+	A := growRemote(t, e, s, rs, 1, "a", 2)
+	A2 := growRemote(t, e, s, rs, 1, "a2", 1)
 	// every slot is a client's: client-1 has two attachments, client-3 none
 	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1))
 	if c != 400 || codeOf(b) != "client_required" {
@@ -268,9 +269,22 @@ func TestClientRequiredAndAttachRequired(t *testing.T) {
 	if c != 409 || codeOf(b) != "attach_required" {
 		t.Fatalf("none of its own, all owned: %d %s", c, b)
 	}
-	// a local caller passes as before
-	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"id_slot":1,"messages":[]}`, jsonCT); c != 200 || upstreamSlot(t, e) != float64(1) {
-		t.Fatalf("local: %d %s", c, b)
+	// a local caller never runs in a client's slots: held while the engine reshapes to give the
+	// commons a range, then served there
+	n := len(e.Starts())
+	c, b, _ = do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, jsonCT)
+	if c != 200 || len(e.Starts()) != n+1 {
+		t.Fatalf("local: %d %s, starts %d (from %d)", c, b, len(e.Starts()), n)
+	}
+	up, _ := upstreamSlot(t, e).(float64)
+	for _, h := range []*held{A, A2} {
+		v, ok := s.ClientView(h.id)
+		if !ok || v.Slots.First == nil || v.Slots.Given == 0 {
+			t.Fatalf("%s after the reshape: %+v", h.id, v)
+		}
+		if f := *v.Slots.First; int(up) >= f && int(up) < f+v.Slots.Given {
+			t.Fatalf("the local request ran in slot %v, %s's range %d+%d", up, h.id, f, v.Slots.Given)
+		}
 	}
 }
 

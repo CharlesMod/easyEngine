@@ -16,7 +16,9 @@
 //	FAKELLAMA_VRAM_BASE_MIB / FAKELLAMA_VRAM_PER_TOKEN  fake VRAM = base + per_token * ctx
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
 //	FAKELLAMA_DIE_ON           a flag the server takes but exits on while starting
-//	FAKELLAMA_CACHE_RAM        set: the help lists -cram, --cache-ram (the RAM prompt cache)
+//	FAKELLAMA_CACHE_RAM        set: the help lists -cram, --cache-ram, and the RAM prompt cache is
+//	                           on unless the launch passed --cache-ram 0: a prompt any slot let go of
+//	                           is a hit for any slot (cache_n), as llama-server's; an erase keeps it
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
 //	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
@@ -181,9 +183,9 @@ func finish(t int32) {
 // hit is a common prefix, as llama-server's is: a prompt another caller never sent hits nothing).
 // A restored slot holds a count with no text: any prompt as long hits it, as before.
 type slot struct {
-	tokens  int    // tokens the slot holds now
-	decoded int    // predicted tokens of the last answer
-	held    bool   // has held a task
+	tokens  int  // tokens the slot holds now
+	decoded int  // predicted tokens of the last answer
+	held    bool // has held a task
 	task    int32
 	text    string // the prompt text it last held ("" unknown: restored, or never used)
 }
@@ -192,6 +194,12 @@ var (
 	slotMu       sync.Mutex
 	slots        []slot
 	slotSavePath string // --slot-save-path
+	// ramOn: the RAM prompt cache is on (FAKELLAMA_CACHE_RAM lists the flag, and the launch did
+	// not pass --cache-ram 0; llama-server's default is 8192 MiB). ram holds every prompt a slot
+	// let go of, from any slot, as llama-server's (server-slot-sched.cpp: not keyed by slot); an
+	// erase does not clear it.
+	ramOn bool
+	ram   []string
 )
 
 // promptText is a request body's prompt text: the prompt, then every message's text content.
@@ -253,6 +261,32 @@ func account(raw []byte, task int32, predicted int) (cacheN, promptN, id int) {
 	}
 	sl := &slots[id]
 	nt, text := promptTokens(raw), promptText(raw)
+	prefix := func(a string) int {
+		p := 0
+		for p < len(a) && p < len(text) && a[p] == text[p] {
+			p++
+		}
+		return p
+	}
+	if ramOn { // the slot's own match is beaten by a cached prompt: that one is loaded instead
+		own := prefix(sl.text)
+		for _, r := range ram {
+			if q := prefix(r); q > own && q >= 4 {
+				own = q
+				cacheN = q / 4
+			}
+		}
+		if cacheN > 0 {
+			if sl.text != "" {
+				ram = append(ram, sl.text)
+			}
+			sl.text, sl.tokens, sl.decoded, sl.held, sl.task = text, nt+predicted, predicted, true, task
+			return cacheN, nt - cacheN, id
+		}
+		if sl.text != "" && prefix(sl.text) < len(sl.text) {
+			ram = append(ram, sl.text) // let go of: kept in RAM
+		}
+	}
 	switch {
 	case sl.text != "": // a hit is the common prefix of what the slot holds and the new prompt
 		p := 0
@@ -367,6 +401,7 @@ func main() {
 	c, _ := strconv.Atoi(vals["-c"])
 	slots = make([]slot, np)
 	slotSavePath = vals["--slot-save-path"]
+	ramOn = os.Getenv("FAKELLAMA_CACHE_RAM") != "" && vals["--cache-ram"] != "0" && vals["-cram"] != "0"
 	ctl := os.Getenv("FAKELLAMA_CTL")
 	if ctl != "" {
 		f, err := os.OpenFile(filepath.Join(ctl, "starts.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -839,13 +874,17 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 			return
 		}
 		slotMu.Lock()
-		n := slots[id].tokens
+		n, text := slots[id].tokens, slots[id].text
 		slotMu.Unlock()
 		per, _ := strconv.Atoi(os.Getenv("FAKELLAMA_SLOT_BYTES"))
 		if per == 0 {
 			per = 16
 		}
-		data := append([]byte(fmt.Sprintf("fakeslot tokens=%d ctx=%d\n", n, ctxPer)), make([]byte, n*per)...)
+		head := fmt.Sprintf("fakeslot tokens=%d ctx=%d", n, ctxPer)
+		if text != "" { // what the slot held comes back with it (cache hits by content)
+			head += " text=" + strconv.Quote(text)
+		}
+		data := append([]byte(head+"\n"), make([]byte, n*per)...)
 		if err := os.WriteFile(path, data, 0o644); err != nil {
 			fail(500, err.Error(), "server_error")
 			return
@@ -860,9 +899,12 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 		return
 	}
 	data, err := os.ReadFile(path)
-	n, ctx := 0, 0
+	n, ctx, text := 0, 0, ""
 	if err == nil {
 		line, _, _ := strings.Cut(string(data), "\n")
+		if _, q, ok := strings.Cut(line, " text="); ok {
+			text, _ = strconv.Unquote(q)
+		}
 		_, perr := fmt.Sscanf(line, "fakeslot tokens=%d ctx=%d", &n, &ctx)
 		if perr != nil {
 			err = perr
@@ -874,7 +916,7 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 		return
 	}
 	slotMu.Lock()
-	slots[id].tokens = n
+	slots[id].tokens, slots[id].text = n, text
 	slotMu.Unlock()
 	logLine("restore %d %s ok", id, name)
 	json.NewEncoder(w).Encode(map[string]any{"id_slot": id, "filename": name, "n_restored": n, "n_read": len(data), "timings": map[string]any{"restore_ms": 0.5}})

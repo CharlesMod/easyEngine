@@ -339,7 +339,8 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	}
 	w := lifecycle.NewWatcher()
 	cfg := run.Config{DataDir: dir, Profile: prof, Version: o.Version, Parents: w.PIDs, StartSleeping: o.Resident, // the app waits for a connection
-		ProfileGiven: o.Profile != nil || o.ProfilePath != ""} // a profile given is the base client
+		ProfileGiven:   o.Profile != nil || o.ProfilePath != "", // a profile given is the base client
+		RemoteListener: !loopback}                               // another machine may call: never the RAM prompt cache
 	if o.Yield != nil {
 		y := *o.Yield
 		y.Except = append(append([]string{}, y.Except...), prof.YieldExcept...)

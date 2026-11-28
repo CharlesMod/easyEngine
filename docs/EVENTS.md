@@ -68,7 +68,7 @@ type Event struct {
   contract. `pairing` and `client` are said since ee-pair (§7); `context` is built (ee-cache, §6).
 - The first names: `engine` (version, api, port, build), `phase`, `model`, `mind.shape`,
   `mind.device`, `agent` (keyed by client), `client` (keyed), `install.progress` (reading, said per
-  step of bytes, never per time), `upgrade`, `room` (reading: adapters, reserve, free for the model),
+  step of bytes, never per time), `upgrade`, `build` (the llama.cpp build that runs and the move to the catalog's pin; ENGINE.md §3), `room` (reading: adapters, reserve, free for the model),
   `yield`, `recovery`, `error` (happening), `request` (happening: begin, end, slot, tokens, tok/s),
   `attachment` (keyed) and `wants` (§5),
   `context` (happening: saved, laid back, let go).
@@ -77,7 +77,7 @@ type Event struct {
 
 | Today | Becomes | Status |
 |---|---|---|
-| Watchdog tick every 5 s (`/health`, `/slots`, `/metrics`, probe, sense) | No tick. Child exit is `Proc.Done`. A hung server is a watchdog for silence on a request in flight. Idle is the door's own count reaching zero (and the engine's `slot released` line where the build says it). Tok/s is read from the replies the door forwards. | Built (ee-mind): exit by `Proc.Done`; hang by `HangSilence` while requests are in flight, put back by the server's lines, Begin/end and the proxy's `Heard` on each write, made again after it fires; idle by the door's count. Tok/s from the replies: a streamed reply's own `timings` (the streamer's summary, said in the `request` end, ee-stream); a non-streamed one still has one `/metrics` read when the count reaches zero. |
+| Watchdog tick every 5 s (`/health`, `/slots`, `/metrics`, probe, sense) | No tick. Child exit is `Proc.Done`. A hung server is a watchdog for silence on a request in flight. Idle is the door's own count reaching zero (the patched build's `easy: slot N released, idle` line tells the engine nothing the count has not and is not consumed: ENGINE.md §3). Tok/s is read from the replies the door forwards. | Built (ee-mind): exit by `Proc.Done`; hang by `HangSilence` while requests are in flight, put back by the server's lines, Begin/end and the proxy's `Heard` on each write, made again after it fires; idle by the door's count. Tok/s from the replies: a streamed reply's own `timings` (the streamer's summary, said in the `request` end, ee-stream); a non-streamed one still has one `/metrics` read when the count reaches zero. |
 | `/health` every 250 ms while loading | The server's own lines: after `listening on`, `/health` is asked once per following line; silence is a watchdog. | Built (ee-mind); fixtures in `run/testdata/ready-*.txt`. A request held at the door while loading is a word too: `/health` is asked once on it (ee-stream). |
 | Parent pid poll every 1 s | `host.Exits(pid)`: pidfd (Linux), kqueue `EVFILT_PROC` (macOS), a wait on the process handle (Windows). | Built (`host.ExitsOf`). |
 | Yield loop 250 ms / 1 s | Opens of the engine adapter's device node by inotify with no cap (Linux; an NVIDIA adapter at `/dev/nvidia<minor>` alone, see ENGINE.md); Steam's `RunningAppID` by registry notification (Windows) and file change (macOS); a stranger's end by `host.Exits`. What has no event (a launcher's argv on Linux, a process's memory on NVIDIA) is a `host` watchdog. | Built (ee-mind); the Windows and macOS watches are compile-checked only. |
@@ -165,7 +165,7 @@ client sees a slower reply, not an error and not a cold prompt. Each step is sai
 happening `context` and status `contexts` lists what is kept. *Built* (ee-cache), with the
 measurements and the yield rule in docs/ENGINE.md §5, "The prompt cache across a restart".
 Sliding-window models (Gemma) keep their context checkpoints across a save and restore on the
-stock build the catalog pins (b12651: upstream "server : preserve context checkpoints across slot
+llama.cpp b12651, stock and the patched pin built on it, b12651-easy1 (upstream "server : preserve context checkpoints across slot
 save/restore", #26004); on poe a laid-back Gemma 4 slot was continued with only the new turn
 processed.
 

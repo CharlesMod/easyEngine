@@ -158,7 +158,14 @@ func TestAgentInstallFailureTriesAgainOnAWord(t *testing.T) {
 			sup := s.sup(t)
 			testkit.WaitFor(t, 20*time.Second, "the failed agent install to wait for a word", func() bool {
 				a := sup.Status().Agent
-				return a.Phase == "error" && strings.Contains(a.Message, "waiting for a request")
+				if a.Phase == "error" && strings.Contains(a.Message, "waiting for a request") {
+					// the status says it waits only once a request counts as a word for it
+					if sup.Listeners() == 0 {
+						t.Errorf("status %q seen with no listener counted: a request now would be lost", a.Message)
+					}
+					return true
+				}
+				return false
 			})
 			if err := os.WriteFile(s.wheelP, wheel, 0o644); err != nil {
 				t.Fatal(err)

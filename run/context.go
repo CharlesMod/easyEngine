@@ -34,8 +34,9 @@ const (
 )
 
 // ctxKey is what a saved slot may be laid back into: the model file (its catalog sha256, or the
-// path, size and time of a custom file that has none), the llama build (the backend id and the
-// sha256 of the archive installed under it, which names its patch set with it) and the cache type.
+// path, size and time of a custom file that has none), the llama build (buildKey: the backend
+// id, the release's full tag, b12651-easy1, and the sha256 of the archive installed under it,
+// which names its patch set with it) and the cache type.
 type ctxKey struct {
 	Model string `json:"model"`
 	Build string `json:"build"`
@@ -364,6 +365,11 @@ func (s *Supervisor) keepContexts(why string, yielding bool) {
 	}
 	if n := s.inflightNow(); n > 0 {
 		s.notSaved(-1, 0, 0, fmt.Sprintf("%d request(s) in flight at %s", n, why))
+		return
+	}
+	if next := s.stagedBuild(); next != "" {
+		// the context key carries the build: the next start (promoteNext) could lay nothing back
+		s.notSaved(-1, 0, 0, fmt.Sprintf("%s: the next start runs another llama build (%s)", why, next))
 		return
 	}
 	held := s.slotTokens(srv, base)

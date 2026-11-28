@@ -18,6 +18,7 @@ import (
 
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/fetch"
+	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
 )
@@ -65,7 +66,7 @@ func (s *Supervisor) download(ctx context.Context, url, dest, sha256hex string, 
 
 // Install starts the install job: backend, then model, then uv and the agent.
 func (s *Supervisor) Install(model, backend string) error {
-	s.nudge("install") // a client's install is a word for a download that waits, even if this one is refused
+	s.Nudge("install") // a client's install is a word for a download that waits, even if this one is refused
 	if handled, err := s.trySwitch(model, backend); handled {
 		return err
 	}
@@ -93,7 +94,7 @@ func (s *Supervisor) Install(model, backend string) error {
 
 // InstallSync runs the install job and waits (the CLI uses it).
 func (s *Supervisor) InstallSync(ctx context.Context, model, backend string) error {
-	s.nudge("install")
+	s.Nudge("install")
 	if err := s.prepareInstall(model); err != nil {
 		return err
 	}
@@ -123,6 +124,7 @@ func (s *Supervisor) endJob(ctx context.Context, err error, what string) {
 	case err == nil:
 		s.logf("%s finished", what)
 		s.settle()
+		s.checkPin() // an install's end: the build it left may not be the catalog's pin
 		if !s.cfg.NoAutoStart {
 			s.startAgent()
 			if s.Status().Mode == "local" {
@@ -147,6 +149,7 @@ func (s *Supervisor) Cancel() {
 		c()
 	}
 	s.cancelUpgrade()
+	s.cancelMove()
 	s.forgetSwitch()
 }
 
@@ -216,7 +219,8 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 		}
 	}
 	s.mu.Lock()
-	s.st.Model, s.st.Backend, s.st.Target = serve.ID, be, target
+	s.st.Model, s.st.Target = serve.ID, target
+	s.selectBuildLocked(be)
 	s.mu.Unlock()
 	s.save()
 	if target != "" {
@@ -227,67 +231,104 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 
 // ensureBackend installs the first build that passes its smoke test; models are what the setup
 // installs after it (for the space check before each fallback build).
-func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string, models ...catalog.Model) (string, error) {
+//
+// The list is the catalog's ladder for this machine (catalog.Backends): each accelerator's build
+// comes from one rung only, so a build that fails is followed by the next accelerator's, never by
+// another release's build of the same one (a patched CUDA build that fails is not replaced by
+// stock CUDA). The asset installed is returned with its tag.
+func (s *Supervisor) ensureBackend(ctx context.Context, cat *catalog.Catalog, hw probe.Hardware, want string, models ...catalog.Model) (catalog.Asset, error) {
 	var list []catalog.Asset
+	if want == "" {
+		// An install job never changes a complete selected build (the old layout included): only
+		// the move brings the pin (build.go), so a working build is never traded for another
+		// accelerator's because the pin failed its smoke test here.
+		s.mu.Lock()
+		id, tag := s.st.Backend, s.st.Build
+		s.mu.Unlock()
+		if id != "" && backendInstalled(s.dir, id, tag) {
+			a, ok := cat.LlamaAsset(tag, id)
+			if !ok {
+				a = catalog.Asset{ID: id, Tag: tag, Patched: catalog.PatchedTag(tag), Accel: plan.AccelOf(id)}
+			}
+			return a, nil
+		}
+	}
 	if want != "" {
 		a, ok := cat.Asset(want)
 		if !ok {
-			return "", fmt.Errorf("unknown backend %q", want)
+			return catalog.Asset{}, fmt.Errorf("unknown backend %q", want)
 		}
 		list = []catalog.Asset{a}
 	} else {
 		list = cat.Backends(hw)
 	}
 	if len(list) == 0 {
-		return "", errors.New("no llama.cpp build in the catalog for this machine")
+		return catalog.Asset{}, errNoBuild
 	}
 	var last error
 	for i, a := range list {
 		if i > 0 { // a fallback build: the failed one stays on disk; check again from here
 			if err := s.checkNeed(s.setupNeed(cat, hw, a.ID, models...), a.ID); err != nil {
-				return "", err
+				return catalog.Asset{}, err
 			}
 		}
-		if err := s.installBackend(ctx, cat, a); err != nil {
+		if err := s.installBuild(ctx, cat, a, s.jobSteps()); err != nil {
 			if ctx.Err() != nil {
-				return "", ctx.Err()
+				return catalog.Asset{}, ctx.Err()
 			}
-			s.addError("backend %s: %v", a.ID, err)
+			s.addError("backend %s (llama.cpp %s): %v", a.ID, a.Tag, err)
 			if errors.Is(err, ErrAppControl) {
-				return "", err // every build from this release is blocked alike: don't fetch the others
+				return catalog.Asset{}, err // every build from this release is blocked alike: don't fetch the others
 			}
 			last = err
 			continue
 		}
-		return a.ID, nil
+		return a, nil
 	}
-	return "", fmt.Errorf("no backend passed its smoke test: %w", last)
+	return catalog.Asset{}, fmt.Errorf("no backend passed its smoke test: %w", last)
 }
 
-func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a catalog.Asset) error {
-	dir := filepath.Join(s.dir, "backends", a.ID)
-	marker := filepath.Join(dir, ".installed")
-	if _, err := os.Stat(marker); err != nil || findServer(dir) == "" {
+// installBuild installs build a under backends/<id>@<tag> (backendDir), its extras (cudart) from
+// its own release, and smoke-tests it; steps says how the install shows itself (the job's phase
+// and progress, or the move's fact).
+func (s *Supervisor) installBuild(ctx context.Context, cat *catalog.Catalog, a catalog.Asset, steps buildSteps) error {
+	s.buildMu.Lock() // the second finds the first's marker and installs nothing
+	defer s.buildMu.Unlock()
+	if err := s.fetchBuildLocked(ctx, cat, a, steps); err != nil {
+		return err
+	}
+	return s.verifyBuild(ctx, a)
+}
+
+// fetchBuildLocked puts build a in place unpacked, its archives verified by their sha256, and
+// runs nothing: the unpacked dir carries .unpacked (the archive's sha256). A build already
+// unpacked from that archive, or already verified (.installed), is not fetched again: a smoke
+// test that failed never causes a download. buildMu is held.
+func (s *Supervisor) fetchBuildLocked(ctx context.Context, cat *catalog.Catalog, a catalog.Asset, steps buildSteps) error {
+	dir := backendDir(s.dir, a.ID, a.Tag)
+	stem := filepath.Base(dir)
+	if !buildUnpacked(s.dir, a.ID, a.Tag, a.SHA256) {
 		os.RemoveAll(dir) // only a path we build under our own data dir
-		arch := filepath.Join(s.dir, "downloads", a.ID+archiveExt(a.URL))
-		if err := s.download(ctx, a.URL, arch, a.SHA256, a.Size, s.jobProgress("backend "+a.ID)); err != nil {
+		arch := filepath.Join(s.dir, "downloads", stem+archiveExt(a.URL))
+		if err := steps.download(ctx, a.URL, arch, a.SHA256, a.Size, "backend "+a.ID); err != nil {
 			return err
 		}
-		s.setPhase("installing", "Unpacking "+a.ID)
+		steps.phase("Unpacking " + a.ID)
 		if err := fetch.Unpack(arch, dir); err != nil {
 			return err
 		}
 		os.Remove(arch) // unpacked: the archive is only dead weight (hundreds of MB)
 		for _, x := range a.Extra {
-			ea, ok := cat.Asset(x)
+			ea, ok := cat.LlamaAsset(a.Tag, x)
 			if !ok {
-				return fmt.Errorf("catalog has no asset %q", x)
+				return fmt.Errorf("catalog has no asset %q in llama.cpp %s", x, a.Tag)
 			}
-			earch := filepath.Join(s.dir, "downloads", ea.ID+archiveExt(ea.URL))
-			if err := s.download(ctx, ea.URL, earch, ea.SHA256, ea.Size, s.jobProgress("backend "+ea.ID)); err != nil {
+			estem := ea.ID + "@" + a.Tag
+			earch := filepath.Join(s.dir, "downloads", estem+archiveExt(ea.URL))
+			if err := steps.download(ctx, ea.URL, earch, ea.SHA256, ea.Size, "backend "+ea.ID); err != nil {
 				return err
 			}
-			tmp := filepath.Join(s.dir, "downloads", ea.ID+"-unpacked")
+			tmp := filepath.Join(s.dir, "downloads", estem+"-unpacked")
 			os.RemoveAll(tmp)
 			if err := fetch.Unpack(earch, tmp); err != nil {
 				return err
@@ -303,19 +344,66 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 				return err
 			}
 		}
+		bin := findServer(dir)
+		if bin == "" {
+			return errors.New("llama-server not found in the unpacked backend")
+		}
+		if runtime.GOOS != "windows" {
+			os.Chmod(bin, 0o755)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".unpacked"), []byte(a.SHA256), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyBuild smoke-tests an unpacked build and marks it installed (.installed, the archive's
+// sha256). It runs the build on the card, so it is run where no model server holds the card: an
+// install with none up, or the load that would run the build (promoteNext). The smoke process is
+// the engine's own for the senses (smokeOwned).
+func (s *Supervisor) verifyBuild(ctx context.Context, a catalog.Asset) error {
+	dir := backendDir(s.dir, a.ID, a.Tag)
+	marker := filepath.Join(dir, ".installed")
+	if backendInstalled(s.dir, a.ID, a.Tag) {
+		return nil
 	}
 	bin := findServer(dir)
 	if bin == "" {
 		return errors.New("llama-server not found in the unpacked backend")
 	}
-	if runtime.GOOS != "windows" {
-		os.Chmod(bin, 0o755)
-	}
-	if err := smokeTest(ctx, bin, a.Accel); err != nil {
+	if err := s.smokeOwned(ctx, bin, a.Accel); err != nil {
 		os.Remove(marker)
 		return err
 	}
 	return os.WriteFile(marker, []byte(a.SHA256), 0o644)
+}
+
+// smokeOwned is smokeTest run as the engine's own: inside host.Own (the device opens it makes are
+// not a stranger's) with its pid among the engine's (s.smoking, read by the room watch), so a
+// smoke test beside a model server is never taken for another program's memory.
+func (s *Supervisor) smokeOwned(ctx context.Context, bin, accel string) error {
+	var err error
+	host.Own(func() {
+		err = smokeTestWith(ctx, bin, accel, func(pid int) { s.smoking.set(pid) })
+	})
+	s.smoking.set(0)
+	return err
+}
+
+// buildUnpacked reports whether build id@tag is unpacked from the archive sha (its .unpacked
+// marker) or verified (.installed), with its server in place.
+func buildUnpacked(dataDir, id, tag, sha string) bool {
+	dir := backendDir(dataDir, id, tag)
+	if findServer(dir) == "" {
+		return false
+	}
+	for _, m := range []string{".installed", ".unpacked"} {
+		if b, err := os.ReadFile(filepath.Join(dir, m)); err == nil && strings.TrimSpace(string(b)) == sha {
+			return true
+		}
+	}
+	return false
 }
 
 // smokeTest: `--version` must run, and a GPU backend must list its device.
@@ -326,7 +414,11 @@ func (s *Supervisor) installBackend(ctx context.Context, cat *catalog.Catalog, a
 // and the engine quietly fell back to the much slower Vulkan build. A run later is fast (the scan is cached).
 var smokeVersionTimeout, smokeDevicesTimeout = 60 * time.Second, 180 * time.Second
 
-func smokeTest(ctx context.Context, bin, accel string) error {
+// smokeTestWith is the smoke test; started hears each smoke process's pid (0 once it ended).
+func smokeTestWith(ctx context.Context, bin, accel string, started func(pid int)) error {
+	smokeRun := func(ctx context.Context, limit time.Duration, bin string, args ...string) (string, error) {
+		return smokeRunPid(ctx, limit, started, bin, args...)
+	}
 	out, err := smokeRun(ctx, smokeVersionTimeout, bin, "--version")
 	if err != nil {
 		if appControlBlocked(err) {
@@ -348,18 +440,55 @@ func smokeTest(ctx context.Context, bin, accel string) error {
 	if !strings.Contains(strings.ToLower(out), want) {
 		return fmt.Errorf("--list-devices shows no %s device", accel)
 	}
+	if accel == "vulkan" && !realVulkan(out) {
+		// Mesa's software device (llvmpipe) is a Vulkan device on the CPU: slower than the CPU build
+		return errors.New("--list-devices shows only a software Vulkan device (llvmpipe)")
+	}
 	return nil
+}
+
+// realVulkan reports whether --list-devices names a Vulkan device that is not a software one.
+// Output that names no device in the usual form is taken as it was before (the word sufficed).
+func realVulkan(out string) bool {
+	ds := plan.ParseListDevices(out)
+	seen := false
+	for _, d := range ds {
+		if !strings.HasPrefix(d.Name, "Vulkan") {
+			continue
+		}
+		seen = true
+		n := strings.ToLower(d.Desc)
+		if !strings.Contains(n, "llvmpipe") && !strings.Contains(n, "lavapipe") && !strings.Contains(n, "swiftshader") {
+			return true
+		}
+	}
+	return !seen
 }
 
 // smokeRun runs bin with args under its own time limit; a timeout is reported as one, not as the exit status
 // the kill leaves behind (1 on Windows).
 func smokeRun(ctx context.Context, limit time.Duration, bin string, args ...string) (string, error) {
+	return smokeRunPid(ctx, limit, nil, bin, args...)
+}
+
+// smokeRunPid is smokeRun that tells started the process's pid once it runs and 0 once it ended.
+func smokeRunPid(ctx context.Context, limit time.Duration, started func(pid int), bin string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, bin, args...)
 	cmd.Dir = filepath.Dir(bin)
 	cmd.Env = llamaEnv(bin, nil)
-	b, err := cmd.CombinedOutput()
+	var out lockedBuf
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Start()
+	if err == nil {
+		if started != nil {
+			started(cmd.Process.Pid)
+			defer started(0)
+		}
+		err = cmd.Wait()
+	}
+	b := []byte(out.String())
 	if err != nil && ctx.Err() == nil && cctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("timed out after %s", limit)
 	}

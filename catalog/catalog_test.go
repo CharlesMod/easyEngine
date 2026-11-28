@@ -17,15 +17,25 @@ func TestEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.LlamaCpp.Tag == "" || len(c.LlamaCpp.Assets) == 0 || len(c.UV) == 0 {
-		t.Fatalf("empty catalog: %+v", c.LlamaCpp)
+	rs := c.Rungs()
+	if len(rs) == 0 || rs[0].Tag == "" || len(rs[0].Assets) == 0 || len(c.UV) == 0 {
+		t.Fatalf("empty catalog: %+v", rs)
 	}
-	for _, a := range append(append([]Asset{}, c.LlamaCpp.Assets...), c.UV...) {
+	// the pin is the fork's patched build; stock comes after it
+	if !rs[0].Patched || !PatchedTag(rs[0].Tag) || rs[0].Repo != "CharlesMod/llama.cpp" {
+		t.Errorf("the pin is not the patched build: %s %s patched=%v", rs[0].Tag, rs[0].Repo, rs[0].Patched)
+	}
+	for _, r := range rs[1:] {
+		if r.Patched {
+			t.Errorf("rung %s after the pin is patched", r.Tag)
+		}
+	}
+	for _, a := range append(c.llamaAll(), c.UV...) {
 		if !hex64.MatchString(a.SHA256) || !strings.HasPrefix(a.URL, "https://") || a.Size <= 0 || a.UnpackedSize < a.Size || a.ID == "" || a.OS == "" || a.Arch == "" {
 			t.Errorf("bad asset %+v", a)
 		}
 		for _, e := range a.Extra {
-			if _, ok := c.Asset(e); !ok {
+			if _, ok := c.LlamaAsset(a.Tag, e); !ok {
 				t.Errorf("%s: extra %s is not an asset", a.ID, e)
 			}
 		}
@@ -88,6 +98,14 @@ func TestBackends(t *testing.T) {
 	}
 }
 
+// pinTag is the tag of the catalog's first rung.
+func (c *Catalog) pinTag() string {
+	if r := c.Rungs(); len(r) > 0 {
+		return r[0].Tag
+	}
+	return ""
+}
+
 func TestLoadOverride(t *testing.T) {
 	d := t.TempDir()
 	emb, _ := Load("")
@@ -98,11 +116,11 @@ func TestLoadOverride(t *testing.T) {
 		t.Fatalf("override ignored: %v %+v", err, c)
 	}
 	os.WriteFile(filepath.Join(d, "catalog.json"), []byte(`{"version":0}`), 0o644)
-	if c, _ := Load(d); c.LlamaCpp.Tag != emb.LlamaCpp.Tag {
+	if c, _ := Load(d); c.pinTag() != emb.pinTag() {
 		t.Error("lower version must lose")
 	}
 	os.WriteFile(filepath.Join(d, "catalog.json"), []byte(`{garbage`), 0o644)
-	if c, err := Load(d); err != nil || c.LlamaCpp.Tag != emb.LlamaCpp.Tag {
+	if c, err := Load(d); err != nil || c.pinTag() != emb.pinTag() {
 		t.Error("garbage override must be ignored")
 	}
 }

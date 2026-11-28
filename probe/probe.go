@@ -22,7 +22,8 @@ type GPU struct {
 	VRAMTotalMiB  int    `json:"vram_total_mib"`
 	VRAMUsedMiB   int    `json:"vram_used_mib"` // all processes, ours included
 	UnifiedMemory bool   `json:"unified_memory"`
-	Source        string `json:"source"` // nvidia-smi | sysfs | sysctl | llama-list-devices | wmi
+	Source        string `json:"source"`           // nvidia-smi | sysfs | sysctl | llama-list-devices | wmi
+	Driver        string `json:"driver,omitempty"` // NVIDIA driver version from nvidia-smi ("580.95.05"); empty when not read
 
 	sysfsPath string // unexported: lets Others re-read live use
 }
@@ -80,7 +81,16 @@ func ProbeWith(ctx context.Context, s Sources) (Hardware, error) {
 	}
 
 	if out, err := s.Run(ctx, "nvidia-smi", "--query-gpu=index,name,memory.total,memory.used", "--format=csv,noheader,nounits"); err == nil {
-		hw.GPUs = append(hw.GPUs, ParseNvidiaSMI(string(out))...)
+		gs := ParseNvidiaSMI(string(out))
+		// The driver picks the CUDA build (catalog.Backends): asked apart so the line above keeps its shape.
+		if dv, err := s.Run(ctx, "nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"); err == nil {
+			if d := firstLine(string(dv)); d != "" {
+				for i := range gs {
+					gs[i].Driver = d
+				}
+			}
+		}
+		hw.GPUs = append(hw.GPUs, gs...)
 	}
 	switch goos {
 	case "linux":
@@ -130,6 +140,16 @@ func ParseNvidiaSMI(out string) []GPU {
 		})
 	}
 	return gs
+}
+
+// firstLine is the first non-empty line of s, trimmed.
+func firstLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			return l
+		}
+	}
+	return ""
 }
 
 func atoiMiB(s string) int {

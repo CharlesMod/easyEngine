@@ -87,9 +87,9 @@ func (s *Supervisor) setupNeed(cat *catalog.Catalog, hw probe.Hardware, backendI
 func (s *Supervisor) backendSteps(cat *catalog.Catalog, hw probe.Hardware, want string) []plan.DiskStep {
 	if want == "" {
 		s.mu.Lock()
-		cur := s.st.Backend
+		cur, tag := s.st.Backend, s.st.Build
 		s.mu.Unlock()
-		if cur != "" && backendInstalled(s.dir, cur) {
+		if cur != "" && backendInstalled(s.dir, cur, tag) {
 			return nil
 		}
 		if bs := cat.Backends(hw); len(bs) > 0 {
@@ -97,20 +97,32 @@ func (s *Supervisor) backendSteps(cat *catalog.Catalog, hw probe.Hardware, want 
 		}
 	}
 	a, ok := cat.Asset(want)
-	if !ok || backendInstalled(s.dir, a.ID) {
+	if !ok {
+		return nil
+	}
+	return s.buildDiskSteps(cat, a)
+}
+
+// buildDiskSteps are the downloads build a needs (with its extras), none when it is already
+// unpacked from its archive (installBuild, the move: fetchBuildLocked fetches nothing then).
+// The install job and the move check the disk with these before they download.
+func (s *Supervisor) buildDiskSteps(cat *catalog.Catalog, a catalog.Asset) []plan.DiskStep {
+	if buildUnpacked(s.dir, a.ID, a.Tag, a.SHA256) {
 		return nil
 	}
 	var extras []catalog.Asset
 	for _, x := range a.Extra {
-		if ea, ok := cat.Asset(x); ok {
+		if ea, ok := cat.LlamaAsset(a.Tag, x); ok {
 			extras = append(extras, ea)
 		}
 	}
 	return plan.BackendSteps(a, extras)
 }
 
-func backendInstalled(dataDir, id string) bool {
-	dir := filepath.Join(dataDir, "backends", id)
+// backendInstalled reports whether build id@tag is installed whole (backendDir, its marker and
+// its server).
+func backendInstalled(dataDir, id, tag string) bool {
+	dir := backendDir(dataDir, id, tag)
 	_, err := os.Stat(filepath.Join(dir, ".installed"))
 	return err == nil && findServer(dir) != ""
 }

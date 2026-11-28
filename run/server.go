@@ -65,6 +65,9 @@ func (s *Supervisor) roomSensed(ctx context.Context, hw probe.Hardware, ourPIDs 
 }
 
 func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wants, error) {
+	if s.srv == nil { // every load starts here (start, restart, reshape, yield's end): the staged pin runs from it
+		s.promoteNext()
+	}
 	in, ok := s.resolveInstall()
 	if !ok {
 		return loadCtx{}, fit.Room{}, fit.Wants{}, errors.New("not installed")
@@ -78,7 +81,7 @@ func (s *Supervisor) loadContext(ctx context.Context) (loadCtx, fit.Room, fit.Wa
 	if sn.gpu >= 0 { // the adapter the engine runs on, not the one with the most dedicated memory
 		g, hasG = hw.GPUs[sn.gpu], true
 	}
-	key := fit.BookKey(in.model.SHA256, g.Name, in.backend)
+	key := fit.BookKey(in.model.SHA256, g.Name, bookBackend(in.backend, in.tag))
 	s.mu.Lock()
 	kv := s.st.KVType
 	s.mu.Unlock()
@@ -127,6 +130,7 @@ func (s *Supervisor) startLocked() error {
 	if s.yielded() != nil { // the card is yielded: the yield's end loads again
 		return nil
 	}
+	s.checkPin() // a start is a word for a move that is still to be made (build.go)
 	if _, ok := s.resolveInstall(); !ok {
 		if s.customMissingPhase() {
 			return nil
@@ -315,6 +319,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	if err != nil {
 		return launchResult{err: err}
 	}
+	s.setVMM("") // what an earlier server said of its buffers is not this one's
 	// Ready is heard in the server's own lines (docs/EVENTS.md section 3): after the line that
 	// says it listens, /health is asked once per following line until it answers. The lines are
 	// the first word, not the only one: when the server has said nothing for ReadyQuiet after a
@@ -356,6 +361,9 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		quiet.Heard()
 		s.Heard()
 		oomw.line(l)
+		if v := vmmLine(l); v != "" {
+			s.setVMM(v)
+		}
 		if !listening.Load() && saysListening(l) {
 			listening.Store(true)
 		}
@@ -423,7 +431,7 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		{
 			oomw.take() // what loading printed is not a run-time signal
 			srv := &server{proc: proc, port: port, shape: shape, key: lc.key, fp: lc.fp, seed: lc.seed, startedAt: s.cfg.Now(),
-				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw, ctxKey: ctxKeyOf(lc, shape)}
+				reserve0: lc.sum.Reserve.OthersMiB + lc.sum.Reserve.HostMiB, oom: oomw, ctxKey: ctxKeyOf(lc, shape), build: lc.in.build}
 			srv.nextGrow = s.cfg.Now()
 			s.calibrate(ctx, srv)
 			s.srv = srv
@@ -445,6 +453,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 			s.layBack(srv, url)
 			s.mindUp(srv)
 			s.setPhase("ready", "Ready")
+			s.wg.Add(1)
+			go func(in install) { // this build served ready: the builds it replaced go, off opMu
+				defer s.wg.Done()
+				s.pruneBuilds(in)
+			}(lc.in)
 			return launchResult{ok: true}
 		}
 	}
@@ -457,6 +470,18 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 var listensRe = regexp.MustCompile(`(?i)\blistening on https?://|server is listening`)
 
 func saysListening(l string) bool { return listensRe.MatchString(l) }
+
+// recordLC is what a failure of srv is recorded under (lowerCap, setCeiling): srv's own book key,
+// footprint and build, when the load after it (lc) runs another build (promoteNext selected a
+// staged one in between); lc otherwise.
+func recordLC(srv *server, lc loadCtx) loadCtx {
+	if srv == nil || srv.key == "" || srv.key == lc.key {
+		return lc
+	}
+	r := lc
+	r.key, r.fp, r.in.build = srv.key, srv.fp, srv.build
+	return r
+}
 
 func firstPos(a, b int) int {
 	if a > 0 {
@@ -579,8 +604,9 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 			return
 		}
 		s.addError("llama-server ran out of memory at %d x %d: lowering the cap", shape.Slots, shape.CtxPerSlot)
-		s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
-		s.setCeiling(lc.key, shape, "it ran out of memory while serving")
+		rec := recordLC(srv, lc) // under the build that ran out, not one the restart moved to
+		s.lowerCap(rec, shape, next.Slots*next.CtxPerSlot, room)
+		s.setCeiling(rec.key, shape, "it ran out of memory while serving")
 		s.noteRestart(fmt.Errorf("out of memory at %d x %d", shape.Slots, shape.CtxPerSlot))
 		if err := s.runShape(cctx, lc, next); err != nil {
 			s.logf("restart after the out-of-memory failed: %v", err)
@@ -602,11 +628,11 @@ func (s *Supervisor) handleExit(ctx context.Context, srv *server) {
 			s.mu.Unlock()
 			if grew > heldTolMiB {
 				s.addError("llama-server crashed %d times in a row at %d x %d (%s); other apps took %d MiB since it started: stepping down and lowering the cap", n, shape.Slots, shape.CtxPerSlot, why, grew)
-				s.lowerCap(lc, shape, next.Slots*next.CtxPerSlot, room)
+				s.lowerCap(recordLC(srv, lc), shape, next.Slots*next.CtxPerSlot, room)
 			} else {
 				s.addError("llama-server crashed %d times in a row at %d x %d (%s); no other app was seen taking memory, stepping down once anyway", n, shape.Slots, shape.CtxPerSlot, why)
 			}
-			s.setCeiling(lc.key, shape, fmt.Sprintf("it crashed %d times in a row", n))
+			s.setCeiling(recordLC(srv, lc).key, shape, fmt.Sprintf("it crashed %d times in a row", n))
 			s.noteRestart(fmt.Errorf("crashed %d times at %d x %d: %s", n, shape.Slots, shape.CtxPerSlot, why))
 			if err := s.runShape(cctx, lc, next); err != nil {
 				s.logf("restart one step down failed: %v", err)

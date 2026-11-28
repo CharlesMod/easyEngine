@@ -246,7 +246,7 @@ func (s *Supervisor) installBackendOnly(ctx context.Context) error {
 		}
 	}
 	s.mu.Lock()
-	s.st.Backend = be
+	s.selectBuildLocked(be)
 	s.mu.Unlock()
 	s.save()
 	return nil

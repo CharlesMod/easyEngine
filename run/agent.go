@@ -269,8 +269,9 @@ func (s *Supervisor) agentWanted() bool {
 // status and blocks nothing: the phase settles as if no job had run. It does nothing when there
 // is no agent to install, when it is installed, or when another job runs (that job installs it).
 // It returns when the attempt has ended: whether to try again (a failure that was not a cancel),
-// for installAgentThen, which waits for a word before it does.
-func (s *Supervisor) installAgent() (again bool) {
+// for installAgentThen, which waits for a word before it does. w is its listener: a failure
+// counts it as waiting before the status says so, so a request seen after the status is heard.
+func (s *Supervisor) installAgent(w *word) (again bool) {
 	if !s.agentWanted() || s.agentReady() {
 		return false
 	}
@@ -310,6 +311,7 @@ func (s *Supervisor) installAgent() (again bool) {
 		s.agent.set("", "", 0)
 		s.addError("Agent install cancelled")
 	default:
+		w.count() // it waits now: a request is a word for it, before the status says so
 		s.agent.set("error", "install failed: "+err.Error()+" (waiting for a request, the network or a word from a client)", 0)
 		s.addError("Agent install failed: %v", err)
 		again = true
@@ -334,7 +336,7 @@ func (s *Supervisor) installAgentThen(then func()) {
 			}
 			return
 		}
-		again := s.installAgent()
+		again := s.installAgent(w)
 		if then != nil {
 			then()
 			then = nil
@@ -343,7 +345,7 @@ func (s *Supervisor) installAgentThen(then func()) {
 			w.Close()
 			return
 		}
-		w.count() // it waits now: a request is a word for it
+		w.count() // already counted when the failure was said; this holds for any other path
 		if s.awaitWord(s.root, w) != nil {
 			return
 		}

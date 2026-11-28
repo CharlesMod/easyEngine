@@ -142,33 +142,59 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	if upstreamBytes(t, e) != before {
 		t.Fatal("a refused body reached the model server")
 	}
-	// the slot path: its own number, digits only
+	// the paths beyond the model's completions never reach the door from a paired token: the
+	// gate's scope refuses them (api/scope.go)
+	for _, p := range []string{"/slots/0?action=erase", "/infill", "/v1/embeddings", "/v1/some/new/path"} {
+		c, b = post(2, p, `{}`)
+		refused("paired "+p, c, b, "not_allowed", 403)
+	}
+	// an --open listener's caller from another machine (here: through a forwarder that says so)
+	// is not scoped by the gate: the door alone keeps it to its own slots. It attaches C (engine 6).
+	openSrv := httptest.NewServer((&api.API{S: s, AnyHost: true, Open: true}).Handler())
+	t.Cleanup(openSrv.Close)
+	fwd := map[string]string{"X-Forwarded-For": "10.9.8.7"}
+	C := openHold(t, openSrv, `{"hold":true,"name":"c","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, fwd)
+	if C.status != 200 || C.first["client_id"] != "open@127.0.0.1" || C.first["local"] != false {
+		t.Fatalf("open attach: %d %v", C.status, C.first)
+	}
+	C.untilGiven(1)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	opost := func(path, body string) (int, string) {
+		c, b, _ := do(t, "POST", openSrv.URL+path, body, hdr(fwd))
+		return c, b
+	}
 	acts := slotActs(e)
-	c, b = post(2, "/slots/1x?action=erase", ``)
+	c, b = opost("/slots/1x?action=erase", ``)
 	refused("/slots/1x", c, b, "bad_request", 400)
-	c, b = post(2, "/slots/%201?action=erase", ``)
+	c, b = opost("/slots/%201?action=erase", ``)
 	refused("/slots/ 1", c, b, "bad_request", 400)
-	c, b = post(2, "/slots/3?action=erase", ``)
-	refused("/slots/3", c, b, "slot_out_of_range", 400)
+	c, b = opost("/slots/%2B0?action=erase", ``)
+	refused("/slots/+0", c, b, "bad_request", 400)
+	c, b = opost("/slots/1?action=erase", ``)
+	refused("/slots/1", c, b, "slot_out_of_range", 400)
 	if slotActs(e) != acts {
 		t.Fatalf("a refused slot action reached the model server: %q", slotActs(e))
 	}
-	post(2, "/slots/0?action=erase", ``)
-	if got := strings.TrimPrefix(slotActs(e), acts); got != "/slots/5?action=erase\n" {
+	opost("/slots/0?action=erase", ``)
+	if got := strings.TrimPrefix(slotActs(e), acts); got != "/slots/6?action=erase\n" {
 		t.Fatalf("erase of its slot 0 went to %q", got)
 	}
-	// /infill honours id_slot: mapped as a completion
-	if c, b := post(2, "/infill", `{"id_slot":0,"input_prefix":"a","input_suffix":"b"}`); c != 200 || upstreamSlot(t, e) != float64(5) {
+	// /infill honours id_slot: confined as a completion, a bad body fails closed
+	if c, b := opost("/infill", `{"id_slot":0,"input_prefix":"a","input_suffix":"b"}`); c != 200 || upstreamSlot(t, e) != float64(6) {
 		t.Fatalf("/infill: %d %s upstream %v", c, b, upstreamSlot(t, e))
 	}
+	c, b = opost("/infill", "\xEF\xBB\xBF"+`{"id_slot":0}`)
+	refused("/infill BOM", c, b, "bad_request", 400)
 	// a path that cannot be confined: refused to a remote caller, a local one passes the door
-	c, b = post(2, "/v1/embeddings", `{"input":"x"}`)
+	c, b = opost("/v1/embeddings", `{"input":"x"}`)
 	refused("embeddings", c, b, "path_not_offered", 403)
-	c, b = post(2, "/v1/some/new/path", `{}`)
+	c, b = opost("/v1/some/new/path", `{}`)
 	refused("an unknown POST", c, b, "path_not_offered", 403)
 	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c == 403 {
 		t.Fatalf("a local caller's embeddings: %d %s", c, b)
 	}
+	C.cancel()
+	attachmentGone(t, s, C.id)
 	// naming a's attachment: not_yours at the door and on DELETE
 	before = upstreamBytes(t, e)
 	c, b = post(2, "/v1/chat/completions", `{"id_slot":0,"messages":[]}`, asClient(A.id))
@@ -181,8 +207,6 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	// client-3 holds nothing: the commons (the base's 0..2, engine numbers), never a client's
 	c, b = post(3, "/v1/chat/completions", `{"id_slot":3,"messages":[]}`)
 	refused("client-3 id_slot 3", c, b, "slot_not_offered", 400)
-	c, b = post(3, "/slots/4?action=erase", ``)
-	refused("client-3 erase 4", c, b, "slot_not_offered", 400)
 	if c, b := post(3, "/v1/chat/completions", `{"id_slot":2,"messages":[]}`); c != 200 || upstreamSlot(t, e) != float64(2) {
 		t.Fatalf("client-3 id_slot 2: %d %s upstream %v", c, b, upstreamSlot(t, e))
 	}
@@ -191,6 +215,11 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	} else if v, _ := upstreamSlot(t, e).(float64); v > 2 {
 		t.Fatalf("client-3's pick went to %v", v)
 	}
+	// the open caller, gone, now holds nothing: the commons for it too, by the slot path as well
+	c, b = opost("/slots/4?action=erase", ``)
+	refused("open erase 4", c, b, "slot_not_offered", 400)
+	c, b = opost("/infill", `{"id_slot":3}`)
+	refused("open infill 3", c, b, "slot_not_offered", 400)
 }
 
 func TestClientRequiredAndAttachRequired(t *testing.T) {

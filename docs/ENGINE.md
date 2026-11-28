@@ -1998,13 +1998,28 @@ numbers must be integer tokens: no fraction, exponent, leading zero or quotes):
 
 **The images** (`lookimg`): each is read in this order, each check before the next costs memory:
 base64 length at most 11 MiB (`image_too_large`); valid base64 (`image_bad`); decoded at most
-8 MiB (`image_too_large`); PNG or JPEG by its magic bytes, nothing else (`image_format`); the header
-read with `image.DecodeConfig` (no pixel decoded yet): each side at most 8192 px and at most
-16 Mi pixels (`image_too_many_pixels`, so a decoded image is at most 64 MiB RGBA); then the
-decode (`image_bad` on any error; a decoder panic is caught); then a box-filter downscale so the
-long edge is at most the detail's (never up); then a re-encode, PNG to PNG and JPEG to JPEG
-(quality 90), which drops all metadata. A refusal is 400 with that code and `"image": <index>`.
-Nothing reaches the model server unless every image passed.
+8 MiB (`image_too_large`); PNG or JPEG by its magic bytes, nothing else (`image_format`); the
+file's own structure walked before any decode (`image_format`, `lookimg/structure.go`): a JPEG
+must be baseline 8-bit (SOF0) with 1 or 3 components, at most 3 scans, at most 64 segments,
+APP/COM data at most 1 MiB, and nothing after EOI; a PNG must be 8-bit, colour type 0, 2, 3, 4
+or 6, not interlaced, not animated (no `acTL`/`fcTL`/`fdAT`), IHDR first, at most 4096 chunks
+(64 ancillary) and nothing after IEND. Progressive, CMYK, 16-bit, Adam7 and APNG files, whose
+decode cost their size does not bound (a crafted progressive JPEG can cost an hour of CPU),
+never reach a decoder. Then the header read with `image.DecodeConfig` (no pixel decoded yet):
+each side at most 8192 px and at most 16 Mi pixels (`image_too_many_pixels`); then the decode
+(`image_bad` on any error; a decoder panic is caught); then a box-filter downscale so the long
+edge is at most the detail's (never up), by a typed scaler for each image type the allowed
+files decode to (never the generic per-pixel `At`); then a re-encode, PNG to PNG and JPEG to
+JPEG (quality 90), which drops all metadata. The request's context is asked before and after the
+decode, after the scale, after the encode and between images: a caller gone is
+`image_cancelled` and the rest is not decoded. A refusal is 400 with that code and
+`"image": <index>`. Nothing reaches the model server unless every image passed.
+
+**Measured cost of one image** (`lookimg` TestResourceBoundsAtPixelLimit, go1.27, one core, GC
+off so the bytes allocated bound the live peak from above; 4096 x 4096 files, noise sized to
+the 8 MiB file bound): the worst heap is 93 MiB (an RGBA PNG at a long edge of 2048; 77 MiB at
+1024), the worst time 0.58 s (a 4:4:4 JPEG at 2048; 0.45 s at 1024). A look of 4 such images
+is at most about 2.3 s of one core; two decode at once.
 
 **The request the model server gets** is built by the engine from these parts alone:
 `{"messages":[{"role":"user","content":[{label text}, {"type":"image_url","image_url":{"url":"data:<mime>;base64,<re-encoded>"}}, ..., {"type":"text","text":<question>}]}], "max_tokens", "stream", "stream_options":{"include_usage":true} (streamed), "id_slot" (given), "chat_template_kwargs" (the projector's catalog field, e.g. Bonfire's {"enable_thinking": false}; a caller cannot set it)}`.
@@ -2013,23 +2028,37 @@ woken and the look held like any request), the caller's own slots and id_slot ma
 sampler policy. The remote media checks are skipped for it alone (the mark is the engine's,
 set in the request's context, never a header).
 
-**Bounds.** At most 2 looks decode images at once, engine-wide; a caller from another machine
-has one look at a time (from its body to its answer). A remote look's bytes count against the
-proxy's one bound of remote bodies kept (64 MiB of bodies read and not yet ended, §7g): its
-body while it is decoded, then the request built from it while that request lives; so looks and
-other remote requests share the 64 MiB, never 64 MiB each. A remote look whose built images pass
-16 MiB (the remote body bound) is 400 `look_too_large`, judged as each image is built. Over a
-bound the answer is 429 `busy` at once: nothing waits for room. The body is read by the proxy's
-bounded read (16 MiB and 8 at once from other machines, 64 MiB locally; silence and total
-timeouts).
+**Bounds.** The body is read first, by the proxy's bounded read (16 MiB and 8 at once from other
+machines, 64 MiB locally; silence and total timeouts); only then is the look's gate taken, so a
+slow sender holds its read and nothing else. At most 2 looks decode images at once,
+engine-wide; a caller from another machine has one look at a time (from its read body to its
+answer). A remote look's bytes count against the proxy's one bound of remote bodies kept (64 MiB
+of bodies read and not yet ended, §7g): its body while it is decoded, then the request built
+from it while that request lives. The hand-over counts the built request before it gives the
+body's count back, and the proxy reads no body for a look (it is the engine's, held already),
+so a look's bytes are never uncounted and never counted twice (for the moment of the hand-over
+both are counted). Looks and other remote requests share the 64 MiB, never 64 MiB each. A remote
+look whose built request passes 16 MiB (the remote body bound) is 400 `look_too_large`, judged
+as each image is built. Over a bound the answer is 429 `busy` at once: nothing waits for room.
 
-**Worst-case memory for callers from other machines: about 530 MiB.** That is the 64 MiB of
-kept remote bodies (looks included) plus 2 looks decoding at once, each at most about 232 MiB:
-its image strings (at most 16 MiB, the body bound), one file (8 MiB), its pixels (16 Mi px as
-RGBA, 64 MiB), the scaled copy (never more pixels than the source, 64 MiB), its re-encoding (at
-most about 64 MiB) and the built image parts (16 MiB). With Campfire's table (long edge at most
-1024 px) the scaled copy and its encoding are at most 4 MiB each, and the worst case is about
-400 MiB. Local looks share the 2 decoders and are not otherwise counted.
+The body is parsed in place: after `json.Valid`, it is walked without a decoder, and each
+image's base64 is a view of the body (copied only if the caller escaped a character in it,
+which base64 never needs), read by the decode without a copy. The request built from it is
+written into one buffer, image by image, grown by what each part needs (never doubled), and each
+image's base64 is let go once its part is written. Measured (`api` TestLookBuildMemory: a
+15.6 MiB body of four 4096 x 4096 PNGs at a long edge of 2048): the parse allocates 11 KiB; each
+image's step is at most about 108 MiB including the body (live before it, at most 19.5 MiB,
+plus all it allocates, at most 90.6 MiB with GC off).
+
+**Worst-case memory for remote looks: about 250 MiB of heap**, from the measurements above: the
+64 MiB of kept remote bytes (look bodies and built requests among them, counted) plus 2 looks
+decoding at once, each allocating at most 93 MiB beyond what is counted (the decoded file,
+pixels, scaled copy, re-encoding and the built buffer's growth). With Campfire's table (long
+edge at most 1024 px) it is about 220 MiB (77 MiB a decode). Not in these figures: the remote
+bodies still being read (at most 8 at once, each at most 16 MiB, §7g; `io.ReadAll`'s growth can
+briefly hold more), and the Go collector's slack (with the default GOGC the heap may grow to
+about twice the live bytes between collections). Local looks share the 2 decoders and are not
+otherwise counted.
 
 **Without an attachment.** A look is a chat request of its caller's at the door, so a remote
 caller with no attachment is treated exactly as its chat request would be: served from the

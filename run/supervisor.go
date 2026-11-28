@@ -231,6 +231,7 @@ type server struct {
 
 // Supervisor owns the children and the state.
 type Supervisor struct {
+	envOnce sync.Once // the dropped LLAMA_ARG_* names are logged once per engine life
 	cfg  Config
 	dir  string
 	root context.Context

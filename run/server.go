@@ -410,6 +410,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	default:
 	}
 	s.setPhase("starting", fmt.Sprintf("Starting llama-server (%d x %d)", shape.Slots, shape.CtxPerSlot))
+	s.envOnce.Do(func() {
+		if n := droppedEnvNames(); len(n) > 0 {
+			s.logf("model server environment: left out of the parent's environment (the engine gives the flags): %s", strings.Join(n, ", "))
+		}
+	})
 	proc, err := s.cfg.Group.Launch(lifecycle.Spec{Name: "llama-server", Path: lc.in.bin, Args: args, Dir: filepath.Dir(lc.in.bin), Env: llamaEnv(lc.in.bin, env), Log: sink})
 	if err != nil {
 		sink.Close()

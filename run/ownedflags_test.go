@@ -214,14 +214,18 @@ func TestLlamaEnvDropsMediaVariables(t *testing.T) {
 	for _, k := range mediaEnv {
 		t.Setenv(k, "x")
 	}
-	t.Setenv("LLAMA_ARG_CTX_SIZE", "keep")
+	t.Setenv("LLAMA_ARG_CTX_SIZE", "x")
+	t.Setenv("LLAMA_ARG_HF_REPO", "x")
+	t.Setenv("LLAMA_ARG_MODEL_URL", "x")
+	t.Setenv("LLAMA_ARG_DOCKER_REPO", "x")
+	t.Setenv("UNRELATED_VAR", "keep")
 	env := llamaEnv("/bin/llama-server", []string{"LLAMA_ARG_MMPROJ=engine"})
 	got := map[string]string{}
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		got[k] = v
 	}
-	for _, k := range mediaEnv {
+	for _, k := range append([]string{"LLAMA_ARG_CTX_SIZE", "LLAMA_ARG_HF_REPO", "LLAMA_ARG_MODEL_URL", "LLAMA_ARG_DOCKER_REPO"}, mediaEnv...) {
 		if k == "LLAMA_ARG_MMPROJ" {
 			continue
 		}
@@ -229,7 +233,7 @@ func TestLlamaEnvDropsMediaVariables(t *testing.T) {
 			t.Errorf("%s reached the child", k)
 		}
 	}
-	if got["LLAMA_ARG_MMPROJ"] != "engine" || got["LLAMA_ARG_CTX_SIZE"] != "keep" {
+	if got["LLAMA_ARG_MMPROJ"] != "engine" || got["UNRELATED_VAR"] != "keep" {
 		t.Errorf("the engine's own extra or an unrelated variable was lost: %v", got["LLAMA_ARG_MMPROJ"])
 	}
 }

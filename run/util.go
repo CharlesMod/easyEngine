@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 )
@@ -19,22 +20,42 @@ var mediaEnv = []string{
 	"LLAMA_ARG_VIDEO_FPS", "LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL", "LLAMA_ARG_VIDEO_FFMPEG_DIR",
 }
 
-// withoutMediaEnv is env less every mediaEnv variable.
+// envDropped says whether the parent's variable kv never reaches the model server: every
+// LLAMA_ARG_* (llama-server reads its flags, including the model and its download, from them),
+// and the media variables of mediaEnv.
+func envDropped(kv string) bool {
+	k, _, _ := strings.Cut(kv, "=")
+	if strings.HasPrefix(k, "LLAMA_ARG_") {
+		return true
+	}
+	return slices.Contains(mediaEnv, k)
+}
+
+// withoutMediaEnv is env less every variable envDropped names.
 func withoutMediaEnv(env []string) []string {
 	out := make([]string, 0, len(env))
-next:
 	for _, kv := range env {
-		for _, k := range mediaEnv {
-			if strings.HasPrefix(kv, k+"=") {
-				continue next
-			}
+		if !envDropped(kv) {
+			out = append(out, kv)
 		}
-		out = append(out, kv)
 	}
 	return out
 }
 
-// llamaEnv keeps the environment (less the media variables), puts the backend dir on the library path (the
+// droppedEnvNames are the names the parent's environment has that llamaEnv leaves out, sorted.
+func droppedEnvNames() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if envDropped(kv) {
+			k, _, _ := strings.Cut(kv, "=")
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// llamaEnv keeps the environment (less every LLAMA_ARG_* and media variable; the extras the engine adds are kept), puts the backend dir on the library path (the
 // release builds ship their shared libraries next to the binary) and adds extras.
 func llamaEnv(bin string, extra []string) []string {
 	env := withoutMediaEnv(os.Environ())

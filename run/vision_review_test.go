@@ -91,6 +91,20 @@ func TestVisionProjectorLoadFailureServesText(t *testing.T) {
 	if e := s.Detach(av.Attachment, "client-1"); e != nil {
 		t.Fatal(e)
 	}
+	// a start made for another reason (the KV type changed) does not carry --mmproj either: the
+	// projector is marked not loadable, not merely skipped once
+	n := len(v.e.Starts())
+	if err := s.SetSettings(run.Settings{KVType: "q8_0"}); err != nil {
+		t.Fatal(err)
+	}
+	waitStarts(t, v.e, n+1)
+	st = visReady(t, s, false)
+	if with, _ := mmStarts(v.e); with != 1 {
+		t.Fatalf("the restart for the KV type carried --mmproj: %v", v.e.Starts())
+	}
+	if !strings.HasPrefix(st.VisionNote, "the vision projector failed to load: ") {
+		t.Errorf("note after the restart: %q", st.VisionNote)
+	}
 }
 
 func TestVisionProjectorLoadFailureAskedAgain(t *testing.T) {

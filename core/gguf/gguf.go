@@ -75,7 +75,8 @@ type Info struct {
 	// BlockBytes is the bytes of the tensors of each repeating block (named blk.N.*), len ==
 	// NLayer: what moving block N off the card moves (llama.cpp -ngl moves whole blocks). A tensor
 	// that llama.cpp places with a block but names without one (Gemma 4's per_layer_model_proj, kept
-	// with block 0) is not counted in any. nil where NLayer is 0. Since core v0.1.5 (untagged).
+	// with block 0) is not counted in any. One entry per layer (zeros
+	// where no tensor names the block); nil where NLayer is 0. Since the dense split (in no core tag yet).
 	BlockBytes []int64
 	// OutputBytes is the output head that goes to the card with any block (llama.cpp's output
 	// layer): output.weight and output_norm.weight, or where the file has no output.weight

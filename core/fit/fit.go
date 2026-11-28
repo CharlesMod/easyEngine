@@ -28,16 +28,16 @@ import (
 var ErrTooBig = errors.New("fit: model does not fit this machine")
 
 // ErrSplitMoE means WithSplit was asked of a mixture-of-experts model: its experts leave the card
-// by --n-cpu-moe, never by whole layers. Since core v0.1.5 (untagged).
+// by --n-cpu-moe, never by whole layers. Since the dense split (in no core tag yet).
 var ErrSplitMoE = errors.New("fit: a mixture-of-experts model is never split by whole layers")
 
 // ErrNoBlocks means WithSplit was given a header without the bytes of each block
-// (gguf.Info.BlockBytes, one per layer, not all of them empty). Since core v0.1.5 (untagged).
+// (gguf.Info.BlockBytes, one per layer, not all of them empty). Since the dense split (in no core tag yet).
 var ErrNoBlocks = errors.New("fit: the header gives no bytes per block")
 
 // ErrNoSplit means a shape with layers on the CPU (Shape.CPULayers) was priced from a footprint
 // that does not allow it (no Split) or that has fewer layers than the shape moves. It is never
-// priced as a shape on the card. Since core v0.1.5 (untagged).
+// priced as a shape on the card. Since the dense split (in no core tag yet).
 var ErrNoSplit = errors.New("fit: the shape moves layers the footprint cannot split")
 
 // SplitShortError means the card holds the model with every layer on the CPU but the output head
@@ -45,7 +45,7 @@ var ErrNoSplit = errors.New("fit: the shape moves layers the footprint cannot sp
 // processor alone does not fit either: NeedMiB is the host memory of the least split at the least
 // shape (minimum slots at the floor context), FreeMiB what stands for it (RAMAvail less the
 // reserve, or less where Room.CardHostFree holds the start), Basis the basis of NeedMiB. It is
-// ErrTooBig to errors.Is. Only a footprint with Split answers it. Since core v0.1.5 (untagged).
+// ErrTooBig to errors.Is. Only a footprint with Split answers it. Since the dense split (in no core tag yet).
 type SplitShortError struct {
 	NeedMiB int   `json:"need_mib"`
 	FreeMiB int   `json:"free_mib"`
@@ -349,16 +349,16 @@ type Footprint struct {
 	Consts *Consts `json:"consts,omitempty"`
 	// Split, where set, allows a dense model's layers to leave the card (llama-server -ngl), and
 	// says what each one weighs: it is both the permission and the figures, so neither can be had
-	// without the other. nil (every footprint before core v0.1.5, and every one the caller does not
+	// without the other. nil (every footprint before the dense split, and every one the caller does not
 	// mark): never split, and every entry plans exactly as before. Only WithSplit sets it from a
-	// header; a MoE footprint never carries it (*FigureError). Since core v0.1.5 (untagged).
+	// header; a MoE footprint never carries it (*FigureError). Since the dense split (in no core tag yet).
 	Split *Split `json:"split,omitempty"`
 }
 
 // Split is a dense footprint's layers as llama.cpp moves them with -ngl N: the last N-1 repeating
 // blocks and the output head stay on the card, the first blocks go to the CPU with their KV cache
 // (llama.cpp b12651 src/llama-model.cpp 1816-1841, src/llama-kv-cache.cpp 214-225). Each slice is
-// one entry per block, block 0 first. Since core v0.1.5 (untagged).
+// one entry per block, block 0 first. Since the dense split (in no core tag yet).
 type Split struct {
 	// LayerMiB is the weights of each block (gguf.Info.BlockBytes).
 	LayerMiB []float64 `json:"layer_mib"`
@@ -428,10 +428,10 @@ type Shape struct {
 	ConstsBackend string `json:"consts_backend,omitempty"`
 	ConstsCard    string `json:"consts_card,omitempty"`
 	// CPULayers is how many repeating layers (the first ones) run on the CPU with their cache; 0:
-	// every layer on the card, as every shape before core v0.1.5. Layers is the model's repeating
+	// every layer on the card, as every shape before the dense split. Layers is the model's repeating
 	// layer count, set where CPULayers is above 0 and on a processor-alone shape of a footprint
-	// with Split: Args renders -ngl from it. Only a footprint with Split plans them. Since core
-	// v0.1.5 (untagged).
+	// with Split: Args renders -ngl from it. Only a footprint with Split plans them. Since the dense split (in no
+	// core tag yet).
 	CPULayers int `json:"cpu_layers,omitempty"`
 	Layers    int `json:"layers,omitempty"`
 }
@@ -659,7 +659,7 @@ func layerKV(info gguf.Info, l gguf.Layer) (float64, bool) {
 // margins (Basis Predicted, not measured on a card). It is the only way a footprint is split: a
 // caller marks the models it may split, and every other footprint plans as before. A MoE model is
 // ErrSplitMoE; a header without the bytes of each block ErrNoBlocks; figures no footprint can
-// hold *FigureError. fp itself is not changed. Since core v0.1.5 (untagged).
+// hold *FigureError. fp itself is not changed. Since the dense split (in no core tag yet).
 func WithSplit(fp Footprint, info gguf.Info) (Footprint, error) {
 	if fp.MoE || info.NExpert > 0 || info.ExpertBytes > 0 {
 		return Footprint{}, ErrSplitMoE
@@ -2007,7 +2007,7 @@ type Reading struct {
 	RAMMiB     int    `json:"ram_mib,omitempty"`
 	HostMiB    int    `json:"host_mib,omitempty"`
 	// CPULayers is the card shape's layers on the CPU (Shape.CPULayers): a reading is of one
-	// split only. Since core v0.1.5 (untagged).
+	// split only. Since the dense split (in no core tag yet).
 	CPULayers int `json:"cpu_layers,omitempty"`
 }
 
@@ -2103,7 +2103,7 @@ const (
 	CPUOnly CalibVerdict = "cpu_only"
 	// SplitRead: the shape ran with layers on the CPU (Shape.CPULayers). Its reading is kept for its
 	// shape (Book.Mark), but the fixed part is not calibrated from it: what it implies rests on the
-	// split's seed margins, never measured. Since core v0.1.5 (untagged).
+	// split's seed margins, never measured. Since the dense split (in no core tag yet).
 	SplitRead CalibVerdict = "split"
 	// NotSeed: the footprint offered is the book's overlay (Basis Measured), not the header's
 	// seed, so there is no seed to hold the reading to; the fixed part does not move.

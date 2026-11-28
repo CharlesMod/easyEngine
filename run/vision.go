@@ -151,14 +151,23 @@ func (s *Supervisor) visionWantChanged(why string, restart bool) {
 	snapLoaded := s.vis.loaded && s.shape != nil
 	running := s.shape != nil
 	s.mu.Unlock()
-	if wanted && ok && in.model.Projector != nil {
-		p := in.model.Projector
-		if !s.projectorPresent(p) {
-			s.mu.Lock()
-			delete(s.vis.failed, p.SHA256) // a new want asks again
-			s.mu.Unlock()
-			s.fetchProjector(in.model)
+	if wanted && ok && in.model.Projector != nil && !s.projectorPresent(in.model.Projector) {
+		s.mu.Lock()
+		delete(s.vis.failed, in.model.Projector.SHA256) // a new want asks again
+		s.mu.Unlock()
+	}
+	if ok {
+		// the running server's note: why the projector is not (yet) loaded, said at once and not
+		// when the next start plans it
+		try, note := s.visionPlan(in, wanted)
+		if try && !snapLoaded {
+			note = "the vision projector is loaded when the model server is next idle"
 		}
+		s.mu.Lock()
+		if !snapLoaded && running {
+			s.vis.note = note
+		}
+		s.mu.Unlock()
 	}
 	if !restart || !running {
 		s.refresh()
@@ -179,11 +188,10 @@ func (s *Supervisor) visionWantChanged(why string, restart bool) {
 	s.refresh()
 }
 
-// planVision decides, before a start, whether it loads the projector, and says why not.
-func (s *Supervisor) planVision(in install) {
-	wanted := s.visionWanted()
+// visionPlan says whether a start loads the projector (try) and, when vision is wanted and it
+// does not, why (note). A missing projector starts its download.
+func (s *Supervisor) visionPlan(in install, wanted bool) (try bool, note string) {
 	p := in.model.Projector
-	try, note := false, ""
 	switch {
 	case !wanted:
 	case p == nil:
@@ -199,6 +207,14 @@ func (s *Supervisor) planVision(in install) {
 			try = true
 		}
 	}
+	return try, note
+}
+
+// planVision decides, before a start, whether it loads the projector, and says why not.
+func (s *Supervisor) planVision(in install) {
+	wanted := s.visionWanted()
+	p := in.model.Projector
+	try, note := s.visionPlan(in, wanted)
 	s.mu.Lock()
 	s.vis.tryLoad, s.vis.note, s.vis.loaded = try, note, false
 	s.vis.proj, s.vis.path = nil, ""
@@ -312,12 +328,14 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 		err := s.downloadQuiet(ctx, p.URL, path, p.SHA256, p.Size, func(fp fetch.Progress) {
 			s.mu.Lock()
 			dl.progress = &Progress{Step: stepLabel("vision projector "+p.File, fp), DoneBytes: fp.Done, TotalBytes: fp.Total, RateBps: fp.RateBps, ETAS: int(fp.ETA.Seconds())}
+			sayPtr(s, "vision.progress", "", dl.progress) // said per step of bytes, as install.progress is
 			s.mu.Unlock()
 		})
 		letGo := err != nil && ctx.Err() != nil // let go: no longer wanted, or the engine stops
 		s.mu.Lock()
 		s.vis.dl = nil
 		s.stoCache = nil
+		s.sayGone("vision.progress", "")
 		switch {
 		case err == nil, letGo:
 		default:

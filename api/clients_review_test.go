@@ -981,6 +981,13 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 	s := e.StartSup(e.Config())
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 2 * time.Second}
+	eight := make(chan struct{})
+	var once sync.Once
+	a.SayReads(func(n int32) {
+		if n == 8 {
+			once.Do(func() { close(eight) })
+		}
+	})
 	srv := httptest.NewServer(a.Handler())
 	t.Cleanup(srv.Close)
 	open := func() net.Conn {
@@ -1006,7 +1013,12 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		conns = append(conns, open())
 	}
-	testkit.WaitFor(t, 10*time.Second, "eight bodies being read", func() bool { return a.RemoteReadsNow() == 8 })
+	// the count says nothing to any hub, so the test waits on the API's own word of each count
+	select {
+	case <-eight:
+	case <-time.After(10 * time.Second): // network timeout: the eight reads begin long before this
+		t.Fatalf("timed out waiting for eight bodies being read (now %d)", a.RemoteReadsNow())
+	}
 	ninth := open()
 	if c := answer(ninth); c != 429 {
 		t.Fatalf("the ninth: %d", c)

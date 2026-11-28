@@ -284,13 +284,19 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) bool 
 	limit := int64(maxSamplerBody)
 	if !local {
 		limit = maxRemoteBody
-		if a.remoteReads.Add(1) > maxRemoteReads {
+		if n := a.remoteReads.Add(1); n > maxRemoteReads {
 			a.remoteReads.Add(-1)
 			w.Header().Set("Connection", "close")
 			clientFail(w, &run.ClientError{Status: 429, Code: "busy", Msg: "too many request bodies from other machines are arriving at once"})
 			return false
+		} else if a.readsSaid != nil {
+			a.readsSaid(n)
 		}
-		defer a.remoteReads.Add(-1)
+		defer func() {
+			if n := a.remoteReads.Add(-1); a.readsSaid != nil {
+				a.readsSaid(n)
+			}
+		}()
 	}
 	rc := http.NewResponseController(w)
 	d, end := a.bodySilence(), time.Now().Add(a.bodyTotal())

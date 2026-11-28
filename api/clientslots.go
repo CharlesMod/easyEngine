@@ -204,6 +204,16 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			return 0, -1, nil, false
 		}
 	}
+	// /v1/messages unpacks extra_params over the converted body after the conversion
+	// (server-chat.cpp:680-685): an id_slot or n_cmpl in it would take the engine's place. The
+	// door judges only the top level, so a confined messages body may not carry it. (Chat does not
+	// unpack it, server-common.cpp:1703-1708 copies it as one opaque key; /v1/responses does, and
+	// is not confinable.)
+	if _, has := obj["extra_params"]; has && path.Clean("/"+r.URL.Path) == "/v1/messages" {
+		clientFail(w, &run.ClientError{Status: 400, Code: "extra_params_not_offered",
+			Msg: "extra_params is unpacked over the request by the model server, past the engine's slot: send those parameters at the top level"})
+		return 0, -1, nil, false
+	}
 	want := -1
 	if raw, has := obj["id_slot"]; has && string(bytes.TrimSpace(raw)) != "null" {
 		n, isInt := slotInt(raw)

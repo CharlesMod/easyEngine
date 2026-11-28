@@ -188,3 +188,30 @@ func TestDepartedPromptsNeverReachAnotherRemote(t *testing.T) {
 		}
 	})
 }
+
+// D1: a confined /v1/messages body may not carry extra_params, which llama-server unpacks over
+// the converted body (server-chat.cpp:680-685) and so past the engine's id_slot and n checks.
+func TestMessagesExtraParamsNotOffered(t *testing.T) {
+	e, s, srv := clientsEnv(t, true, nil)
+	_, rs, _ := remoteSrv(t, s)
+	growRemote(t, e, s, rs, 1, "a", 2) // the local caller is confined to the commons
+	before := upstreamBytes(t, e)
+	for _, ep := range []string{`{"id_slot":99,"n_cmpl":4,"n":4}`, `{"seed":1}`, `null`} {
+		body := `{"model":"x","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"extra_params":` + ep + `}`
+		c, b, _ := do(t, "POST", srv.URL+"/v1/messages", body, jsonCT)
+		if c != 400 || codeOf(b) != "extra_params_not_offered" {
+			t.Fatalf("extra_params %s: %d %s", ep, c, b)
+		}
+	}
+	if upstreamBytes(t, e) != before {
+		t.Fatal("a refused body reached the model server")
+	}
+	c, b, _ := do(t, "POST", srv.URL+"/v1/messages", `{"model":"x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, jsonCT)
+	if codeOf(b) == "extra_params_not_offered" || c == 400 {
+		t.Fatalf("a messages body without extra_params: %d %s", c, b)
+	}
+	// on chat, extra_params is one opaque key the server never unpacks: passed
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[],"extra_params":{"id_slot":99}}`, jsonCT); c != 200 {
+		t.Fatalf("chat with extra_params: %d %s", c, b)
+	}
+}

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/run"
@@ -46,6 +49,21 @@ func yieldedReply(w http.ResponseWriter, msg string) {
 func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	if slotFiles(r) {
 		fail(w, http.StatusForbidden, "slot save and restore are the engine's own (keep_context); a client may erase a slot")
+		return
+	}
+	if classify(r.Method, r.URL.Path) == pathSlotID {
+		// a slot action is never passed as sent: exactly one action=erase in the URL, and the
+		// request upstream is the engine's own (no body, no form a model server would read)
+		if acts := r.URL.Query()["action"]; len(acts) != 1 || acts[0] != "erase" || formBody(r) {
+			badRequest(w, "a slot action here is exactly one action=erase in the URL, with no form body")
+			return
+		}
+		r.URL.RawQuery = "action=erase"
+		r.Header.Del("Content-Type")
+		setBody(r, nil)
+	}
+	if (streamPath(r.URL.Path) || bufferedBody(r)) && formBody(r) {
+		badRequest(w, "a request body here is JSON (Content-Type application/json): a form-encoded or multipart body is not read as the engine reads it")
 		return
 	}
 	id := requestID(r)
@@ -218,7 +236,9 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			erase := func(es int) bool {
 				u := *target
 				u.Path, u.RawPath, u.RawQuery = "/slots/"+strconv.Itoa(es), "", "action=erase"
-				req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u.String(), nil)
+				// not ended by the client's going: the erase must be answered before the slot is
+				// anyone's (it waits in the model server only while the slot finishes a task)
+				req, err := http.NewRequestWithContext(context.WithoutCancel(r.Context()), http.MethodPost, u.String(), nil)
 				if err != nil {
 					return false
 				}
@@ -247,7 +267,16 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		modify := dropCORS
-		if engineSlots != nil || lookup != nil {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && path.Clean("/"+r.URL.Path) == "/slots" {
+			// every caller reads only its own slots' detail: another owner's slot keeps id,
+			// is_processing and n_ctx (no prompt, no generated text, no token counts)
+			own := a.S.SlotsShownTo(identity(r), local)
+			r.Header.Del("Accept-Encoding") // a compressed reply could not be read
+			modify = func(resp *http.Response) error {
+				dropCORS(resp)
+				return slotsShown(resp, own)
+			}
+		} else if engineSlots != nil || lookup != nil {
 			modify = func(resp *http.Response) error {
 				dropCORS(resp)
 				if lookup != nil {
@@ -256,8 +285,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 				return slotsBack(resp, engineSlots)
 			}
 		}
+		var rt http.RoundTripper = transport
+		if door.Slots != nil {
+			rt = queuedFirst{transport} // a confined request's task is in the model server before a cancel ends it
+		}
 		rp := &httputil.ReverseProxy{
-			Transport:     transport,
+			Transport:     rt,
 			FlushInterval: -1, // flush every write: SSE tokens must not sit in a buffer
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(target)
@@ -269,6 +302,76 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 		forward(w, r, rp, a.fwd(false, id).with(sw).slots(engineSlots).ending(&sum))
 	}
+}
+
+// queuedFirst sends a confined request upstream so that the client's going cannot end it before
+// the model server has answered its headers. llama-server answers headers only after it posted
+// the request's task (a stream: once the task is queued; otherwise with the whole reply), and a
+// closed connection then cancels that task (server-queue.cpp cleanup_pending_task, a slot's
+// release). Ended earlier, the task could be queued after the request's slot mark was released and
+// after the next owner's erase: it would run on that slot after the erase, before the next owner's
+// request, and leave its prompt there. So the request's mark (the slot's count in flight, which a
+// handover waits for) ends only after the model server has the task, never before.
+type queuedFirst struct{ rt http.RoundTripper }
+
+func (q queuedFirst) RoundTrip(req *http.Request) (*http.Response, error) {
+	client := req.Context()
+	up, cancel := context.WithCancel(context.WithoutCancel(client))
+	resp, err := q.rt.RoundTrip(req.WithContext(up))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	stop := context.AfterFunc(client, cancel) // from here the client's going ends it
+	resp.Body = &endsBody{ReadCloser: resp.Body, end: func() { stop(); cancel() }}
+	return resp, nil
+}
+
+// endsBody runs end once when the body is closed.
+type endsBody struct {
+	io.ReadCloser
+	end  func()
+	once sync.Once
+}
+
+func (b *endsBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.end)
+	return err
+}
+
+// slotsShown filters a GET /slots reply (llama-server's to_json per slot,
+// server-context.cpp:835-866: prompt, generated, params, token counts) to what the caller may
+// read: another owner's slot keeps id, is_processing and n_ctx. A reply that is not a JSON array
+// of objects is replaced by an error: nothing passes unread.
+func slotsShown(resp *http.Response, own func(e int) bool) error {
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxSamplerBody+1))
+	resp.Body.Close()
+	if err != nil || len(b) > maxSamplerBody {
+		return fmt.Errorf("the slots reply could not be read whole")
+	}
+	var slots []map[string]json.RawMessage
+	if err := json.Unmarshal(b, &slots); err != nil {
+		return fmt.Errorf("the slots reply is not a list of slots")
+	}
+	for i, sl := range slots {
+		var id int
+		if json.Unmarshal(sl["id"], &id) != nil || !own(id) {
+			slots[i] = map[string]json.RawMessage{"id": sl["id"], "is_processing": sl["is_processing"], "n_ctx": sl["n_ctx"]}
+		}
+	}
+	out, err := json.Marshal(slots)
+	if err != nil {
+		return err
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(out))
+	resp.ContentLength = int64(len(out))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	resp.Header.Del("Content-Encoding")
+	return nil
 }
 
 // touchOf is what a proxied request does with slots, from the path table (paths.go).

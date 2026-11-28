@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -405,5 +406,97 @@ func TestNoHelpNoExtraArgs(t *testing.T) {
 	}
 	if _, kept := helpCache.Load(bin); kept {
 		t.Fatal("a nil help was cached")
+	}
+}
+
+// F2, the engine's order of a handover (TakeSlotFor): the newcomer waits while a request the door
+// sent to the slot runs, the erase is sent only then, the label changes only on its success, a
+// waiter whose client goes leaves the line, a held refusal is answered, and an idle slot of the
+// range is taken over a busy one.
+func TestTakeSlotForOrdersTheHandover(t *testing.T) {
+	s := regSup(true)
+	s.setMap(3, 0, 1, 2)
+	m := s.clients.run
+	m.tags = []SlotTag{{Who: "commons", Trusted: true}, {Who: "commons", Trusted: true}, {Who: "commons", Trusted: true}}
+	all := []int{0, 1, 2}
+	commons, anon := SlotTag{Who: "commons", Trusted: true}, SlotTag{Who: "anon:client-2"}
+	_, relY, ce := s.TakeSlotFor(context.Background(), all, 1, commons, nil, nil)
+	if ce != nil {
+		t.Fatal(ce)
+	}
+	type res struct {
+		e  int
+		ce *ClientError
+		r  func()
+	}
+	waiting := make(chan struct{}, 4)
+	held := func() (func(), *ClientError) { waiting <- struct{}{}; return func() {}, nil }
+	erased := make(chan int, 4)
+	erase := func(e int) bool { erased <- e; return true }
+	// a waiter whose client goes leaves the line
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan res, 1)
+	go func() { e, r, ce := s.TakeSlotFor(ctx, all, 1, anon, erase, held); out <- res{e, ce, r} }()
+	<-waiting
+	if n := s.SlotsWaiting(); n != 1 {
+		t.Fatalf("waiting %d", n)
+	}
+	cancel()
+	if r := <-out; r.ce == nil || r.ce.Code != "client_gone" || s.SlotsWaiting() != 0 || m.tags[1] != commons {
+		t.Fatalf("cancelled: %+v, waiting %d, tag %+v", r.ce, s.SlotsWaiting(), m.tags[1])
+	}
+	// X1 then X2 for busy slot 1: both wait; nothing is erased while Y runs
+	x1, x2 := make(chan res, 1), make(chan res, 1)
+	go func() {
+		e, r, ce := s.TakeSlotFor(context.Background(), all, 1, anon, erase, held)
+		x1 <- res{e, ce, r}
+	}()
+	<-waiting
+	go func() {
+		e, r, ce := s.TakeSlotFor(context.Background(), all, 1, anon, erase, held)
+		x2 <- res{e, ce, r}
+	}()
+	<-waiting
+	select {
+	case e := <-erased:
+		t.Fatalf("slot %d erased while Y runs on it", e)
+	default:
+	}
+	if m.tags[1] != commons {
+		t.Fatalf("labelled before the erase: %+v", m.tags[1])
+	}
+	relY()
+	if e := <-erased; e != 1 {
+		t.Fatalf("erased %d", e)
+	}
+	r1, r2 := <-x1, <-x2
+	if r1.ce != nil || r2.ce != nil || r1.e != 1 || r2.e != 1 || m.tags[1] != anon {
+		t.Fatalf("X1 %+v X2 %+v tag %+v", r1, r2, m.tags[1])
+	}
+	if len(erased) != 0 {
+		t.Fatal("X2, the same owner after the handover, erased again")
+	}
+	r1.r()
+	r2.r()
+	// an idle slot of the range is taken over a busy one (0 and 2 idle, the commons'; 1 is X's)
+	_, relB, _ := s.TakeSlotFor(context.Background(), all, 1, anon, erase, held)
+	e, rel, ce := s.TakeSlotFor(context.Background(), all, -1, SlotTag{Who: "anon:client-3"}, erase, held)
+	if ce != nil || e == 1 {
+		t.Fatalf("idle pick: slot %d, %+v", e, ce)
+	}
+	<-erased
+	rel()
+	relB()
+	// a held refusal is answered and leaves no waiter
+	refuse := func() (func(), *ClientError) { return nil, cerr(429, "busy", "x") }
+	_, relC, _ := s.TakeSlotFor(context.Background(), all, 1, anon, erase, nil)
+	if _, _, ce := s.TakeSlotFor(context.Background(), all, 1, commons, erase, refuse); ce == nil || ce.Code != "busy" || s.SlotsWaiting() != 0 {
+		t.Fatalf("held refusal: %+v, waiting %d", ce, s.SlotsWaiting())
+	}
+	relC()
+	// a failed erase: answered 502, the slot labelled anyone's
+	_, _, ce = s.TakeSlotFor(context.Background(), all, 1, commons, func(int) bool { return false }, nil)
+	if ce == nil || ce.Code != "slot_not_cleared" || m.tags[1].Who != "?" {
+		t.Fatalf("failed erase: %+v, tag %+v", ce, m.tags[1])
 	}
 }

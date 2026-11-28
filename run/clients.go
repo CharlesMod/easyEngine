@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -246,9 +247,16 @@ type clientReg struct {
 	seq  uint64
 	excl map[string]string // left out of the merge until the next start: id -> why
 	run  *runMap
-	busy map[int]int    // engine slot -> requests the door sent to it now
-	used map[int]uint64 // engine slot -> the door's count when a request last went to it (LRU)
-	tick uint64
+	busy map[int]int // engine slot -> requests the door sent to it now
+	// line: engine slot -> the requests waiting in the engine for it, in arrival order, behind a
+	// handover (the slot holds another owner's prompt: it is erased once nothing the door sent
+	// there is still running, and only then labelled the new owner's). lineWake is closed and
+	// made again at every change a waiter may be waiting for (a release, a handover's end, a
+	// restart): an event, never a poll.
+	line     map[int][]*slotWaiter
+	lineWake chan struct{}
+	used     map[int]uint64 // engine slot -> the door's count when a request last went to it (LRU)
+	tick     uint64
 	// reclient: 0 nothing, 1 reshape when idle (a leave that gives someone something), 2 grow
 	// (an attach the running mind cannot serve). A grow drains only when a local caller asked for
 	// it (reLocal); a remote one's waits for idle. Read and cleared by the reactor.
@@ -284,6 +292,8 @@ func (s *Supervisor) clientsInit() {
 	r := &s.clients
 	r.excl = map[string]string{}
 	r.busy = map[int]int{}
+	r.line = map[int][]*slotWaiter{}
+	r.lineWake = make(chan struct{})
 	r.used = map[int]uint64{}
 	r.plans = map[string]reshapePlan{}
 	r.restarts = map[string]int{}
@@ -833,6 +843,8 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 		asked = r.planLocked(2, a.key, a.charge, a.local, a) || asked
 	}
 	clear(r.busy)
+	clear(r.line)
+	r.wakeLineLocked() // waiters see the new generation and are answered
 	clear(r.used)
 	r.mu.Unlock()
 	s.sayClients()
@@ -973,6 +985,8 @@ func (s *Supervisor) stopMap() {
 		a.poke()
 	}
 	clear(r.busy)
+	clear(r.line)
+	r.wakeLineLocked() // waiters see the new generation and are answered
 	clear(r.used)
 	r.mu.Unlock()
 	s.sayClients()
@@ -1983,24 +1997,47 @@ func (s *Supervisor) EnterAs(q DoorAsk) (Route, ClientDoor, func(*RequestEnd)) {
 	return rt, d, s.beginAs(q.ReqID, d.ID)
 }
 
-// TakeSlot is TakeSlotAs with no owner named (tests of the pick alone).
+// slotWaiter is one request waiting in a slot's line.
+type slotWaiter struct{}
+
+// wakeLineLocked tells every waiter in a slot's line to look again. Caller holds r.mu.
+func (r *clientReg) wakeLineLocked() {
+	if r.lineWake != nil {
+		close(r.lineWake)
+	}
+	r.lineWake = make(chan struct{})
+}
+
+// TakeSlot is TakeSlotFor with no owner named and nothing to erase (tests of the pick alone).
 func (s *Supervisor) TakeSlot(slots []int, want int) (e int, release func()) {
-	e, release, _, _ = s.TakeSlotAs(slots, want, SlotTag{})
+	e, release, _ = s.TakeSlotFor(context.Background(), slots, want, SlotTag{}, nil, nil)
 	return e, release
 }
 
-// TakeSlotAs is the engine slot a confined request goes to, marked busy until release: want (an
-// engine slot) when it names one, else, of slots with no request on it, one that holds tag's own
-// prompt, then one it may use without an erase, then the least recently used (all busy: the least
-// recently used; the server queues it there). The pick and the mark are one step under one lock,
-// so two requests never take the same free slot. erase: the slot holds another owner's prompt
-// (needsErase) and must be erased before the request runs; the slot is tagged tag's from now on.
-// unclean says the erase failed: the slot is then taken to hold anyone's (every next owner
-// erases it first).
-func (s *Supervisor) TakeSlotAs(slots []int, want int, tag SlotTag) (e int, release func(), erase bool, unclean func()) {
+// TakeSlotFor is the engine slot a confined request goes to, marked busy until release: want (an
+// engine slot) when it names one, else, of slots, a free one with no line, holding tag's own
+// prompt first, then one it may use without an erase, then the least recently used; else a busy
+// one by the same order (the model server queues it there).
+//
+// The engine orders every handover (docs/ENGINE.md §7g, "The invariant"; never llama-server,
+// whose erase and completion are separate tasks it may reorder: server-queue.cpp:90-112 pops a
+// deferred task naming the released slot before an erase, whose id_slot is -1):
+//   - a slot that holds another owner's prompt is handed over only when no request the door sent
+//     to it is still running; the newcomer waits in the engine for that (each release is the
+//     event), then erase(e) is sent and answered, and only on its success is the slot labelled
+//     tag's;
+//   - while a handover is waiting or under way on a slot, every other request for that slot,
+//     whoever sends it, waits behind it in arrival order;
+//   - held (non-nil: a remote caller) counts a request that must wait against its client's share
+//     of held requests; a request whose context ends while waiting leaves the line.
+//
+// Errors: 502 slot_not_cleared (the erase failed: the slot is labelled anyone's, "?", so every
+// next owner erases it), 503 slot_lost (the model server restarted while it waited), 499
+// client_gone, or held's refusal.
+func (s *Supervisor) TakeSlotFor(ctx context.Context, slots []int, want int, tag SlotTag, erase func(e int) bool, held func() (func(), *ClientError)) (e int, release func(), ce *ClientError) {
 	r := &s.clients
 	r.mu.Lock()
-	gen := r.gen // a release after a restart is not the new map's
+	gen := r.gen
 	m := r.run
 	cur := func(x int) SlotTag {
 		if m == nil || x < 0 || x >= len(m.tags) {
@@ -2008,12 +2045,15 @@ func (s *Supervisor) TakeSlotAs(slots []int, want int, tag SlotTag) (e int, rele
 		}
 		return m.tags[x]
 	}
+	hand := func(x int) bool { return tag.Who != "" && needsErase(cur(x), tag) }
 	rank := func(x int) int { // lower is better
 		c := cur(x)
 		switch {
+		case len(r.line[x]) > 0:
+			return 3
 		case tag.Who != "" && c.Who == tag.Who:
 			return 0
-		case !needsErase(c, tag):
+		case !hand(x):
 			return 1
 		}
 		return 2
@@ -2025,38 +2065,184 @@ func (s *Supervisor) TakeSlotAs(slots []int, want int, tag SlotTag) (e int, rele
 			free, rk := r.busy[x] == 0, rank(x)
 			switch {
 			case best < 0,
-				free && !bestFree,
-				free == bestFree && free && rk < bestRank,
-				free == bestFree && (!free || rk == bestRank) && r.used[x] < r.used[best]:
+				free && !bestFree && rk < 3,
+				free == bestFree && rk < bestRank,
+				free == bestFree && rk == bestRank && r.used[x] < r.used[best]:
 				best, bestFree, bestRank = x, free, rk
 			}
 		}
 		e = best
 	}
-	if tag.Who != "" && m != nil && e >= 0 && e < len(m.tags) {
-		erase = needsErase(m.tags[e], tag)
-		m.tags[e] = tag
-	}
-	r.tick++
-	r.used[e] = r.tick
-	r.busy[e]++
-	r.mu.Unlock()
-	var once sync.Once
-	return e, func() {
+	take := func() func() { // caller holds r.mu
+		if tag.Who != "" && m != nil && e >= 0 && e < len(m.tags) {
+			m.tags[e] = tag
+		}
+		r.tick++
+		r.used[e] = r.tick
+		r.busy[e]++
+		var once sync.Once
+		return func() {
 			once.Do(func() {
 				r.mu.Lock()
 				if r.gen == gen && r.busy[e] > 0 {
 					r.busy[e]--
+					r.wakeLineLocked()
 				}
 				r.mu.Unlock()
 			})
-		}, erase, func() {
-			r.mu.Lock()
-			if r.gen == gen && r.run != nil && e < len(r.run.tags) {
-				r.run.tags[e] = SlotTag{Who: "?"} // anyone's: every next owner erases it first
-			}
-			r.mu.Unlock()
 		}
+	}
+	if len(r.line[e]) == 0 && !hand(e) {
+		release = take()
+		r.mu.Unlock()
+		return e, release, nil
+	}
+	// it waits in the engine: behind the line, for the slot's requests to end, for the erase
+	w := &slotWaiter{}
+	r.line[e] = append(r.line[e], w)
+	s.sayLineLocked(e)
+	leave := func() { // caller holds r.mu
+		if r.gen != gen {
+			return // the line is gone with its map
+		}
+		l := r.line[e]
+		for i, x := range l {
+			if x == w {
+				r.line[e] = append(l[:i:i], l[i+1:]...)
+				break
+			}
+		}
+		if len(r.line[e]) == 0 {
+			delete(r.line, e)
+		}
+		r.wakeLineLocked()
+		s.sayLineLocked(e)
+	}
+	var unheld func()
+	if held != nil {
+		r.mu.Unlock()
+		u, he := held()
+		r.mu.Lock()
+		if he != nil {
+			leave()
+			r.mu.Unlock()
+			return 0, nil, he
+		}
+		unheld = u
+	}
+	defer func() {
+		if unheld != nil {
+			unheld()
+		}
+	}()
+	for {
+		switch {
+		case r.gen != gen || r.run == nil:
+			r.mu.Unlock()
+			return 0, nil, cerr503Lost()
+		case r.line[e][0] == w && !hand(e):
+			release = take()
+			leave()
+			r.mu.Unlock()
+			return e, release, nil
+		case r.line[e][0] == w && r.busy[e] == 0:
+			// nothing the door sent there runs: erase, then label (never before the erase answered)
+			r.busy[e]++ // the erase is in flight on it
+			r.mu.Unlock()
+			ok := erase != nil && erase(e)
+			r.mu.Lock()
+			if r.gen != gen || r.run == nil {
+				r.mu.Unlock()
+				return 0, nil, cerr503Lost()
+			}
+			r.busy[e]--
+			if !ok {
+				if e < len(m.tags) {
+					m.tags[e] = SlotTag{Who: "?"} // anyone's: every next owner erases it first
+				}
+				leave()
+				r.mu.Unlock()
+				return 0, nil, cerr(502, "slot_not_cleared", "the slot this request was given holds another caller's prompt and the model server did not clear it: send again")
+			}
+			release = take()
+			leave()
+			r.mu.Unlock()
+			return e, release, nil
+		}
+		wake := r.lineWake
+		r.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			r.mu.Lock()
+			leave()
+			r.mu.Unlock()
+			return 0, nil, cerr(499, "client_gone", "the client went away while its request waited for its slot")
+		}
+		r.mu.Lock()
+	}
+}
+
+// sayLineLocked says how many requests wait for slot e now (the request happening, what
+// slot_wait). Caller holds r.mu; the hub takes no lock of ours.
+func (s *Supervisor) sayLineLocked(e int) {
+	s.say("request", "", map[string]any{"what": "slot_wait", "slot": e, "waiting": len(s.clients.line[e])})
+}
+
+// SlotsWaiting is how many requests wait in the engine for a slot's handover, all slots.
+func (s *Supervisor) SlotsWaiting() int {
+	r := &s.clients
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, l := range r.line {
+		n += len(l)
+	}
+	return n
+}
+
+// SlotsShownTo is what a caller may read of each slot in the model server's GET /slots: own(e)
+// true for a slot whose tag is the caller's own (its attachments' keys; the commons for a trusted
+// caller, who trust each other; its anon: tag for a remote caller with none), or one that holds
+// no one's prompt. While every slot holding a prompt has one owner, nothing is hidden. A slot's
+// prompt and generated text and its token counts are otherwise another's (docs/ENGINE.md §7g).
+func (s *Supervisor) SlotsShownTo(identity string, local bool) (own func(e int) bool) {
+	r := &s.clients
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m := r.run
+	if m == nil {
+		return func(int) bool { return true }
+	}
+	tags := append([]SlotTag{}, m.tags...)
+	trusted := trustedIdentity(identity, local)
+	mine := map[string]bool{"anon:" + identity: true}
+	if trusted {
+		mine[commonsWho] = true
+	}
+	for _, a := range r.list {
+		if a.identity == identity || (local && a.local) || (a.base && trusted) {
+			mine[a.key] = true
+		}
+	}
+	owners := map[SlotTag]bool{}
+	for _, t := range tags {
+		if t.Who != "" {
+			owners[t] = true
+		}
+	}
+	one := len(owners) <= 1 && !owners[SlotTag{Who: "?"}]
+	return func(e int) bool {
+		if one || e < 0 || e >= len(tags) {
+			return one
+		}
+		t := tags[e]
+		return t.Who == "" || mine[t.Who]
+	}
+}
+
+func cerr503Lost() *ClientError {
+	return cerr(503, "slot_lost", "the model server restarted while this request waited for its slot: send it again")
 }
 
 // ClientSamplers is an attachment's own sampler profiles (looked up before the base's and the

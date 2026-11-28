@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -114,12 +115,18 @@ func (a *API) gate(next http.Handler) http.Handler {
 		}
 		client, used, verdict := ClientLoopback, false, tokenNone
 		fwd := forwarded(r)
+		required := "bearer token required (easy-engine token prints it)"
+		if fwd && !a.AnyHost {
+			// a program of this machine refused for its header learns why
+			required = fmt.Sprintf("this request carries %s, so it is treated as coming from another machine and needs a token (easy-engine token prints it)", forwardHeader(r))
+		}
 		switch {
 		case !a.AnyHost && !fwd:
 		case !a.AnyHost && a.Tokens == nil && !keyless(r):
-			// forwarded to a loopback listener that has no token store: a token is required and
-			// none can be accepted
-			unauthorized(w, CodeTokenRequired, "bearer token required (easy-engine token prints it)")
+			// forwarded to a loopback listener with no token store: a token is required and none
+			// can be accepted. The app always gives its loopback listener the store (it reads the
+			// token file, app.go); an API made without one (an embedder, a test) reaches this.
+			unauthorized(w, CodeTokenRequired, required)
 			return
 		case a.Tokens != nil && setupPage(r):
 			// The page itself is a fixed file with nothing secret in it; the browser cannot send
@@ -145,7 +152,7 @@ func (a *API) gate(next http.Handler) http.Handler {
 				unauthorized(w, CodeTokenInvalid, "bearer token required (easy-engine token prints it)")
 				return
 			default:
-				unauthorized(w, CodeTokenRequired, "bearer token required (easy-engine token prints it)")
+				unauthorized(w, CodeTokenRequired, required)
 				return
 			}
 			if !pairedMay(id, r) {

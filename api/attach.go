@@ -31,18 +31,21 @@ const (
 // local, whatever its peer address (a header can only take privilege away, never give it).
 var forwardHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Via"}
 
-func forwarded(r *http.Request) bool {
+func forwarded(r *http.Request) bool { return forwardHeader(r) != "" }
+
+// forwardHeader is the first forwarding header r carries ("" none), for the words of a refusal.
+func forwardHeader(r *http.Request) string {
 	for _, k := range forwardHeaders {
 		if _, ok := r.Header[k]; ok {
-			return true
+			return k
 		}
 	}
 	for k := range r.Header {
 		if strings.HasPrefix(k, "Tailscale-") {
-			return true
+			return k
 		}
 	}
-	return false
+	return ""
 }
 
 // localCaller is a request from this machine: a loopback peer whose gate client is the loopback

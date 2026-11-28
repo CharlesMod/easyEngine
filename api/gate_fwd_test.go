@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -102,5 +103,18 @@ func TestForwardedOnLoopbackIsRemote(t *testing.T) {
 	}
 	if c, b, _ := do(t, "GET", loop.URL+"/", "", nil); c != 200 || !strings.Contains(b, "<html") {
 		t.Errorf("the setup page in a local browser: %d %.100s", c, b)
+	}
+}
+
+// F6: a program of this machine refused for a forwarding header is told which header and why.
+func TestForwardedRefusalNamesTheHeader(t *testing.T) {
+	_, s, _ := readyEnv(t)
+	loop := httptest.NewServer((&api.API{S: s, Tokens: tokens.Open(t.TempDir())}).Handler())
+	t.Cleanup(loop.Close)
+	for _, h := range []string{"X-Forwarded-For", "X-Real-IP", "Forwarded"} {
+		c, b, _ := do(t, "GET", loop.URL+"/v1/models", "", map[string]string{h: "10.1.2.3"})
+		if c != 401 || codeOf(b) != "token_required" || !strings.Contains(b, "carries "+http.CanonicalHeaderKey(h)+", so it is treated as coming from another machine") {
+			t.Errorf("%s: %d %s", h, c, b)
+		}
 	}
 }

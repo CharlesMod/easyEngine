@@ -44,6 +44,9 @@
 //	  loadgate   while present (a FIFO the test made), a start waits while loading until the test
 //	             writes to it and closes it: a start held in its loading window, by an event
 //	  erasefail  while present, slot erase answers 500 (nothing cleared)
+//	  erasegate  while present (a FIFO the test made), an erase reaches the server's queue only
+//	             once the test writes to it and closes it (an erase still on its way)
+//	  deferred.log  written: one line per task deferred on a busy slot ("erase|task <slot> <id_slot>")
 //	  savefail / restorefail  while present, slot save / restore answer 500 (nothing written)
 //	  bindfail   once (removed when taken): the next start fails to bind its port, as when another
 //	             process takes it between the engine's pick and the bind
@@ -62,11 +65,14 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -404,6 +410,7 @@ func main() {
 	}
 	c, _ := strconv.Atoi(vals["-c"])
 	slots = make([]slot, np)
+	sch := &sched{busy: make([]bool, np), ctl: os.Getenv("FAKELLAMA_CTL")}
 	slotSavePath = vals["--slot-save-path"]
 	ramOn = os.Getenv("FAKELLAMA_CACHE_RAM") != "" && vals["--cache-ram"] != "0" && vals["-cram"] != "0"
 	ctl := os.Getenv("FAKELLAMA_CTL")
@@ -568,13 +575,15 @@ func main() {
 		var s []map[string]any
 		slotMu.Lock()
 		for i := 0; i < np; i++ {
-			m := map[string]any{"id": i, "n_ctx": c / np, "speculative": false, "is_processing": busy && i == 0}
+			m := map[string]any{"id": i, "n_ctx": c / np, "speculative": false, "is_processing": (busy && i == 0) || sch.processing(i)}
 			if sl := slots[i]; sl.held {
 				m["id_task"] = sl.task
 				m["n_prompt_tokens"] = sl.tokens - sl.decoded
 				m["n_prompt_tokens_processed"] = 0
 				m["n_prompt_tokens_cache"] = 0
 				m["next_token"] = []map[string]any{{"has_next_token": false, "has_new_line": false, "n_remain": -1, "n_decoded": sl.decoded}}
+				m["params"] = map[string]any{"n_predict": -1}
+				m["prompt"], m["generated"] = sl.text, "ready" // as llama-server's to_json (server-context.cpp:860-863)
 			}
 			s = append(s, m)
 		}
@@ -591,7 +600,7 @@ func main() {
 				f.Close()
 			}
 		}
-		slotAction(w, r, np, c/np, ctl, exists)
+		slotAction(w, r, np, c/np, ctl, exists, sch)
 	})
 	mux.HandleFunc("/props", func(w http.ResponseWriter, r *http.Request) {
 		if !loading(w) {
@@ -627,6 +636,12 @@ func main() {
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
 		json.Unmarshal(raw, &body)
+		idSlot, target := slotOf(raw, np)
+		rel, ok := sch.run(r.Context(), idSlot, target, false)
+		if !ok {
+			return
+		}
+		defer rel()
 		cacheN, promptN, slot := account(raw, t, 5)
 		// FAKELLAMA_ID_SLOT: every reply says the slot it used, as llama-server's native replies do
 		withSlot := os.Getenv("FAKELLAMA_ID_SLOT") != ""
@@ -699,6 +714,12 @@ func main() {
 		defer finish(t)
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
+		idSlot, target := slotOf(raw, np)
+		rel, ok := sch.run(r.Context(), idSlot, target, false)
+		if !ok {
+			return
+		}
+		defer rel()
 		cacheN, promptN, slot := account(raw, t, 5)
 		reply := map[string]any{"content": "ready", "stop": true, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}}
 		if os.Getenv("FAKELLAMA_ID_SLOT") != "" {
@@ -821,9 +842,139 @@ func main() {
 	}
 }
 
+// sched is llama-server's task order on its slots, as far as the engine's handovers meet it
+// (b12651): a task whose slot is processing is deferred (server-context.cpp:3315 for an erase; a
+// completion naming a busy slot, id_slot set at :5343); when a slot releases, one deferred task is
+// taken back, the first whose id_slot is the released slot, else the oldest
+// (server-queue.cpp:90-112), and looked at again (deferred again if its slot is still busy). An
+// erase's task has id_slot -1 (server-task.h:174): only the oldest-first rule takes it. An erase
+// releases no slot, so it takes nothing back. A task whose client went away leaves the queue
+// (cleanup_pending_task).
+type sched struct {
+	ctl      string // <ctl>/deferred.log gets one line per task deferred
+	mu       sync.Mutex
+	busy     []bool
+	deferred []*schedTask
+}
+
+type schedTask struct {
+	idSlot, target int
+	erase          bool
+	ready          chan struct{} // closed when the task may run
+}
+
+// run waits until a task on target may run (a completion marks the slot processing; release
+// ends it). ok false: the client went away while it was deferred.
+func (s *sched) run(ctx context.Context, idSlot, target int, erase bool) (release func(), ok bool) {
+	s.mu.Lock()
+	if target < 0 || target >= len(s.busy) {
+		s.mu.Unlock()
+		return func() {}, true
+	}
+	t := &schedTask{idSlot: idSlot, target: target, erase: erase, ready: make(chan struct{})}
+	if !s.busy[target] {
+		s.startLocked(t)
+	} else {
+		s.deferred = append(s.deferred, t)
+		s.logDeferred(t)
+	}
+	s.mu.Unlock()
+	select {
+	case <-t.ready:
+	case <-ctx.Done():
+		s.mu.Lock()
+		select {
+		case <-t.ready: // it was started meanwhile: let its slot go
+			s.mu.Unlock()
+			if !erase {
+				s.release(target)
+			}
+		default:
+			for i, x := range s.deferred {
+				if x == t {
+					s.deferred = append(s.deferred[:i:i], s.deferred[i+1:]...)
+					break
+				}
+			}
+			s.mu.Unlock()
+		}
+		return nil, false
+	}
+	if erase {
+		return func() {}, true
+	}
+	var once sync.Once
+	return func() { once.Do(func() { s.release(target) }) }, true
+}
+
+func (s *sched) startLocked(t *schedTask) {
+	if !t.erase {
+		s.busy[t.target] = true
+	}
+	close(t.ready)
+}
+
+func (s *sched) release(slot int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.busy[slot] = false
+	if len(s.deferred) == 0 {
+		return
+	}
+	pick := 0
+	for i, t := range s.deferred {
+		if t.idSlot == slot {
+			pick = i
+			break
+		}
+	}
+	t := s.deferred[pick]
+	s.deferred = append(s.deferred[:pick:pick], s.deferred[pick+1:]...)
+	if s.busy[t.target] {
+		s.deferred = append(s.deferred, t) // looked at again: still busy, deferred again
+		return
+	}
+	s.startLocked(t)
+}
+
+// logDeferred writes "<erase|task> <target> <id_slot>" to <ctl>/deferred.log.
+func (s *sched) logDeferred(t *schedTask) {
+	if s.ctl == "" {
+		return
+	}
+	what := "task"
+	if t.erase {
+		what = "erase"
+	}
+	if f, err := os.OpenFile(filepath.Join(s.ctl, "deferred.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		fmt.Fprintf(f, "%s %d %d\n", what, t.target, t.idSlot)
+		f.Close()
+	}
+}
+
+// processing says whether slot i is processing now.
+func (s *sched) processing(i int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return i >= 0 && i < len(s.busy) && s.busy[i]
+}
+
+// slotOf is a completion body's id_slot (-1 none) and the slot the fake runs it on (0 for none).
+func slotOf(raw []byte, np int) (idSlot, target int) {
+	var b struct {
+		IDSlot *int `json:"id_slot"`
+	}
+	json.Unmarshal(raw, &b)
+	idSlot = -1
+	if b.IDSlot != nil && *b.IDSlot >= 0 && *b.IDSlot < np {
+		idSlot = *b.IDSlot
+	}
+	return idSlot, max(idSlot, 0)
+}
+
 // slotAction serves POST /slots/{id}?action=save|restore the way llama-server does with
 // --slot-save-path: the file is a header line and N*FAKELLAMA_SLOT_BYTES zero bytes.
-func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl string, exists func(string) bool) {
+func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl string, exists func(string) bool, sch *sched) {
 	w.Header().Set("Content-Type", "application/json")
 	fail := func(code int, msg, typ string) {
 		w.WriteHeader(code)
@@ -839,6 +990,16 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 		return
 	}
 	action := r.URL.Query().Get("action")
+	var form url.Values
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt == "application/x-www-form-urlencoded" {
+		// as cpp-httplib does: the body's form joins the parameters, and llama-server's
+		// get_params keeps the last value of a name (server-http.cpp:725)
+		b, _ := io.ReadAll(r.Body)
+		form, _ = url.ParseQuery(string(b))
+		if v := form["action"]; len(v) > 0 {
+			action = v[len(v)-1]
+		}
+	}
 	if action != "save" && action != "restore" && action != "erase" {
 		fail(400, "Invalid action", "invalid_request_error")
 		return
@@ -847,6 +1008,18 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 	if err != nil || id < 0 || id >= np {
 		fail(400, "Invalid slot ID", "invalid_request_error")
 		return
+	}
+	if action == "erase" {
+		if f, err := os.Open(filepath.Join(ctl, "erasegate")); ctl != "" && err == nil {
+			io.ReadAll(f) // a FIFO the test made: the erase reaches the server once the test writes
+			f.Close()
+		}
+		id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/slots/"))
+		if err == nil && id >= 0 && id < np {
+			if _, ok := sch.run(r.Context(), -1, id, true); !ok { // deferred while the slot processes
+				return
+			}
+		}
 	}
 	if action == "erase" && exists("erasefail") {
 		fail(500, "fake erase failure", "server_error")
@@ -872,6 +1045,9 @@ func slotAction(w http.ResponseWriter, r *http.Request, np, ctxPer int, ctl stri
 	raw, _ := io.ReadAll(r.Body)
 	json.Unmarshal(raw, &body)
 	name := body.Filename
+	if v := form["filename"]; len(v) > 0 {
+		name = v[len(v)-1]
+	}
 	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
 		fail(400, "Invalid filename", "invalid_request_error")
 		return

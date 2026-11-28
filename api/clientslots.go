@@ -140,9 +140,43 @@ func slotDigits(s string) (int, bool) {
 // (absent, null or -1: the least recently used free slot of the range, taken atomically), or the
 // slot of /slots/{n}?action=erase. It answers the client's number (cs, -1 for the commons), the
 // engine slot, the release of the slot's mark, and ok false after it has answered the client.
-// A slot that holds another owner's prompt is erased first (erase: the model server's
-// /slots/{n}?action=erase); one that cannot be is answered 502 and left marked as anyone's.
+// A slot that holds another owner's prompt is handed over by the engine (run.TakeSlotFor): the
+// request waits until nothing the door sent there runs, the slot is erased (erase: the model
+// server's /slots/{n}?action=erase), and only then labelled this caller's; one that cannot be
+// erased is answered 502 and left marked as anyone's.
 func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoor, erase func(es int) bool) (cs, es int, release func(), ok bool) {
+	var held func() (func(), *run.ClientError)
+	if !localCaller(r) {
+		// a request that waits for its slot counts among its client's held ones
+		held = func() (func(), *run.ClientError) {
+			who := remoteWho(r)
+			a.heldMu.Lock()
+			ok := a.held.take(who, 1, maxRemoteHeldPer, maxRemoteHeld)
+			a.heldMu.Unlock()
+			if !ok {
+				w.Header().Set("Connection", "close")
+				return nil, &run.ClientError{Status: 429, Code: "busy", Msg: fmt.Sprintf("too many requests from other machines are waiting (at most %d of one client, %d in all)", maxRemoteHeldPer, maxRemoteHeld)}
+			}
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					a.heldMu.Lock()
+					a.held.give(who, 1)
+					a.heldMu.Unlock()
+				})
+			}, nil
+		}
+	}
+	takeSlot := func(want int) (int, func(), bool) {
+		e, rel, ce := a.S.TakeSlotFor(r.Context(), door.Slots, want, door.Tag, erase, held)
+		if ce != nil {
+			if ce.Code != "client_gone" {
+				clientFail(w, ce)
+			}
+			return 0, nil, false
+		}
+		return e, rel, true
+	}
 	slots := door.Slots
 	cs = -1
 	toEngine := func(n int) (int, *run.ClientError) {
@@ -179,17 +213,36 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			badRequest(w, "a slot path is /slots/{n} with n in digits")
 			return 0, -1, nil, false
 		}
+		// the action is read from the URL's query alone and must be exactly erase (save and
+		// restore are refused before the door, proxy.go slotFiles): llama-server would also read
+		// a form-encoded body's action, the last one winning (cpp-httplib parses it into the
+		// parameters, server-http.cpp get_params), and a POST with none it answers 400 without
+		// clearing anything
+		if acts := r.URL.Query()["action"]; len(acts) != 1 || acts[0] != "erase" {
+			badRequest(w, "a slot action here is exactly one action=erase in the URL")
+			return 0, -1, nil, false
+		}
 		e, ce := toEngine(n)
 		if ce != nil {
 			clientFail(w, ce)
 			return 0, -1, nil, false
 		}
-		es, release, _, _ = a.S.TakeSlotAs(slots, e, door.Tag) // the client's own erase clears it
-		r.URL.Path, r.URL.RawPath = "/slots/"+strconv.Itoa(es), ""
+		es, release, ok := takeSlot(e) // another's prompt in it: erased and labelled this caller's first
+		if !ok {
+			return 0, -1, nil, false
+		}
+		// the request upstream is the engine's own: the path, action=erase, no body
+		r.URL.Path, r.URL.RawPath, r.URL.RawQuery = "/slots/"+strconv.Itoa(es), "", "action=erase"
+		r.Header.Del("Content-Type")
+		setBody(r, nil)
 		return clientOf(es), es, release, true
 	case pathSlot:
 	default:
 		return -1, -1, func() {}, true // touches no slot the door must name
+	}
+	if formBody(r) {
+		badRequest(w, "a request body here is JSON (Content-Type application/json): a form-encoded or multipart body is not read as the engine reads it")
+		return 0, -1, nil, false
 	}
 	obj, why := oneObject(bodyOf(r))
 	if why != "" {
@@ -232,12 +285,8 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			want = e
 		}
 	}
-	es, release, mustErase, unclean := a.S.TakeSlotAs(slots, want, door.Tag)
-	if mustErase && !erase(es) {
-		// the slot still holds another's prompt: never run there
-		unclean()
-		release()
-		clientFail(w, &run.ClientError{Status: 502, Code: "slot_not_cleared", Msg: "the slot this request was given holds another caller's prompt and the model server did not clear it: send again"})
+	es, release, ok = takeSlot(want)
+	if !ok {
 		return 0, -1, nil, false
 	}
 	obj["id_slot"] = json.RawMessage(strconv.Itoa(es))
@@ -249,6 +298,16 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	}
 	setBody(r, out)
 	return clientOf(es), es, release, true
+}
+
+// formBody: r's body is form-encoded or multipart. cpp-httplib parses a form-encoded body into
+// the request's parameters (httplib.cpp:9505-9516), which llama-server reads beside the query
+// (server-http.cpp get_params, the last value winning): a body the engine reads as JSON could
+// then say something else to the model server. Refused wherever the door reads the URL or a JSON
+// body (confined bodies, slot actions, resumable streams).
+func formBody(r *http.Request) bool {
+	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return mt == "application/x-www-form-urlencoded" || strings.HasPrefix(mt, "multipart/")
 }
 
 // marshalObject writes a body object back: every value as the client sent it (numbers, unicode

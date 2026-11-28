@@ -51,21 +51,19 @@ type API struct {
 	BodySilence time.Duration
 	// BodyTotal bounds the whole read of such a body (a second network timeout; default 5 min).
 	BodyTotal time.Duration
-	// remoteReads counts remote bodies being read now (clientslots.go readBody).
-	remoteReads atomic.Int32
 	// looks bounds the look calls (api/look.go).
 	looks lookGate
-	// keptSaid, when set (tests), is told each new count of remoteKept, in the order it changed.
+	// keptSaid, when set (tests), is told each new total of remote bytes kept, in the order it changed.
 	keptSaid atomic.Pointer[func(int64)]
-	// readsSaid, when set (tests), is told each new count of remoteReads: the event a test
-	// waits on, since the count itself says nothing to any hub.
+	// readsSaid, when set (tests), is told each new count of remote bodies being read: the event a
+	// test waits on, since the count itself says nothing to any hub.
 	readsSaid func(int32)
-	// remoteKept is the bytes of remote bodies read whose requests have not ended; heldBy and
-	// heldAll count remote requests held at the door, by client and in all (clientslots.go).
-	remoteKept atomic.Int64
-	heldMu     sync.Mutex
-	heldBy     map[string]int
-	heldAll    int
+	// heldMu guards the remote shares (clientslots.go): bodies being read, bytes of bodies kept
+	// until their requests end, requests held at the door; each per remote client and in all.
+	heldMu sync.Mutex
+	reads  share
+	kept   share
+	held   share
 
 	// Pair holds the pairing requests (pair.go). Nil: pairing is not offered (a loopback
 	// listener, or --open), hello says pairing false and POST pair answers 404.

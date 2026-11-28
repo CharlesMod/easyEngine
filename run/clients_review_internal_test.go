@@ -92,12 +92,13 @@ func TestDoorRules(t *testing.T) {
 	if d, _ := doorOf(s, DoorAsk{Identity: "client-3"}); d.Err != nil || d.Slots != nil {
 		t.Fatalf("free path: %+v", d)
 	}
-	// an unconfinable path: refused to a remote caller while another holds slots, a local one passes
-	if d, _ := doorOf(s, DoorAsk{Identity: "client-3", Touch: TouchUnconfinable}); d.Err == nil || d.Err.Code != "path_not_offered" || d.Err.Status != 403 {
-		t.Fatalf("unconfinable remote: %+v", d)
-	}
-	if d, _ := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchUnconfinable}); d.Err != nil || d.Slots != nil {
-		t.Fatalf("unconfinable local: %+v", d)
+	// an unconfinable path while attachments hold ranges: refused to every caller (the invariant:
+	// no caller is run unconfined), this machine's and the owner of a range alike
+	for _, q := range []DoorAsk{{Identity: "client-3"}, {Identity: "client-1"}, {Identity: "loopback", Local: true}, {Identity: "master@10.0.0.2"}} {
+		q.Touch = TouchUnconfinable
+		if d, _ := doorOf(s, q); d.Err == nil || d.Err.Code != "path_not_offered" || d.Err.Status != 403 {
+			t.Fatalf("unconfinable %+v: %+v", q, d)
+		}
 	}
 }
 
@@ -110,25 +111,40 @@ func TestDoorRulesWithNoBase(t *testing.T) {
 	if d, _ := doorOf(s, slot); d.Err != nil || d.Own || len(d.Slots) != 2 || d.Slots[0] != 2 {
 		t.Fatalf("unowned: %+v", d)
 	}
-	// 5. every slot owned: a remote caller must attach, a local one passes as before
+	// 5. every slot owned: a remote caller must attach, a local one is held while the engine
+	// reshapes to give the commons a range
 	s.addAtt("B", "client-2", false, 2, 2, 3)
 	if d, _ := doorOf(s, slot); d.Err == nil || d.Err.Code != "attach_required" || d.Err.Status != 409 {
 		t.Fatalf("all owned, remote: %+v", d)
 	}
-	if d, _ := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchSlot}); d.Err != nil || d.Slots != nil {
-		t.Fatalf("all owned, local: %+v", d)
+	if d, p := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchSlot}); d.Err != nil || d.Slots != nil || !p || !s.clients.commons {
+		t.Fatalf("all owned, local: %+v pending %v", d, p)
 	}
 }
 
-func TestDoorUntouchedWithNoClientHoldingSlots(t *testing.T) {
-	// the base alone holds slots: anonymous requests are not confined, a remote's unconfinable passes
+func TestDoorWithOnlyTheCommons(t *testing.T) {
+	// the base alone holds slots (0..2), P holds none: a trusted caller is not confined; a remote
+	// one is confined to the commons under its own tag, and refused what cannot be confined
 	s := regSup(true)
 	s.setMap(3, 0, 1, 2)
 	s.addAtt("P", "client-1", false, 0) // holds no slots
-	for _, q := range []DoorAsk{{Identity: "client-2", Touch: TouchSlot}, {Identity: "client-2", Touch: TouchUnconfinable}, {Identity: "loopback", Local: true, Touch: TouchSlot}} {
-		if d, _ := doorOf(s, q); d.Err != nil || d.Slots != nil {
-			t.Fatalf("%+v: %+v", q, d)
-		}
+	if d, p := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchSlot}); d.Err != nil || d.Slots != nil || p {
+		t.Fatalf("local: %+v", d)
+	}
+	if d, p := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchUnconfinable}); d.Err != nil || p {
+		t.Fatalf("local unconfinable: %+v", d)
+	}
+	d, _ := doorOf(s, DoorAsk{Identity: "client-2", Touch: TouchSlot})
+	if d.Err != nil || len(d.Slots) != 3 || d.Own || d.Tag != (SlotTag{Who: "anon:client-2"}) {
+		t.Fatalf("remote: %+v", d)
+	}
+	if d, _ := doorOf(s, DoorAsk{Identity: "client-2", Touch: TouchUnconfinable}); d.Err == nil || d.Err.Code != "path_not_offered" {
+		t.Fatalf("remote unconfinable: %+v", d)
+	}
+	// with the RAM prompt cache on, an untrusted caller is never served in the commons
+	s.clients.run.ramCache = true
+	if d, _ := doorOf(s, DoorAsk{Identity: "client-2", Touch: TouchSlot}); d.Err == nil || d.Err.Code != "attach_required" {
+		t.Fatalf("remote, RAM cache on: %+v", d)
 	}
 }
 

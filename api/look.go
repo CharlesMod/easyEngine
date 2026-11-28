@@ -427,7 +427,7 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 	decoding = false
 	// the hand-over: the built request is counted, then the body's count is given back; the
 	// proxy reads no body for a look (it is held already) and counts nothing more
-	keepBuilt, ok := a.keepRemote(w, len(built), local)
+	keepBuilt, ok := a.keepRemote(w, remoteWho(r), len(built), local)
 	if !ok {
 		return
 	}

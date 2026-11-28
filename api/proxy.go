@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -251,7 +253,24 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if door.Slots != nil { // confined (run.ClientDoor): one slot of its range, no other
-			cs, es, release, ok := a.confine(w, r, door)
+			// a slot that holds another owner's prompt is erased before the request runs there
+			// (llama-server clears its tokens and KV, server-context.cpp:3307-3332, :393-399)
+			erase := func(es int) bool {
+				u := *target
+				u.Path, u.RawPath, u.RawQuery = "/slots/"+strconv.Itoa(es), "", "action=erase"
+				req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, u.String(), nil)
+				if err != nil {
+					return false
+				}
+				resp, err := transport.RoundTrip(req)
+				if err != nil {
+					return false
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				return resp.StatusCode == http.StatusOK
+			}
+			cs, es, release, ok := a.confine(w, r, door, erase)
 			if !ok {
 				return
 			}
@@ -294,6 +313,11 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 
 // touchOf is what a proxied request does with slots, from the path table (paths.go).
 func touchOf(r *http.Request) run.Touch {
+	if streamPath(r.URL.Path) {
+		// a resumable stream's replay, cancel or lookup runs nothing in a slot, and its ids are
+		// in the caller's own name space (convid.go); a remote caller is refused them above
+		return run.TouchNone
+	}
 	switch classify(r.Method, r.URL.Path) {
 	case pathFree:
 		return run.TouchNone

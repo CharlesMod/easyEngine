@@ -129,7 +129,7 @@ one budget), never counted against a local caller's. None stating any: the profi
 - **The running mind's slot map changes only at a start.** Each attachment gets a range (each its
   want when all fit, else its min slots, then the rest in order). One that leaves is said gone and
   counts for nothing in the next merge, but its range stays, **vacant**, until the next start;
-  nothing is erased in the server. An attach of the same key with the same count takes it back
+  each of its slots is erased in the server only when another owner's request first uses it. An attach of the same key with the same count takes it back
   (`resumed`, the cache in it); an attach of a key that stands replaces its presence
   (`replaced`, the old held stream ends `{"end":"replaced"}`); otherwise vacant slots serve a new
   attachment when they suffice, the running ctx is at least its floor and its options change
@@ -147,25 +147,33 @@ one budget), never counted against a local caller's. None stating any: the profi
   from down is never charged (an attach, return or change while no server runs is folded into the
   next start), and a linger unload, a sleep asked from this machine, the person's stop or a yield
   makes every budget whole again (never a stop a remote client could cause). A return while the
-  model runs is free only when served from its own standing range. A remote attach is never served from another
-  client's vacant range, nor a remote caller with no attachment sent to one. Nothing is held
+  model runs is free only when served from its own standing range. A vacant range is never the
+  commons; another client given it is served after each slot's erase. One restart charges an
+  identity once; a change of wants made while a start loads is charged as a late attach is; a start
+  whose port another process took is started again at once on a new port (the same restart, no
+  failure counted: the launch's exit is the event). Nothing is held
   without an event that ends the hold: a client with nothing coming is answered 503 at once.
 - **Slots belong to clients.** The engine decides whose every slot-touching request is: the
   attachment it names (of the caller's own identity), else a remote caller's one attachment with
-  slots, else the commons (the base's range, or the slots nobody owns), else 409 `attach_required`
-  for a remote caller (a local one passes). Local callers trust each other; an `--open` remote
+  slots, else the commons (the base's range, or the slots nobody owns), else, for a local caller,
+  held while the engine reshapes to give the commons a range, and for a remote one 409
+  `attach_required`. The invariant: a request runs only in its own range (its attachment's or the
+  commons); while the map holds any attachment's range no caller is run unconfined; a slot changes
+  owner only by a restart or an erase the door sends and waits for before the request (each slot
+  tagged with whose prompt it holds). The RAM prompt cache is on only with no listener but loopback
+  and one owner. Local callers and the master key trust each other; an `--open` remote
   caller is held to the paired allow list; the master key from another machine is unrestricted.
   `n`/`n_cmpl` other than absent, null or the literal 1 in a confined body is 400 `n_not_offered`
   (llama-server would take free slots for the children; it casts the value to int32), and a
   top-level key given twice is 400. A request's slot work is read from llama-server's own
-  routes; a path that cannot be held to one range is refused to a remote caller while another
-  client holds slots. A confined body that is not exactly one JSON object is refused (fail
+  routes; a path that cannot be held to one range is refused to every caller while an attachment
+  holds a range, and always to an untrusted one. `extra_params` in a `/v1/messages` body is 400. A confined body that is not exactly one JSON object is refused (fail
   closed). `id_slot` in its own numbering is mapped to its engine slot, the reply's mapped back;
   absent or -1 takes its least recently used free slot (pick and mark one step). Bodies are read
-  before the door (only the JSON POSTs the door looks at; 64 MiB local, 16 MiB and 8 at once
-  remote), each read under a network timeout on silence and a total bound; at most 64 MiB of
-  remote bodies kept until their requests end, 8 requests of one remote client and 32 of all held
-  at the door (429 `busy`). Conversation ids of resumable
+  before the door (only the JSON POSTs the door looks at; 64 MiB local, 16 MiB remote), each read
+  under a network timeout on silence and a total bound. Each remote client has its own share: 2
+  bodies read at once (8 in all), 32 MiB kept until their requests end (128 MiB in all), 8 requests
+  held at the door (32 in all): 429 `busy` past any; 256 MiB of remote bodies at most. Conversation ids of resumable
   streams carry their owner (a remote caller with no attachment its own, never the commons; an
   id's `::<model>` tail kept). Saved contexts are keyed by the
   attachment's key and its own slot number, and laid back into the slot that key has after a

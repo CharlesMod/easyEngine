@@ -392,7 +392,7 @@ func TestClientUnknownAttachmentAndAnonymous(t *testing.T) {
 	}
 }
 
-func TestClientAnonymousPassesThroughWithNoBase(t *testing.T) {
+func TestClientAnonymousConfinedToTheCommonsWithNoBase(t *testing.T) {
 	e, s, srv := clientsEnv(t, false, nil)
 	n0 := len(e.Starts())
 	b := openHold(t, srv, `{"hold":true,"name":"b","profile":{"slots":4,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
@@ -401,15 +401,19 @@ func TestClientAnonymousPassesThroughWithNoBase(t *testing.T) {
 	}
 	b.untilGiven(4)
 	testkit.WaitFor(t, 15*time.Second, "the start for b", func() bool { return len(e.Starts()) > n0 && s.Phase() == "ready" })
+	// with no base the commons is the slots no attachment holds (b: 0..3): an anonymous caller,
+	// even of this machine, never runs in b's
+	before := upstreamBytes(t, e)
 	c, body, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"id_slot":3,"messages":[{"role":"user","content":"anon"}]}`, jsonCT)
-	if c != 200 {
+	if c != 400 || codeOf(body) != "slot_not_offered" || upstreamBytes(t, e) != before {
 		t.Fatalf("anonymous id_slot 3 with no base: %d %s", c, body)
 	}
+	c, body, _ = do(t, "POST", srv.URL+"/v1/chat/completions", `{"id_slot":4,"messages":[{"role":"user","content":"anon"}]}`, jsonCT)
 	var up, rep map[string]any
 	json.Unmarshal([]byte(upstreamBytes(t, e)), &up)
 	json.Unmarshal([]byte(body), &rep)
-	if up["id_slot"] != float64(3) || rep["id_slot"] != float64(3) {
-		t.Fatalf("passed through changed: upstream %v reply %v", up["id_slot"], rep["id_slot"])
+	if c != 200 || up["id_slot"] != float64(4) || rep["id_slot"] != float64(4) {
+		t.Fatalf("anonymous id_slot 4: %d %s, upstream %v", c, body, up["id_slot"])
 	}
 }
 

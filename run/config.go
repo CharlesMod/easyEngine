@@ -183,11 +183,14 @@ type Config struct {
 	CmdTimeout  time.Duration // default 5 min for uv commands
 	SwapDrain   time.Duration // default 2 min: named moment, longest wait for requests in flight before a model swap
 	// Crash recovery (run/recover.go).
-	CrashQuick  time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
-	CrashSteps  int           // default 2: quick crashes in a row at one shape before one step down
-	DrainMax    time.Duration // default 2 min: named moment, longest wait for replies before a shrink that cannot wait for idle
-	DrainMinMiB int           // default 256: a held shortfall this large shrinks without waiting for idle
-	OOMHold     time.Duration // default 60s: named moment; out-of-memory lines in two requests this close are a shrink signal
+	CrashQuick time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
+	CrashSteps int           // default 2: quick crashes in a row at one shape before one step down
+	// RemoteListener: the engine listens where other machines can reach it (a non-loopback
+	// host): llama-server's RAM prompt cache, which any slot may load from, is then never on.
+	RemoteListener bool
+	DrainMax       time.Duration // default 2 min: named moment, longest wait for replies before a shrink that cannot wait for idle
+	DrainMinMiB    int           // default 256: a held shortfall this large shrinks without waiting for idle
+	OOMHold        time.Duration // default 60s: named moment; out-of-memory lines in two requests this close are a shrink signal
 	// The prompt cache across a reshape (run/context.go). SlotTimeout is the network timeout on
 	// one slot save or restore call (default 2 min: a large file). YieldSaveMaxMiB is the most a
 	// yield saves with keep_context "on" (default 2048, about 2 s at the speed measured on a

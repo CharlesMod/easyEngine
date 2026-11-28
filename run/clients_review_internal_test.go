@@ -279,20 +279,6 @@ func TestLastClientLeavingReshapesToTheBase(t *testing.T) {
 	}
 }
 
-func TestEachHoldItsOwnNotify(t *testing.T) {
-	s := regSup(false)
-	a := s.addAtt("H", "client-1", false, 0)
-	first := a.notify
-	r := &s.clients
-	// what AttachClient does for a hold
-	a.holdGen++
-	a.notify = make(chan struct{}, 1)
-	if a.notify == first {
-		t.Fatal("same channel")
-	}
-	_ = r
-}
-
 func TestFlagSpellings(t *testing.T) {
 	for in, want := range map[string]string{"--Ctx_Size": "--ctx-size", "--lookup_cache_dynamic": "--lookup-cache-dynamic", "-lcd": "-lcd", "-C": "-C"} {
 		if got := normFlag(in); got != want {

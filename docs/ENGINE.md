@@ -1061,7 +1061,15 @@ order:
    before; `code` is a new field. The keyless paths of §7f (hello, and the client's side of
    pairing) are the exception: they need no token and never answer 401.
 
-A loopback listener never asks for a token. The proxy drops every `Access-Control-*` header the
+A loopback listener never asks for a token from this machine's own callers. **A request on the
+loopback listener that carries a forwarding header** (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`
+and the rest listed in §7g) is another machine's, passed on by something on this machine: it is
+remote everywhere and needs a token as on a non-loopback listener (none: 401 `token_required`; a
+paired token: scoped as a paired token is, with the reduced status; the master key: everything,
+as `master@<ip>`), and it is never the identity `loopback`. **A reverse proxy in front of the
+loopback listener must pass a token** (the master key, or a paired one per client). The engine
+reads the token file for this and never makes one on loopback; with no file, such a request is
+401. A plain loopback request, and the setup page in a local browser, are unchanged. The proxy drops every `Access-Control-*` header the
 upstream sent, so a model server cannot grant a web page access, and it never passes the
 client's `Authorization` header to the local llama-server.
 
@@ -1681,7 +1689,8 @@ the first NDJSON line):
   server stop and start (other callers lose their caches and their time), not ordinary use.
   Every restart of a running model server is one of: a local caller's want (its attach, change,
   leave or under-served request), the engine's own reasons (a load, the person's change, a yield,
-  memory, a crash), or a remote identity's attach or change of wants or options, charged to it: 4
+  memory, a crash), or a remote identity's attach or change of wants or options, charged to it
+  (one restart costs an identity one, however many of its attachments asked for it): 4
   per **waking period** (`restarts_left` in its answer and held lines; every `--open` address
   shares one). **A start from down is never charged**: with no model server running (never
   started, unloaded by the linger, asleep, stopped, yielded), an attach, a return or a change of
@@ -1696,7 +1705,10 @@ the first NDJSON line):
   stop. Within one waking period, restarts of a running server caused by remote clients alone never
   exceed what they were charged. An attachment that comes while a start is loading is folded in by
   a grow once the model is up, and that grow is charged (else each start's loading window would let
-  one more uncharged restart in). The master key from another machine is not budgeted.
+  one more uncharged restart in); so is a change of wants or options an attachment makes while a
+  start is loading (the merge was taken before it). A start whose port another process took
+  before llama-server bound it is started again at once on a new port: the same restart, charged
+  once, no failure counted. The master key from another machine is not budgeted.
   With the budget
   spent a change is not made (`why: restart_budget_spent`): the attachment keeps what it has, or,
   with nothing, its requests get 503 `no_room` until a start that comes for another reason.
@@ -1751,14 +1763,23 @@ the first NDJSON line):
   8192 MiB, common/common.h:664) saved from every slot and loads the best match into whichever
   slot asks (server-slot-sched.cpp:167-206): one client's state could be loaded into another's
   slot, and cached-token counts would tell a client whether its prompt shares a prefix with
-  someone else's. At each start the engine passes `--cache-ram 0` when the slot map has more than
-  one owner (the base and one attachment are two; the commons count as one) and leaves the
-  server's default with exactly one. While it is on, a new owner is never served from vacant
-  slots: it needs a restart (the grow path), except a return under the same key. `wants.ram_cache`
-  says whether it is on. (Its 8 GiB of host RAM is not counted by the sizing.)
+  someone else's; an erase does not clear it (server-context.cpp:393-399 clears the slot only). The
+  rule: **the RAM prompt cache is on only when the engine has no listener but loopback and the slot
+  map has exactly one owner** (the base and one attachment are two; the commons count as one).
+  Otherwise each start passes `--cache-ram 0`: `serve --host` and `--open` never run it
+  (`run.Config.RemoteListener`), so a remote caller never reads a cache hit on a prompt that was
+  not its own. While it is on, a new owner is never served from vacant slots (it needs a restart,
+  the grow path, which turns it off), except a return under the same key, and an untrusted caller
+  (one forwarded to the loopback listener) is never served in the commons (409
+  `attach_required`). `wants.ram_cache` says whether it is on. (Its 8 GiB of host RAM is not
+  counted by the sizing.)
 - **Agent.** One: the base profile's (as before), else the first attachment in order that brings
   one; it runs while that attachment stands. Remote clients bring none.
-- **Model.** The person's selection; `models` is advice in the answer, never a swap.
+- **Model.** The person's selection; `models` is advice in the answer, never a swap. An attachment
+  that requires `model` (`server.required`) is judged against the model that serves at every
+  start, not only at its attach: a later start that serves another (a step down a tier, §5) leaves
+  it unserved ("the model that serves (camp) is not one it can use"; its requests 503 `no_room`),
+  and a start back on a model it can use serves it again.
 - **Catalog overlay** (local callers and the `--profile` file only): `"catalog": {"models": [...]}`,
   up to 16 entries of the catalog's own model shape (`id`, `name`, `file`, `url`, `sha256`,
   `size`, and optionally `footprint`, `sampler`, ...). Each is checked by the catalog's rules (a
@@ -1784,25 +1805,47 @@ whom every request that touches a slot belongs to.
    the base has one. The base's range is **the commons**: callers that hold nothing share it, in
    the engine's own slot numbers; a slot outside it is 400 `slot_not_offered`.
 4. No base: the slots no attachment owns, if the running model has any (the commons again).
-5. Every slot owned: a local caller passes as before (no mapping); a remote one gets 409
-   `attach_required`.
+5. No commons (every slot is an attachment's, standing or vacant): a caller of this machine is
+   held while the engine reshapes to give the commons a range (a local grow: drained, never
+   charged), then served there; if the card has no room for it beside the attached clients it is
+   503 `no_room`. A remote caller gets 409 `attach_required`: "this caller has no slots of its own
+   in the running model: attach to be given slots" (also after the one client it was detached).
 
-While no attachment besides the base holds slots, nothing is confined: everything is exactly as
-before clients. What a request does with slots comes from llama-server's own routes (b12651, read
+**The invariant.** A request runs only in slots of its own range: its attachment's, or the
+commons. While the slot map holds any attachment's range, standing or vacant, no caller, local or
+remote, is run unconfined, and no slot serves two owners in turn while it still holds the other's
+prompt. Each slot carries whose prompt it holds (its tag: an attachment's key; `commons` for this
+machine and the master key, which trust each other; `anon:<identity>` for a remote caller in the
+commons). A slot changes owner only in two ways: the server restarted in between (a new process:
+nothing held but what the lay-back puts back into its owner's slot), or the slot is erased
+first: the door picks the slot (one already holding the caller's own prompt first, then one that
+needs no erase, then the least recently used) and, when it holds another's, sends `POST
+/slots/{n}?action=erase` and waits for its answer before the request goes (llama-server: the
+erase waits while the slot is processing, server-context.cpp:3307-3332; it clears the slot's
+tokens and its memory, :393-399, and needs `--slot-save-path`, :5834-5837, which the engine
+always passes). An erase that fails is 502 `slot_not_cleared`, and the slot is taken to hold
+anyone's (every next owner erases it). So a remote client may be given another's vacant range
+without a restart: each slot is erased on its first use.
+
+Nothing is confined only while the map holds no attachment's range and no untrusted caller's
+prompt, and then only for a trusted caller: exactly as before clients. A remote caller with no
+attachment is always confined to the commons under its own tag. What a request does with slots comes from llama-server's own routes (b12651, read
 from its source; `api/paths.go`):
 
 | Paths | Slot | At the door |
 |---|---|---|
-| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` other than absent, `null` or the literal `1` is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329; the server casts the value to int32, so `-4294967294` would be 2) |
+| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` other than absent, `null` or the literal `1` is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329; the server casts the value to int32, so `-4294967294` would be 2); `extra_params` in a `/v1/messages` body is 400 `extra_params_not_offered` (llama-server unpacks it over the converted body, server-chat.cpp:680-685, so past the door's `id_slot` and `n`) |
 | `POST /slots/{n}?action=erase` | one, by the path | confined; save and restore refused (403) |
 | `/embedding(s)`, `/v1/embeddings`, `/rerank(ing)`, `/v1/rerank(ing)`, `/tts`, `/(v1/)audio/speech`, `/(v1/)audio/transcriptions` (multipart), `GET /v1/realtime`, `/v1/systemone` | one the server picks | not confinable |
 | `/responses`, `/v1/responses` | one the server picks (its conversion drops `id_slot`, server-chat.cpp:32) | not confinable |
 | `/v1/chat/completions/control`, `POST /lora-adapters`, `POST /props`, `/predict`, any POST not in this table | another request, every slot, or unknown | not confinable |
-| `GET`/`DELETE /v1/stream`, `POST /v1/streams/lookup` | another request's stream | conversation ids owned (below); refused to every remote caller (403) |
+| `GET`/`DELETE /v1/stream`, `POST /v1/streams/lookup` | none: another request's stream | conversation ids owned (below); refused to every remote caller (403) |
 | `/tokenize`, `/detokenize`, `/apply-template`, the `input_tokens`/`count_tokens` paths, every `GET` (`/health`, `/metrics`, `/props`, `/models`, `/slots`, ...) | none | passed |
 
-A path that cannot be confined is refused to a remote caller while another client holds slots
-(403 `path_not_offered`) and passed for a local one. (A paired token reaches only the completion,
+A path that cannot be confined is refused to every caller while the map holds an attachment's
+range or an untrusted caller's prompt (403 `path_not_offered`): the server picks its slot, which
+the door can neither keep to a range nor erase first. Otherwise it is passed for a trusted caller
+(this machine, the master key) and refused to any other: its slot may hold another's prompt. (A paired token reaches only the completion,
 tokenize and model paths at all: the gate's scope, `api/scope.go`; an `--open` caller from
 another machine the same. The table holds for the master key from another machine, which the gate
 does not scope.)
@@ -1825,11 +1868,17 @@ each read bounded by a network timeout on silence (30 s, `API.BodySilence`) and 
 a second one (5 min, `API.BodyTotal`; 400 `body_unread`).
 
 **What the engine keeps for other machines is bounded**, whatever they send and however long they
-are held (`api/clientslots.go`): at most 8 remote bodies being read at once, each at most 16 MiB;
-at most 64 MiB of remote bodies read whose requests have not ended (held at the door or in
-flight); so at most 192 MiB of remote bodies in all. At most 8 requests of one remote client
-(every `--open` address counts as one) and 32 of all remote clients are held at the door at once.
-Over any of these: 429 `busy`. Every other body (multipart uploads, GETs, the unconfinable paths) streams
+are held (`api/clientslots.go`), and each remote client (a token's identity; every `--open`
+address counts as one) has its own share, so one client cannot take the others' room:
+
+| | one remote client | all remote clients |
+|---|---|---|
+| bodies being read at once (each at most 16 MiB) | 2 | 8 |
+| bodies read whose requests have not ended (held at the door or in flight) | 32 MiB | 128 MiB |
+| requests held at the door | 8 | 32 |
+
+So at most 8 x 16 + 128 = 256 MiB of remote bodies in all. Over any of these: 429 `busy`, saying
+which (for example "32 MiB of one client", "128 MiB in all"). Every other body (multipart uploads, GETs, the unconfinable paths) streams
 through as it comes, as before.
 
 **Conversation ids.** llama-server's resumable streams key a session by the `X-Conversation-Id`
@@ -1847,10 +1896,10 @@ replays, cancels or finds only its own. A remote caller is refused the stream pa
 method.
 
 **A departed client's prompts.** A vacant range still carries the prompts of the client that held
-it (the slot's own cache; with the RAM prompt cache on, any slot may load them). A remote caller
-with no attachment is never sent to such a slot (rules 3-4 skip it), and while the RAM prompt cache
-is on and such a range stands it is 409 `attach_required`; a remote attach is never served from
-another client's vacant range. Callers of this machine trust each other and are served as before.
+it. It is never the commons (rules 3-4 skip it); another client given it is served only after each
+slot's erase (the invariant), and with the RAM prompt cache on, only its own return is served from
+it without a restart. Callers of this machine and the master key trust each other: no erase
+between them.
 
 A context saved from a client's slot goes back into that client's slot of the same number after a
 reshape; one saved from a slot no client owned goes back only into the same number when no client

@@ -140,7 +140,9 @@ func slotDigits(s string) (int, bool) {
 // (absent, null or -1: the least recently used free slot of the range, taken atomically), or the
 // slot of /slots/{n}?action=erase. It answers the client's number (cs, -1 for the commons), the
 // engine slot, the release of the slot's mark, and ok false after it has answered the client.
-func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoor) (cs, es int, release func(), ok bool) {
+// A slot that holds another owner's prompt is erased first (erase: the model server's
+// /slots/{n}?action=erase); one that cannot be is answered 502 and left marked as anyone's.
+func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoor, erase func(es int) bool) (cs, es int, release func(), ok bool) {
 	slots := door.Slots
 	cs = -1
 	toEngine := func(n int) (int, *run.ClientError) {
@@ -182,7 +184,7 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			clientFail(w, ce)
 			return 0, -1, nil, false
 		}
-		es, release = a.S.TakeSlot(slots, e)
+		es, release, _, _ = a.S.TakeSlotAs(slots, e, door.Tag) // the client's own erase clears it
 		r.URL.Path, r.URL.RawPath = "/slots/"+strconv.Itoa(es), ""
 		return clientOf(es), es, release, true
 	case pathSlot:
@@ -204,6 +206,16 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			return 0, -1, nil, false
 		}
 	}
+	// /v1/messages unpacks extra_params over the converted body after the conversion
+	// (server-chat.cpp:680-685): an id_slot or n_cmpl in it would take the engine's place. The
+	// door judges only the top level, so a confined messages body may not carry it. (Chat does not
+	// unpack it, server-common.cpp:1703-1708 copies it as one opaque key; /v1/responses does, and
+	// is not confinable.)
+	if _, has := obj["extra_params"]; has && path.Clean("/"+r.URL.Path) == "/v1/messages" {
+		clientFail(w, &run.ClientError{Status: 400, Code: "extra_params_not_offered",
+			Msg: "extra_params is unpacked over the request by the model server, past the engine's slot: send those parameters at the top level"})
+		return 0, -1, nil, false
+	}
 	want := -1
 	if raw, has := obj["id_slot"]; has && string(bytes.TrimSpace(raw)) != "null" {
 		n, isInt := slotInt(raw)
@@ -220,7 +232,14 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 			want = e
 		}
 	}
-	es, release = a.S.TakeSlot(slots, want)
+	es, release, mustErase, unclean := a.S.TakeSlotAs(slots, want, door.Tag)
+	if mustErase && !erase(es) {
+		// the slot still holds another's prompt: never run there
+		unclean()
+		release()
+		clientFail(w, &run.ClientError{Status: 502, Code: "slot_not_cleared", Msg: "the slot this request was given holds another caller's prompt and the model server did not clear it: send again"})
+		return 0, -1, nil, false
+	}
 	obj["id_slot"] = json.RawMessage(strconv.Itoa(es))
 	out, err := marshalObject(obj)
 	if err != nil {
@@ -300,17 +319,21 @@ func (a *API) bodyTotal() time.Duration {
 }
 
 // What the engine keeps for callers on other machines is bounded whatever they send and however
-// long they are held (docs/ENGINE.md §7g): at most maxRemoteReads bodies being read, each at most
-// maxRemoteBody, and at most maxRemoteKept bytes of bodies read and not yet ended (held at the
-// door or in flight), so at most 8 x 16 + 64 = 192 MiB; at most maxRemoteHeldPer requests of one
-// remote client (every --open address one) and maxRemoteHeld of all held at the door at once.
-// Over any of them: 429 busy.
+// long they are held, and shared so that one remote client alone can never make another get busy
+// (docs/ENGINE.md §7g). Each remote client (every --open address is one) has its own share:
+// maxRemoteReadsPer bodies being read, maxRemoteKeptPer bytes of bodies read whose requests have
+// not ended (held at the door or in flight), maxRemoteHeldPer requests held at the door; and all of
+// them together at most maxRemoteReads, maxRemoteKept and maxRemoteHeld, each a whole multiple of
+// a share. So at most 8 x 16 + 128 = 256 MiB of remote bodies in all. Over any: 429 busy. Local
+// callers are not counted.
 const (
-	maxRemoteBody    = 16 << 20 // a remote caller's buffered body
-	maxRemoteReads   = 8        // remote bodies being read at once (a count: the 9th is 429 busy)
-	maxRemoteKept    = 64 << 20 // bytes of remote bodies read whose requests have not ended
-	maxRemoteHeldPer = 8        // one remote client's requests held at the door at once
-	maxRemoteHeld    = 32       // all remote requests held at the door at once
+	maxRemoteBody     = 16 << 20  // a remote caller's buffered body
+	maxRemoteReadsPer = 2         // one remote client's bodies being read at once
+	maxRemoteReads    = 8         // all remote bodies being read at once
+	maxRemoteKeptPer  = 32 << 20  // bytes of one remote client's bodies read, until their requests end
+	maxRemoteKept     = 128 << 20 // the same, all remote clients together
+	maxRemoteHeldPer  = 8         // one remote client's requests held at the door at once
+	maxRemoteHeld     = 32        // all remote requests held at the door at once
 )
 
 // busy is the 429 every remote bound answers.
@@ -319,35 +342,66 @@ func busy(w http.ResponseWriter, msg string) {
 	clientFail(w, &run.ClientError{Status: 429, Code: "busy", Msg: msg})
 }
 
-// holdRemote counts a remote request held at the door against its client's share and the remote
-// total; false (answered 429 busy) over either. The result ends the count.
-func (a *API) holdRemote(w http.ResponseWriter, r *http.Request) (func(), bool) {
+// remoteWho is whose share a remote request counts in: its identity, every --open address one.
+func remoteWho(r *http.Request) string {
 	who := identity(r)
 	if strings.HasPrefix(who, "open@") {
 		who = "open" // every --open address is one client (one budget, one share)
 	}
-	a.heldMu.Lock()
-	defer a.heldMu.Unlock()
-	if a.heldBy == nil {
-		a.heldBy = map[string]int{}
+	return who
+}
+
+// share is one bound kept per remote client and in all, under API.heldMu.
+type share struct {
+	by  map[string]int64
+	all int64
+}
+
+// take counts n against who's share (at most per) and the total (at most max); false over either.
+func (sh *share) take(who string, n, per, max int64) bool {
+	if sh.by == nil {
+		sh.by = map[string]int64{}
 	}
-	if a.heldBy[who] >= maxRemoteHeldPer || a.heldAll >= maxRemoteHeld {
-		busy(w, fmt.Sprintf("too many requests from other machines are waiting (at most %d of one client, %d in all)", maxRemoteHeldPer, maxRemoteHeld))
+	if sh.by[who]+n > per || sh.all+n > max {
+		return false
+	}
+	sh.by[who] += n
+	sh.all += n
+	return true
+}
+
+func (sh *share) give(who string, n int64) {
+	if sh.by[who] -= n; sh.by[who] <= 0 {
+		delete(sh.by, who)
+	}
+	sh.all -= n
+}
+
+// countRemote counts n against who's share of sh; the result gives it back (once). False (and
+// answered 429 busy with msg) over the share or the total.
+func (a *API) countRemote(w http.ResponseWriter, sh *share, who string, n, per, max int64, msg string) (func(), bool) {
+	a.heldMu.Lock()
+	ok := sh.take(who, n, per, max)
+	a.heldMu.Unlock()
+	if !ok {
+		busy(w, msg)
 		return nil, false
 	}
-	a.heldBy[who]++
-	a.heldAll++
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			a.heldMu.Lock()
-			if a.heldBy[who]--; a.heldBy[who] == 0 {
-				delete(a.heldBy, who)
-			}
-			a.heldAll--
+			sh.give(who, n)
 			a.heldMu.Unlock()
 		})
 	}, true
+}
+
+// holdRemote counts a remote request held at the door against its client's share and the remote
+// total; false (answered 429 busy) over either. The result ends the count.
+func (a *API) holdRemote(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	return a.countRemote(w, &a.held, remoteWho(r), 1, maxRemoteHeldPer, maxRemoteHeld,
+		fmt.Sprintf("too many requests from other machines are waiting (at most %d of one client, %d in all)", maxRemoteHeldPer, maxRemoteHeld))
 }
 
 // bufferedBody: the engine must look at r's body before the door (a JSON POST the table confines,
@@ -362,29 +416,25 @@ func bufferedBody(r *http.Request) bool {
 // readBody reads a proxied request's whole body before the request reaches the door: a client
 // that sends slowly holds no slot, no count in flight and no drain. Each read is bounded by a
 // network timeout on silence (BodySilence), the whole read by a second one (BodyTotal), the body
-// by 64 MiB from a local caller and 16 MiB from a remote one (413 body_too_large); at most 8
-// remote bodies are read at once, and a remote body read is kept only while all those kept stay
-// within maxRemoteKept (429 busy). The result gives the kept bytes back when the request ends;
+// by 64 MiB from a local caller and 16 MiB from a remote one (413 body_too_large); a remote body is
+// read and kept only within its client's share and the remote total (429 busy, above). The result gives the kept bytes back when the request ends;
 // ok is false after it has answered the client.
 func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) (func(), bool) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return func() {}, true
 	}
 	limit := int64(maxSamplerBody)
+	who := ""
 	if !local {
 		limit = maxRemoteBody
-		if n := a.remoteReads.Add(1); n > maxRemoteReads {
-			a.remoteReads.Add(-1)
-			busy(w, "too many request bodies from other machines are arriving at once")
+		who = remoteWho(r)
+		done, ok := a.countRemote(w, &a.reads, who, 1, maxRemoteReadsPer, maxRemoteReads,
+			fmt.Sprintf("too many request bodies from other machines are arriving at once (at most %d of one client, %d in all)", maxRemoteReadsPer, maxRemoteReads))
+		if !ok {
 			return nil, false
-		} else if a.readsSaid != nil {
-			a.readsSaid(n)
 		}
-		defer func() {
-			if n := a.remoteReads.Add(-1); a.readsSaid != nil {
-				a.readsSaid(n)
-			}
-		}()
+		a.sayReads()
+		defer func() { done(); a.sayReads() }()
 	}
 	rc := http.NewResponseController(w)
 	d, end := a.bodySilence(), time.Now().Add(a.bodyTotal())
@@ -412,14 +462,11 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) (func
 	}
 	give := func() {}
 	if !local {
-		n := int64(len(body))
-		if a.remoteKept.Add(n) > maxRemoteKept {
-			a.remoteKept.Add(-n)
-			busy(w, fmt.Sprintf("the request bodies from other machines kept now are at the engine's bound (%d MiB)", maxRemoteKept>>20))
+		var ok bool
+		if give, ok = a.countRemote(w, &a.kept, who, int64(len(body)), maxRemoteKeptPer, maxRemoteKept,
+			fmt.Sprintf("the request bodies from other machines kept now are at the engine's bound (%d MiB of one client, %d MiB in all)", maxRemoteKeptPer>>20, maxRemoteKept>>20)); !ok {
 			return nil, false
 		}
-		var once sync.Once
-		give = func() { once.Do(func() { a.remoteKept.Add(-n) }) }
 	}
 	_ = rc.SetReadDeadline(time.Time{})
 	r.Body.Close()
@@ -470,4 +517,15 @@ func slotsBack(resp *http.Response, slots []int) error {
 		resp.Header.Set("Content-Length", strconv.Itoa(len(b)))
 	}
 	return nil
+}
+
+// sayReads tells the test hook the remote bodies being read now.
+func (a *API) sayReads() {
+	if a.readsSaid == nil {
+		return
+	}
+	a.heldMu.Lock()
+	n := a.reads.all
+	a.heldMu.Unlock()
+	a.readsSaid(int32(n))
 }

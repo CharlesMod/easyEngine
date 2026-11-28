@@ -223,8 +223,9 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	}
 	c, b = lpost("/infill", "\xEF\xBB\xBF"+`{"id_slot":0}`)
 	refused("/infill BOM", c, b, "bad_request", 400)
-	// a local caller passes the door on a path that cannot be confined
-	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c == 403 {
+	// while clients hold ranges no caller is run unconfined: a local caller is refused a path
+	// that cannot be confined too
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c != 403 || codeOf(b) != "path_not_offered" {
 		t.Fatalf("a local caller's embeddings: %d %s", c, b)
 	}
 	C.cancel()
@@ -257,8 +258,8 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 func TestClientRequiredAndAttachRequired(t *testing.T) {
 	e, s, srv := clientsEnv(t, false, nil) // no base
 	_, rs, _ := remoteSrv(t, s)
-	growRemote(t, e, s, rs, 1, "a", 2)
-	growRemote(t, e, s, rs, 1, "a2", 1)
+	A := growRemote(t, e, s, rs, 1, "a", 2)
+	A2 := growRemote(t, e, s, rs, 1, "a2", 1)
 	// every slot is a client's: client-1 has two attachments, client-3 none
 	c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1))
 	if c != 400 || codeOf(b) != "client_required" {
@@ -268,9 +269,22 @@ func TestClientRequiredAndAttachRequired(t *testing.T) {
 	if c != 409 || codeOf(b) != "attach_required" {
 		t.Fatalf("none of its own, all owned: %d %s", c, b)
 	}
-	// a local caller passes as before
-	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"id_slot":1,"messages":[]}`, jsonCT); c != 200 || upstreamSlot(t, e) != float64(1) {
-		t.Fatalf("local: %d %s", c, b)
+	// a local caller never runs in a client's slots: held while the engine reshapes to give the
+	// commons a range, then served there
+	n := len(e.Starts())
+	c, b, _ = do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, jsonCT)
+	if c != 200 || len(e.Starts()) != n+1 {
+		t.Fatalf("local: %d %s, starts %d (from %d)", c, b, len(e.Starts()), n)
+	}
+	up, _ := upstreamSlot(t, e).(float64)
+	for _, h := range []*held{A, A2} {
+		v, ok := s.ClientView(h.id)
+		if !ok || v.Slots.First == nil || v.Slots.Given == 0 {
+			t.Fatalf("%s after the reshape: %+v", h.id, v)
+		}
+		if f := *v.Slots.First; int(up) >= f && int(up) < f+v.Slots.Given {
+			t.Fatalf("the local request ran in slot %v, %s's range %d+%d", up, h.id, f, v.Slots.Given)
+		}
 	}
 }
 
@@ -348,7 +362,8 @@ func TestForwardingHeaderIsNeverLocal(t *testing.T) {
 	body := fmt.Sprintf(`{"pid":%d,"profile":{}}`, os.Getpid())
 	for _, h := range []string{"X-Forwarded-For", "Forwarded", "X-Real-IP", "Via", "X-Forwarded-Host", "Tailscale-User-Login"} {
 		c, b, _ := do(t, "POST", srv.URL+"/engine/v1/attach", body, hdr(map[string]string{"X-Easy-Engine": "1", h: "10.1.2.3"}))
-		if c != 400 || codeOf(b) != "pid_remote" {
+		// remote at the gate too (D7): a forwarded request on the loopback listener needs a token
+		if c != 401 || codeOf(b) != "token_required" {
 			t.Fatalf("%s: %d %s", h, c, b)
 		}
 	}
@@ -1026,23 +1041,40 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 	e.InstallFake()
 	s := e.StartSup(e.Config())
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 2 * time.Second}
-	eight := make(chan struct{})
-	var once sync.Once
+	a := &api.API{S: s, AnyHost: true, Tokens: newRevocable(), BodySilence: 10 * time.Second, BodyTotal: 3 * time.Second}
+	var mu sync.Mutex
+	counts := make(chan struct{}, 64)
+	now := int32(0)
 	a.SayReads(func(n int32) {
-		if n == 8 {
-			once.Do(func() { close(eight) })
-		}
+		mu.Lock()
+		now = n
+		mu.Unlock()
+		counts <- struct{}{}
 	})
+	reads := func(want int32) { // the count says nothing to any hub: the API's own word of each count
+		for {
+			mu.Lock()
+			n := now
+			mu.Unlock()
+			if n == want {
+				return
+			}
+			select {
+			case <-counts:
+			case <-time.After(10 * time.Second): // watchdog for silence: the reads begin long before this
+				t.Fatalf("timed out waiting for %d bodies being read (now %d)", want, n)
+			}
+		}
+	}
 	srv := httptest.NewServer(a.Handler())
 	t.Cleanup(srv.Close)
-	open := func() net.Conn {
+	open := func(n int) net.Conn {
 		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { conn.Close() })
-		fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-1\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+		fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-%d\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{", n)
 		return conn
 	}
 	answer := func(conn net.Conn) int {
@@ -1055,19 +1087,19 @@ func TestRemoteBodyReadsBounded(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	var conns []net.Conn
-	for i := 0; i < 8; i++ {
-		conns = append(conns, open())
+	// one client's share: two bodies at once; its third is busy
+	conns := []net.Conn{open(1), open(1)}
+	reads(2)
+	if c := answer(open(1)); c != 429 {
+		t.Fatalf("one client's third read: %d", c)
 	}
-	// the count says nothing to any hub, so the test waits on the API's own word of each count
-	select {
-	case <-eight:
-	case <-time.After(10 * time.Second): // network timeout: the eight reads begin long before this
-		t.Fatalf("timed out waiting for eight bodies being read (now %d)", a.RemoteReadsNow())
+	// three more clients fill the total: 8; a fifth client's first is busy
+	for n := 2; n <= 4; n++ {
+		conns = append(conns, open(n), open(n))
+		reads(int32(2 * n))
 	}
-	ninth := open()
-	if c := answer(ninth); c != 429 {
-		t.Fatalf("the ninth: %d", c)
+	if c := answer(open(5)); c != 429 {
+		t.Fatalf("the ninth read: %d", c)
 	}
 	// each of the eight is cut by the total bound (it never finished)
 	for _, c := range conns {

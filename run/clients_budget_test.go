@@ -5,7 +5,11 @@ package run_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,6 +49,54 @@ func settle(t *testing.T, s *run.Supervisor) {
 	t.Fatal("plans still asked after 8 starts")
 }
 
+// bindFails is how many starts could not bind their port and never listened (the fake's
+// bindfails.log): the engine starts again after one, as the same start.
+func bindFails(e *testkit.Env) int {
+	b, err := os.ReadFile(filepath.Join(e.Ctl, "bindfails.log"))
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
+}
+
+// The walk's intermittent (6 restarts, 5 charged, under load): a reshape's start lost its port to
+// another process between the engine's pick (freePort) and llama-server's bind; the server
+// exited while loading and the mind started it again as an error's retry. One restart, charged
+// once, two lines in starts.log; and the lost port counted as a failure, so a second one before
+// the run was stable left the engine waiting in error. Held here at that point by the fake's
+// bindfail: the launch starts again at once on a new port, counts no failure, the charge is
+// one, and the walk's count of restarts takes the start that never listened out.
+func TestStartThatNeverListenedIsOneRestart(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	clAttach(t, s, remoteReq("client-1", "x", 1))
+	settle(t, s)
+	n, f, c := len(e.Starts()), bindFails(e), s.RestartsOf("client-1")
+	if err := os.WriteFile(filepath.Join(e.Ctl, "bindfail"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clAttach(t, s, remoteReq("client-1", "x", 4)) // a change of wants: one charged restart
+	settle(t, s)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("phase %s, starts %d (from %d), bind failures %d (from %d), charged %d", s.Phase(), len(e.Starts()), n, bindFails(e), f, s.RestartsOf("client-1"))
+		}
+	})
+	// (under load another process may take a port too: each lost one is a start that never listened)
+	testkit.WaitFor(t, 15*time.Second, "ready after the retry", func() bool {
+		return s.Phase() == "ready" && len(e.Starts()) == n+1+bindFails(e)-f
+	})
+	if bindFails(e) < f+1 || s.RestartsOf("client-1") != c+1 {
+		t.Fatalf("bind failures %d (from %d), charged %d (from %d)", bindFails(e), f, s.RestartsOf("client-1"), c)
+	}
+	if r := s.Status().Recovery; r != nil {
+		t.Fatalf("a lost port was counted as a failure: %+v", r)
+	}
+	if restarts := len(e.Starts()) - n - (bindFails(e) - f); restarts != 1 {
+		t.Fatalf("the walk's count: %d restarts for one change", restarts)
+	}
+}
+
 // spend charges who's whole budget by changes of its wants on one attachment.
 func spend(t *testing.T, s *run.Supervisor, who, name string) {
 	t.Helper()
@@ -80,9 +132,11 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 			on := map[string]*state{} // who/name -> standing attachment
 			last := map[string]int{}  // who/name -> the slots it last attached with
 			charged := func() int { return s.RestartsOf("client-1") + s.RestartsOf("client-2") }
-			from, woke, periods, down := len(e.Starts()), 0, 0, false
+			from, failed, woke, periods, down := len(e.Starts()), bindFails(e), 0, 0, false
 			endPeriod := func(step int) {
-				restarts := len(e.Starts()) - from - woke
+				// a start that never listened (its port taken between the engine's pick and its bind,
+				// as under load) is retried: the retry is the same restart, not another
+				restarts := len(e.Starts()) - from - woke - (bindFails(e) - failed)
 				if c := charged(); restarts > c || c > 8 {
 					t.Fatalf("step %d: a waking period had %d restarts by remote acts, %d charged (budgets 8)", step, restarts, c)
 				}
@@ -102,7 +156,7 @@ func TestRemoteWalkNeverRestartsBeyondTheBudgets(t *testing.T) {
 					down = true
 					continue
 				case down && rng.IntN(4) == 0: // a first request loads it: a new period
-					from, woke = len(e.Starts()), 1
+					from, failed, woke = len(e.Starts()), bindFails(e), 1
 					go s.Wake()
 					testkit.WaitPhase(t, s, "ready", 15*time.Second)
 					down = false
@@ -366,4 +420,49 @@ func TestRemoteCausedStopsNeverRefill(t *testing.T) {
 			t.Fatalf("charged %d after the walk its grow led to, want 1", s.RestartsOf("client-1"))
 		}
 	})
+}
+
+// D3: one restart costs a budget key one, however many of its attachments asked for it.
+func TestOneRestartChargesAnIdentityOnce(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	clAttach(t, s, remoteReq("client-1", "x", 1))
+	clAttach(t, s, remoteReq("client-1", "y", 1))
+	settle(t, s)
+	r0, n0 := s.RestartsOf("client-1"), len(e.Starts())
+	clAttach(t, s, remoteReq("client-1", "x", 2)) // both change before the reactor acts
+	clAttach(t, s, remoteReq("client-1", "y", 2))
+	settle(t, s)
+	if charged, starts := s.RestartsOf("client-1")-r0, len(e.Starts())-n0; starts != 1 || charged != 1 {
+		t.Fatalf("one restart for two plans of one identity: %d starts, charged %d", starts, charged)
+	}
+}
+
+// D6: a change of wants by a standing key while a start is loading is not lost: it stands, and
+// once the model is up it gets its own reshape, charged as an attach in a loading window is.
+func TestChangeWhileLoadingIsNotLost(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	v, _ := clAttach(t, s, remoteReq("client-1", "x", 6))
+	settle(t, s)
+	gate := filepath.Join(e.Ctl, "loadgate")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sleep(); err != nil { // the budget is whole again
+		t.Fatal(err)
+	}
+	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
+	go s.Wake()
+	testkit.WaitPhase(t, s, "loading", 15*time.Second)              // its merge is taken; the server loads
+	clAttach(t, s, remoteReq("client-1", "x", 8))                   // the change, while the start loads
+	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil { // the load goes on
+		t.Fatal(err)
+	}
+	os.Remove(gate)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	settle(t, s)
+	if got, _ := s.ClientView(v.Attachment); got.Slots.Given != 8 || s.RestartsOf("client-1") != 1 {
+		t.Fatalf("the change made while loading: %+v, charged %d", got.Slots, s.RestartsOf("client-1"))
+	}
 }

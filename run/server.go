@@ -240,6 +240,7 @@ type launchResult struct {
 	err      error
 	exited   bool      // the server exited while starting (not out of memory)
 	opts     launchSet // the clients' options it launched with
+	portLost bool      // it exited because it could not bind the port the engine picked
 }
 
 // runShape loads a shape: one measured retry on a load OOM, then step down.
@@ -289,8 +290,27 @@ func (s *Supervisor) runShape(ctx context.Context, lc loadCtx, shape fit.Shape) 
 	return s.failSlow(errors.New("model server kept running out of memory"))
 }
 
-// launch starts llama-server at a shape and waits until it is healthy.
+// portTries bounds the starts again on a fresh port after a lost one, within one launch.
+const portTries = 3
+
+// launch is launchOnce, again at once on a fresh port when the server could not bind the port the
+// engine picked: freePort's pick cannot hold the port, and another process (a busy machine's
+// outgoing connection, another server) can take it before llama-server binds, which it does
+// before it loads the model. That is not a failure of the model or its shape: none is counted
+// (run/recover.go), the same start goes on, and the restart it is part of is charged once
+// (countRestartCauses). A port the user set (LlamaPort) is not changed: its failure is theirs.
 func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) launchResult {
+	for try := 1; ; try++ {
+		res := s.launchOnce(ctx, lc, shape)
+		if !res.portLost || s.cfg.LlamaPort != 0 || try == portTries || ctx.Err() != nil {
+			return res
+		}
+		s.logf("%v: another process took the port; starting again on a new one", res.err)
+	}
+}
+
+// launchOnce starts llama-server at a shape and waits until it is healthy.
+func (s *Supervisor) launchOnce(ctx context.Context, lc loadCtx, shape fit.Shape) launchResult {
 	port := s.cfg.LlamaPort
 	if port == 0 {
 		var err error
@@ -426,7 +446,10 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 		case <-proc.Done():
 			tail := proc.Tail()
 			oom, mb := ParseOOM(tail)
-			return launchResult{oom: oom, failedMB: mb, exited: true, opts: opts, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
+			// llama-server binds before it loads: "couldn't bind HTTP server socket"
+			// (tools/server/server-http.cpp), the system's "address already in use"
+			lost := !oom && (strings.Contains(tail, "couldn't bind HTTP server socket") || strings.Contains(tail, "address already in use"))
+			return launchResult{oom: oom, failedMB: mb, exited: true, opts: opts, portLost: lost, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-ask:
 			if !s.healthy(url) {
 				continue

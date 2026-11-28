@@ -173,7 +173,12 @@ chosen:
 	if err != nil {
 		var stepped bool
 		if lc, room, w, shape, stepped = s.stepTier(ctx, lc, room, w); !stepped { // another app may be holding the card: look again slowly, never give up for good
+			if room.Others > 0 { // the card is busy with someone else's work: say so plainly
+				return s.failSlow(fmt.Errorf("this model does not fit: other programs hold %d MiB of the card's %d MiB: %w",
+					room.Others, room.VRAMTotal, err))
+			}
 			return s.failSlow(fmt.Errorf("this model does not fit: %w", err))
+
 		}
 	}
 	if shape, err = s.belowCeiling(lc, shape, room, w); err != nil {

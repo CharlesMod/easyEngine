@@ -26,6 +26,10 @@ func up(phase string) bool {
 	return false
 }
 
+// loaded is a phase in which a model is loaded: the idle rule's quiet counts from here (a load
+// in progress is not quiet yet; once it is ready, the quiet begins).
+func loaded(phase string) bool { return phase == "ready" || phase == "resizing" }
+
 // idleRule is the idle rule's settings as the loop reads them each time it looks.
 type idleRule struct {
 	on     bool          // idle_sleep (and no --no-idle-sleep)
@@ -115,7 +119,7 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 			hadClients, leftAttach = false, true
 		}
 		r := rule()
-		idle := r.on && n == 0 && sup.InFlight()+sup.Held() == 0 && up(sup.Phase())
+		idle := r.on && n == 0 && sup.InFlight()+sup.Held() == 0 && loaded(sup.Phase())
 		why, delay := "idle_sleep", r.quiet
 		if leftAttach {
 			why, delay = "linger", r.linger

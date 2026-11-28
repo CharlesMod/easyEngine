@@ -1973,12 +1973,14 @@ and size (an import-only projector is refused), and no projector file name ends 
 **A projector that will not load.** A start that carries `--mmproj` and fails for a reason other
 than memory (the server exited while loading, the load timed out, any error) is retried once at
 once without it: text first. When that text start comes up, the projector file is marked not
-loadable, by its identity (file name, size, mtime, the catalog's sha256 and the llama.cpp build
-the engine runs), with the reason in `vision_note` ("the vision projector failed to load: <last
+loadable, by its identity (file name, size, mtime, the catalog's sha256, the sha256 the engine
+verified for the file as it is now, and the llama.cpp build the engine runs), with the reason in `vision_note` ("the vision projector failed to load: <last
 line of the server's complaint, paths left out>"). It is not tried again, not by a restart, a
 client's word or an attach (a client's attach is not a person asking), until the file changes,
 the pinned build changes, the engine restarts, or the person asks again (the setting turned on
-again). The record is in memory, like the build's smoke-test failure. A failure from memory
+again). The record is in memory, like the build's smoke-test failure, and never outlives the
+engine process. So a transient failure (a load that would have worked a moment later) holds
+vision off until a person asks again or the engine restarts. A failure from memory
 keeps its own rule (below, "The room"). Storage lists
 the file with its model's id and `projector: true`; it cannot be deleted while vision is wanted
 for the served model, while it is loaded, or while it downloads (409); deleting a model by id
@@ -2081,12 +2083,14 @@ set in the request's context, never a header).
 machines, 64 MiB locally; silence and total timeouts); only then is the look's gate taken, so a
 slow sender holds its read and nothing else. At most 2 looks decode images at once,
 engine-wide; a caller from another machine has one look at a time (from its read body to its
-answer). A remote look's bytes count against the proxy's one bound of remote bodies kept (64 MiB
-of bodies read and not yet ended, §7g): its body while it is decoded, then the request built
+answer). A remote look's bytes count against its client's share of the remote bodies kept
+(32 MiB of one client's bodies read and not yet ended, 128 MiB of all remote clients, §7g): its
+body while it is decoded, then the request built
 from it while that request lives. The hand-over counts the built request before it gives the
 body's count back, and the proxy reads no body for a look (it is the engine's, held already),
 so a look's bytes are never uncounted and never counted twice (for the moment of the hand-over
-both are counted). Looks and other remote requests share the 64 MiB, never 64 MiB each. A remote
+both are counted; a look whose body and built request together pass its client's 32 MiB share is
+429 `busy` at the hand-over). Looks and other remote requests share those bounds, never one each. A remote
 look whose built request passes 16 MiB (the remote body bound) is 400 `look_too_large`, judged
 as each image is built. Over a bound the answer is 429 `busy` at once: nothing waits for room.
 
@@ -2099,15 +2103,17 @@ image's base64 is let go once its part is written. Measured (`api` TestLookBuild
 image's step is at most about 108 MiB including the body (live before it, at most 19.5 MiB,
 plus all it allocates, at most 90.6 MiB with GC off).
 
-**Worst-case memory for remote looks: about 250 MiB of heap**, from the measurements above: the
-64 MiB of kept remote bytes (look bodies and built requests among them, counted) plus 2 looks
-decoding at once, each allocating at most 93 MiB beyond what is counted (the decoded file,
-pixels, scaled copy, re-encoding and the built buffer's growth). With Campfire's table (long
-edge at most 1024 px) it is about 220 MiB (77 MiB a decode). Not in these figures: the remote
-bodies still being read (at most 8 at once, each at most 16 MiB, §7g; `io.ReadAll`'s growth can
-briefly hold more), and the Go collector's slack (with the default GOGC the heap may grow to
-about twice the live bytes between collections). Local looks share the 2 decoders and are not
-otherwise counted.
+**Worst-case memory for remote looks: about 315 MiB of heap**, from the measurements above: the
+128 MiB of kept remote bytes in all (look bodies and built requests among them, counted; at most
+32 MiB of one client) plus 2 looks decoding at once, each allocating at most 93 MiB beyond what is
+counted (the decoded file, pixels, scaled copy, re-encoding and the built buffer's growth). With
+Campfire's table (long edge at most 1024 px) it is about 280 MiB (77 MiB a decode). Two things
+are outside that figure, honestly: the remote bodies still being read, which are bounded only as
+reads (at most 8 at once, 2 of one client, each at most 16 MiB, so 128 MiB of read bytes, plus
+whatever `io.ReadAll`'s growth briefly holds above that, not measured), and the Go collector's
+slack (with the default GOGC the heap may grow to about twice the live bytes between
+collections; no memory limit is set). Local looks share the 2 decoders and are not otherwise
+counted.
 
 **Without an attachment.** A look is a chat request of its caller's at the door, so a remote
 caller with no attachment is treated exactly as its chat request would be: served from the

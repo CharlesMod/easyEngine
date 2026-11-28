@@ -58,10 +58,15 @@ type ProjRecord struct {
 // projIdent is the identity of a projector file as the not-loadable record knows it: the file,
 // its size and mtime, the sha256 the catalog names for it, and the llama-server build it was tried
 // with.
+// projIdent is a projector file as it is: its name, size and mtime, the catalog's sha256, the
+// sha256 the engine verified for the file as it is now ("" when none), and the build. A "not
+// loadable" mark is kept by it, in memory only (it never outlives the engine process): any change
+// of the file, of its verified hash, of the pin or of the build is another identity, tried again.
 type projIdent struct {
 	file         string
 	size, mtime  int64
 	sha, backend string
+	verified     string
 }
 
 type visionDL struct {
@@ -189,7 +194,13 @@ func (s *Supervisor) projIdentOf(p *catalog.Projector, bin string) (projIdent, b
 	if err != nil || !st.Mode().IsRegular() {
 		return projIdent{}, false
 	}
-	return projIdent{file: p.File, size: st.Size(), mtime: st.ModTime().UnixNano(), sha: p.SHA256, backend: bin}, true
+	id := projIdent{file: p.File, size: st.Size(), mtime: st.ModTime().UnixNano(), sha: p.SHA256, backend: bin}
+	s.mu.Lock()
+	if r, ok := s.st.Projectors[p.File]; ok && r.Size == id.size && r.MTimeNS == id.mtime {
+		id.verified = r.SHA256
+	}
+	s.mu.Unlock()
+	return id, true
 }
 
 // projectorBad says whether p's file, as it is now and with this build, is known not to load (or

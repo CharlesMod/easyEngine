@@ -276,3 +276,49 @@ func TestVisionDownloadReloadForALocalWantChargesNobody(t *testing.T) {
 		t.Fatalf("charged %d, want nobody", got)
 	}
 }
+
+// A projector marked not loadable is tried again once its file changes: the file written again
+// (a new mtime) is hashed again, its verified identity is new, and the next start carries
+// --mmproj once more (here it fails again, and text comes back up).
+func TestVisionProjectorLoadFailureChangedFileTriedAgain(t *testing.T) {
+	v := newVis(t, 800)
+	v.put(t)
+	v.e.Llama["FAKELLAMA_MMPROJ_BAD"] = "1"
+	s := v.start(t, func(c *run.Config) { c.Vision = true })
+	if with, without := mmStarts(v.e); with != 1 || without != 1 {
+		t.Fatalf("starts with --mmproj %d, without %d: %v", with, without, v.e.Starts())
+	}
+	if err := os.WriteFile(v.file, v.proj, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC) // a fixed mtime unlike the file's own
+	if err := os.Chtimes(v.file, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSettings(run.Settings{KVType: "q8_0"}); err != nil { // a start for another reason
+		t.Fatal(err)
+	}
+	testkit.WaitFor(t, 20*time.Second, "a start with --mmproj again", func() bool { with, _ := mmStarts(v.e); return with == 2 })
+	st := visReady(t, s, false)
+	if !strings.HasPrefix(st.VisionNote, "the vision projector failed to load: ") {
+		t.Errorf("note: %q", st.VisionNote)
+	}
+}
+
+// The mark never outlives the engine process: the next life of the engine on the same data tries
+// the projector again (and here, failing again, comes up with text).
+func TestVisionProjectorLoadFailureForgottenAtRestart(t *testing.T) {
+	v := newVis(t, 800)
+	v.put(t)
+	v.e.Llama["FAKELLAMA_MMPROJ_BAD"] = "1"
+	s := v.start(t, func(c *run.Config) { c.Vision = true })
+	if with, _ := mmStarts(v.e); with != 1 {
+		t.Fatalf("starts: %v", v.e.Starts())
+	}
+	s.Shutdown()
+	s2 := v.start(t, func(c *run.Config) { c.Vision = true })
+	visReady(t, s2, false)
+	if with, without := mmStarts(v.e); with != 2 || without != 2 {
+		t.Fatalf("the next life: starts with --mmproj %d, without %d: %v", with, without, v.e.Starts())
+	}
+}

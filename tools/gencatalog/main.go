@@ -766,6 +766,9 @@ func run(c *client, repo, stockRepo, out, pin, stockTag, uvTag string, minAge ti
 		c.log("model %s %d bytes", m.ID, m.Size)
 		cat.Models = append(cat.Models, m)
 	}
+	if err := applyProjectors(c, &cat); err != nil {
+		return err
+	}
 	measured, err := loadMeasured(measuredJSON)
 	if err != nil {
 		return err

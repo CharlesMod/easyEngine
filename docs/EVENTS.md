@@ -18,7 +18,7 @@ game mod and the hive under one rule.
 - **The honest timers are three,** each named as that one in a comment where it stands:
   a **watchdog for silence** on a child process or a stream; a **network timeout** on one call; and
   a **named moment**, a time somebody chose (the keeper's `--linger`, `--yield-grace`,
-  `--yield-steady`).
+  `--yield-steady`, the idle rule's `linger_s` and `idle_sleep_s`).
 - Where a system gives no event for a thing (another program's use of a graphics card on NVIDIA and
   on Windows), the read stays inside package `host`, named as a watchdog, armed only while its answer
   can change what the engine does, and nothing outside `host` knows there is one.
@@ -265,7 +265,16 @@ connection.
   `linger` (a named moment) runs and the mind is unloaded; the engine stays. *Built* (ee-stream):
   a remote client is counted by its requests at the door (in flight or held) and, since
   ee-clients, by its attachments (held or by pid, §5); the linger is armed when the door is empty
-  and no pid or attachment stands, and a request or an attach cancels it. A mod does not start
+  and no pid or attachment stands, and a request or an attach cancels it. Since ee-pause the same
+  idle rule runs in `serve` too (ENGINE.md §6c): the named moment is armed when the quiet begins
+  (no attachment, the door empty, a model loaded), for `linger_s` when the last attachment left and
+  `idle_sleep_s` (default 600) when a caller only sent requests; any request begun or attach
+  cancels it, and a settings change (PUT or the file's word) arms the same moment again for what
+  is left of the new delay, never a second timer. The rule wakes on the hub's `request`, `door`,
+  `phase`, `attachment` and `idle` facts, the parents' exits and the moment; it reads no clock but
+  the moment's own start. The `idle` fact says the moment while it is armed. A caller that only
+  sends requests is idle once they stop; a standing attachment keeps the model however silent. A
+  mod does not start
   the engine with a parent pid any more: it finds the engine (the lock, hello), attaches with its
   profile, and only if none runs on its own machine starts the app detached.
 - The tray is also where a pairing request is answered (§7): a notification "Allow <client>

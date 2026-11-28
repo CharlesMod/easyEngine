@@ -140,3 +140,15 @@ func TestTrayTooltipFollowsTheHub(t *testing.T) {
 	}
 	ft.until(t, "ready", func(_ []tray.Item, tip string) bool { return strings.HasPrefix(tip, "easy-engine: ready, ") })
 }
+
+// After an idle sleep the tooltip says the card is free.
+func TestTrayTooltipSaysIdle(t *testing.T) {
+	ft := newFakeTray()
+	r := startFakeModelWith(t, time.Hour, nil, nil, func(o *app.Options) { o.Tray = ft; idleAfter(0)(o) })
+	if code := r.post(t); code != 200 {
+		t.Fatalf("request: %d", code)
+	}
+	ft.until(t, "idle", func(_ []tray.Item, tip string) bool {
+		return tip == "easy-engine: no model loaded (idle, the card is free)"
+	})
+}

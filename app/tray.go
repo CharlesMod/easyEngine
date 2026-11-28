@@ -401,6 +401,9 @@ func (c *controller) phaseTip(st run.Status) string {
 	case "starting", "loading":
 		return fmt.Sprintf("easy-engine: loading %s", name)
 	case "sleeping":
+		if st.SleepReason == "idle" {
+			return "easy-engine: no model loaded (idle, the card is free)"
+		}
 		return "easy-engine: no model loaded"
 	case "not_installed":
 		return "easy-engine: no model installed"

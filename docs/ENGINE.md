@@ -78,6 +78,8 @@ fsync and rename:
     "api_key": ""
   },
   "linger_s": 0,
+  "idle_sleep": true,
+  "idle_sleep_s": 600,
   "kv_type": "q4_0",
   "sampler_policy": "enforce",
   "streamer": "on",
@@ -103,7 +105,9 @@ fsync and rename:
 ```
 
 - `mode` local or external; `external` the own endpoint (§7); `linger_s` how long the model
-  stays loaded after the last client (§6); `kv_type` one of `q4_0 q8_0 f16 q4_1 q5_0 q5_1 iq4_nl
+  stays loaded after the last attachment left (§6c); `idle_sleep` (default `true`) and
+  `idle_sleep_s` (default 600, 0 to 604800; 0 = at once) the idle rule: how long the model stays
+  loaded once nothing is attached and the requests stopped (§6c); `kv_type` one of `q4_0 q8_0 f16 q4_1 q5_0 q5_1 iq4_nl
   bf16 f32`; `sampler_policy` `enforce`, `fill` or `off`.
 - `name` is this engine's human name for clients on the network (hello, the mDNS name; at most
   63 bytes); empty means the host name. `discovery` `on` (default) or `off`: the mDNS announce of
@@ -118,14 +122,15 @@ fsync and rename:
   `settings.json` (only when that file does not exist yet) and `state.json` is rewritten without
   them. It happens once; the next start finds nothing to move.
 - **A file that cannot be used** (does not parse, or an unknown `mode`, `kv_type` or
-  `sampler_policy`, a negative `linger_s`, a `port` outside 1-65535) is **never overwritten**.
+  `sampler_policy`, a negative `linger_s`, an `idle_sleep_s` outside 0-604800, a `port` outside 1-65535) is **never overwritten**.
   The engine starts with the last good settings (the defaults at a first start) and says so in
   status `errors[]`: `settings.json line 3: unknown kv_type "x"; using the previous settings`.
   Fixing the file clears the error. (`PUT settings` is the one exception: it moves the unusable
   file aside as `settings.json.bad-<unix time>` and writes its own.)
 - **Followed live.** The engine watches the file (`host.Changes`, an event) and compares
   content, not time: a valid edit takes effect through the same code as `PUT settings`
-  (`mode`, `external`, `linger_s`, `kv_type`, `sampler_policy` at once). A changed `listen` or
+  (`mode`, `external`, `linger_s`, `idle_sleep`, `idle_sleep_s`, `kv_type`, `sampler_policy` at
+  once; an armed idle moment is armed again for the new value, §6c). A changed `listen` or
   `yield` is recorded and takes effect at the next start; status `errors[]` says `restart
   easy-engine to apply the new listen address` until the file matches what runs. The engine's own
   writes come back as a change that changes nothing.
@@ -788,15 +793,16 @@ a service or a shell: no tray, and it ends with its parents, as described next.
 - **Parent watch:** the engine follows each parent pid by the system's word of its end (Linux a
   pidfd, macOS kqueue, Windows a wait on the process handle: `host.ExitsOf`, with the pid's start
   time so pid reuse cannot fool it). When the last parent is gone, it stops its children and
-  exits within 5 s. `--linger <dur>` (setting, default 0) keeps the model loaded for a while for
-  quick restarts.
+  exits within 5 s. `--linger <dur>` (setting `linger_s`, default 0) keeps the engine running
+  for a while after that, for quick restarts. A `--parent-pid` parent keeps the engine's
+  **process**, not its model: the idle rule (§6c) unloads the model while the parent lives.
 - **Children die with the engine:** Linux `Pdeathsig=SIGKILL` + own process group; Windows a
   Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; macOS process group + the children
   are killed on every exit path, and the engine's own crash is covered by the next start
   killing any stale pids recorded in `engine.lock`.
 - **Pause:** `POST /engine/v1/sleep` unloads the model (stops llama-server) and keeps the
-  agent; any proxied model request or `POST /engine/v1/wake` starts it again. The game may
-  call it in the main menu. Not used by default.
+  agent; any proxied model request, an attach or `POST /engine/v1/wake` starts it again. The game
+  may call it in the main menu. The idle rule (§6c) does the same on its own.
 - Stop order: agent first (SIGTERM, 5 s, then kill: a watchdog for silence on the child), then
   llama-server.
 - **The agent** restarts once at once when it exits; a second quick exit in a row (a run
@@ -806,6 +812,56 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   moved none waits for the network coming back (`host.NetworkChanges`), a client's `install`
   or nudge, or the engine's next start. The 60 s stall timer on a stream is a watchdog for
   silence. Progress is said per 1 % of the file (or per 4 MiB with no size), never per time.
+
+### 6c. Idle sleep: the card is free while nobody uses the engine
+
+The owner's words: the engine is paused when idle and not connected to by a game or the hive, so
+the card's memory is free for other work. One rule, the same in `serve` and in the app
+(`app/resident.go` `idleLoop`):
+
+- **The model sleeps** when all of these hold: no attachment stands (a held presence, an attached
+  pid; in the app also a parent pid, since the app does not end with its parents; the engine's
+  own base profile is not one), no request is in flight or held at the door, a model is loaded
+  (phase `ready` or `resizing`), and the quiet has lasted its delay.
+- **The delay** is a named moment armed when the quiet begins and cancelled by any request begun
+  or any attach: `linger_s` (default 0, at once) when the quiet began with the last attachment
+  leaving and no request has begun since; else `idle_sleep_s` (default 600). 0 means at once.
+  `idle_sleep: false` (or `--no-idle-sleep`) turns the rule off entirely: the model stays loaded
+  until a person or a client says otherwise. `--idle-sleep <dur>` sets the quiet for one run.
+  A change of either setting (PUT or an edit of the file) arms the same moment again for the new
+  delay, counted from the start of the quiet; there is never a second timer. The hub's `idle`
+  fact says the settings and, while armed, why (`linger` | `idle_sleep`) and `delay_ms`.
+- **Who is idle.** A caller that only sends requests (no attachment) is idle once its requests
+  stop: the model stays loaded while they keep coming and sleeps `idle_sleep_s` after the last
+  one. A standing attachment keeps the model loaded however long it is silent. A `serve
+  --parent-pid` parent keeps the engine's process alive (it ends with its parents, as before), but
+  it is not a client and does not keep the model loaded. In `serve`, `--linger` stays the
+  engine's life after its parents; the model's linger after the last attachment is `linger_s`.
+  (Before this rule, `serve` never unloaded the model, and the app with `linger_s` 0 unloaded it
+  right after each request a remote caller sent, when it saw the request in flight.)
+- **The sleep** is `POST sleep`'s: the prompt-cache slots are saved (§5, "The prompt cache across
+  a restart"), the model server's process group is stopped, the restart budgets are whole again.
+  Status: phase `sleeping`, `sleep_reason` `idle`, message `Model unloaded: idle, the card is
+  free`. `sleep_reason` is `asked` after `POST sleep` or a person's stop, `start` for an app that
+  started asleep, `""` when not sleeping (kept for a paired client).
+- **What stays running while asleep.** The engine process (listener, pairing, hello, status, the
+  hub), which never opens the card: it touches the GPU only through one-shot `nvidia-smi` reads
+  (NVML: no CUDA context, no memory; each exits when it has answered), and under
+  `--yield-to-games` the yield reactor's `nvidia-smi -q -d PIDS` reads, also one-shot. The
+  profile's **agent**, if a profile names one (the owner's service has none): a Python client of
+  the engine (httpx, pydantic) that talks to the model over HTTP and opens no card; it stays so the
+  game's side keeps running, and its first request wakes the model. No other child runs: after an
+  idle sleep no process the engine started holds the card.
+- **Wake.** A proxied request (held at the door until the model is up; a stream hears `: easy
+  waiting`), an attach (in `serve` too) or `POST wake`. The start fits against the room actually
+  free: when other programs hold part of the card, a smaller shape (status `shape` says it).
+  When nothing fits, phase `error` with the plain reason (`this model does not fit: other
+  programs hold N MiB of the card's M MiB: ...`), no process is started, and a held request is
+  answered at once: 503 `unavailable_error`, `Retry-After: 2`, with that message (a stream already
+  opened gets the terminal error event). There is no restart loop: each word is one try, a
+  request at the door, a client's nudge, or the room on the card changing (the room watch, §5
+  "At run time"); once the room frees, the next of these starts the model. A busy card never
+  steps down a tier: the step-down (`run/tiers.go`) is only for a card too small on its own.
 
 ### 6a. The app (`easy-engine app`)
 
@@ -832,11 +888,9 @@ a service or a shell: no tray, and it ends with its parents, as described next.
   attaches a pid (`POST attach`) wakes the model if it sleeps; a request at the proxy wakes it too,
   and the door **holds** that request until the model is up (§7e). The clients are the attached
   pids, the attachments (§7g: held or by pid) and the requests at the door (in flight or held: a
-  remote client that never attached counts by its requests). Once a client has come, when no pid
-  and no attachment stands and the door is empty while a model is up, the keeper's `linger_s` (a named moment) runs; a request or an
-  attach cancels it, and it runs again from the door's next empty. When it ends with nobody
-  there the model is **put to sleep** (`POST sleep`'s unload); the engine stays. A model a person
-  started with no client ever coming is not put to sleep by the linger. The tooltip follows the
+  remote client that never attached counts by its requests). The model is put to sleep by the
+  idle rule (§6c): `linger_s` after the last pid or attachment left, `idle_sleep_s` after the last
+  request of a caller that never attached; the engine stays. The tooltip follows the
   hub (phase, model, door), not only clicks, and says `(N waiting)` while the door holds N
   requests. `serve --parent-pid` keeps its behaviour: the engine ends with its parents.
 
@@ -996,8 +1050,8 @@ stays hidden until it is classified; a test fails until it is). Kept: `version`,
 `phase`, `message` (blank in the `error` and `yielded` phases), `progress`, `model`, `backend`,
 `shape`, `tok_s`, `model_tier`, `model_stage`, `kv_type`, `restarts`, `model_fallback`,
 `model_note`, `sampler`, `model_name`, `model_codename`, `model_codename_full`, `model_selected`, `model_params`,
-`model_size_class`, `held`. Removed:
-`port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `upgrade`,
+`model_size_class`, `held`, `sleep_reason`. Removed:
+`port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `idle_sleep`, `idle_sleep_s`, `upgrade`,
 `contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield`, `build` (paths, pids, the local
 model server's address, error texts, other clients, host program detail). Everything else needs
 the master token or the engine's own machine.
@@ -1038,7 +1092,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST import {path}` | import-only models: checks sha256, hard-links or copies |
 | `POST start`, `POST stop` | the model server (local mode) |
 | `POST sleep`, `POST wake` | §6 |
-| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer` and `keep_context`. `listen` and `yield` are edited in the file, not here |
+| `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, idle_sleep?: bool, idle_sleep_s?: 0-604800, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always"}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context`, `idle_sleep` and `idle_sleep_s` (400 `idle_sleep_s must be 0 to 604800 seconds`; a change re-arms the idle moment, §6c). `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
 | `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
 | `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |
@@ -1871,6 +1925,7 @@ and `_MODEL=<model>`). The old names are kept too, see "Renamed from hermes-engi
 easy-engine [app]   [--port N] [--host H [--open]] [--linger D] [--yield-to-games ...]   a tray icon; stays open, waits for a connection (§6a)
                       the defaults are settings.json (§2); the flags override them for one run, never written back
 easy-engine serve   --profile F --parent-pid P [--port N] [--host H [--open]] [--linger D]
+                      [--idle-sleep D | --no-idle-sleep]   the idle rule for this run (§6c)
                       [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                        [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]   §6b
 easy-engine setup   [--profile F]        serve + open the setup page in the browser; no parent pid needed

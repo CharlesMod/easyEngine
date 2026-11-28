@@ -11,9 +11,6 @@ import (
 	"github.com/CharlesMod/easyEngine/catalog"
 )
 
-// projHFBase is the Hugging Face host the projector trees are read from (tests point it at httptest).
-var projHFBase = "https://huggingface.co"
-
 // projSpec says which mmproj file is a model's vision projector and what the engine measured for
 // it. The projector is pinned to a full commit: its url, size and hash describe one revision.
 type projSpec struct {
@@ -45,8 +42,9 @@ var fullRev = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // applyProjectors attaches every spec's projector to its model in cat. A spec for a model the
 // catalog lacks, a short rev, a file missing from the tree or one without LFS metadata fails the run.
-func applyProjectors(c *client, cat *catalog.Catalog) error {
-	return applyProjectorSpecs(c, cat, projectorSpecs)
+func applyProjectorsTo(c *client, models []catalog.Model) error {
+	cat := catalog.Catalog{Models: models} // the same backing array: the projectors land in models
+	return applyProjectorSpecs(c, &cat, projectorSpecs)
 }
 
 func applyProjectorSpecs(c *client, cat *catalog.Catalog, specs map[string]projSpec) error {
@@ -80,7 +78,7 @@ func (c *client) hfProjector(sp projSpec) (catalog.Projector, error) {
 		return catalog.Projector{}, fmt.Errorf("%s: rev %q is not a full 40-hex commit sha", sp.repo, sp.rev)
 	}
 	var tree []hfEntry
-	if err := c.getJSON(projHFBase+"/api/models/"+sp.repo+"/tree/"+sp.rev+"?limit=1000", &tree); err != nil {
+	if err := c.getJSON(c.hfBase()+"/api/models/"+sp.repo+"/tree/"+sp.rev+"?limit=1000", &tree); err != nil {
 		return catalog.Projector{}, err
 	}
 	for _, e := range tree {
@@ -96,7 +94,7 @@ func (c *client) hfProjector(sp projSpec) (catalog.Projector, error) {
 		}
 		return catalog.Projector{
 			File:   sp.local,
-			URL:    projHFBase + "/" + sp.repo + "/resolve/" + sp.rev + "/" + url.PathEscape(sp.file),
+			URL:    c.hfBase() + "/" + sp.repo + "/resolve/" + sp.rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size,
 			LoadMiB: sp.loadMiB, ImageMiB: sp.imageMiB, MaxImageTokens: sp.maxImageTokens, Detail: sp.detail,
 			ChatTemplateKwargs: sp.kwargs,

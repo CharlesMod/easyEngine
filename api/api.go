@@ -58,6 +58,12 @@ type API struct {
 	// readsSaid, when set (tests), is told each new count of remoteReads: the event a test
 	// waits on, since the count itself says nothing to any hub.
 	readsSaid func(int32)
+	// remoteKept is the bytes of remote bodies read whose requests have not ended; heldBy and
+	// heldAll count remote requests held at the door, by client and in all (clientslots.go).
+	remoteKept atomic.Int64
+	heldMu     sync.Mutex
+	heldBy     map[string]int
+	heldAll    int
 
 	// Pair holds the pairing requests (pair.go). Nil: pairing is not offered (a loopback
 	// listener, or --open), hello says pairing false and POST pair answers 404.
@@ -303,12 +309,12 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 		}
 	case "stop":
 		if need("POST") {
-			a.S.Stop()
+			a.S.StopBy(localCaller(r)) // a remote caller's stop never refills a restart budget
 			writeJSON(w, 200, map[string]string{"status": "stopped"})
 		}
 	case "sleep":
 		if need("POST") {
-			a.S.Sleep()
+			a.S.SleepBy(localCaller(r)) // a remote caller's sleep never refills a restart budget
 			writeJSON(w, 200, map[string]string{"status": "sleeping"})
 		}
 	case "wake":

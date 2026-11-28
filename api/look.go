@@ -30,28 +30,27 @@ import (
 
 // The look call's bounds (docs/ENGINE.md lists them).
 const (
-	maxLookImages    = 4        // images in one look
-	maxLookQuestion  = 16 << 10 // bytes of the question
-	maxLookLabel     = 256      // bytes of one image's label
-	maxLookTokens    = 4096     // the most max_tokens a look may ask
-	defLookTokens    = 512      // max_tokens when none is given
-	maxLookSlot      = 1023     // the largest id_slot a look may name (the door judges the caller's range)
-	maxLookDecoding  = 2        // looks decoding images at once, all callers
-	maxLookHeldTotal = 64 << 20 // bytes of built look requests held at once by callers from other machines
-	maxLookAnswer    = 4 << 20  // bytes of the model server's non-streamed answer the engine reads
-	defLookDetail    = "high"   // detail when none is given
-	lookObject       = "look.result"
+	maxLookImages   = 4        // images in one look
+	maxLookQuestion = 16 << 10 // bytes of the question
+	maxLookLabel    = 256      // bytes of one image's label
+	maxLookTokens   = 4096     // the most max_tokens a look may ask
+	defLookTokens   = 512      // max_tokens when none is given
+	maxLookSlot     = 1023     // the largest id_slot a look may name (the door judges the caller's range)
+	maxLookDecoding = 2        // looks decoding images at once, all callers
+	maxLookAnswer   = 4 << 20  // bytes of the model server's non-streamed answer the engine reads
+	defLookDetail   = "high"   // detail when none is given
+	lookObject      = "look.result"
 )
 
-// lookGate bounds what looks hold: maxLookDecoding decode at once (each holds one decoded image
-// at a time: at most 64 MiB at the default pixel limit), a caller from another machine has one
-// look at a time, and the built requests of remote looks hold at most maxLookHeldTotal bytes in
-// all. Over a bound the look is answered 429 busy at once: nothing waits for room.
+// lookGate bounds what looks hold beyond their bodies: maxLookDecoding decode at once (each holds
+// one decoded image at a time: at most 64 MiB at the default pixel limit), and a caller from
+// another machine has one look at a time. A remote look's bytes (its body, then the request built
+// from it) count against the proxy's one bound of remote bodies kept (maxRemoteKept, readBody).
+// Over a bound the look is answered 429 busy at once: nothing waits for room.
 type lookGate struct {
 	mu       sync.Mutex
 	decoding int
 	remote   map[string]bool
-	held     int
 }
 
 func (g *lookGate) enter(identity string, local bool) bool {
@@ -77,23 +76,12 @@ func (g *lookGate) decoded() {
 	g.mu.Unlock()
 }
 
-func (g *lookGate) hold(n int) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.held+n > maxLookHeldTotal {
-		return false
-	}
-	g.held += n
-	return true
-}
-
-func (g *lookGate) release(identity string, local bool, held int) {
+func (g *lookGate) release(identity string, local bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !local {
 		delete(g.remote, identity)
 	}
-	g.held -= held
 }
 
 func lookBusy(why string) *run.ClientError {
@@ -314,16 +302,19 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	decoding := true
-	held := 0
 	defer func() {
 		if decoding {
 			a.looks.decoded()
 		}
-		a.looks.release(who, local, held)
+		a.looks.release(who, local)
 	}()
-	if !a.readBody(w, r, local) {
+	// the body counts against the remote bodies kept (readBody) until the request built from it
+	// takes its place: the proxy's own read of that request counts it
+	give, ok := a.readBody(w, r, local)
+	if !ok {
 		return
 	}
+	defer give()
 	q, ce := parseLook(bodyOf(r))
 	if ce != nil {
 		clientFail(w, ce)
@@ -375,19 +366,13 @@ func (a *API) look(w http.ResponseWriter, r *http.Request) {
 		clientFail(w, &run.ClientError{Status: 500, Code: "look_failed", Msg: err.Error()})
 		return
 	}
-	if !local {
-		if len(built) > maxRemoteBody {
-			clientFail(w, lookBad("look_too_large", "the look's images come to %d MiB once built; at most %d MiB from another machine (fewer images or a lower detail)", len(built)>>20, maxRemoteBody>>20))
-			return
-		}
-		if !a.looks.hold(len(built)) {
-			clientFail(w, lookBusy("looks from other machines hold as much as the engine allows now: ask again when one ends"))
-			return
-		}
-		held = len(built)
+	if !local && len(built) > maxRemoteBody {
+		clientFail(w, lookBad("look_too_large", "the look's images come to %d MiB once built; at most %d MiB from another machine (fewer images or a lower detail)", len(built)>>20, maxRemoteBody>>20))
+		return
 	}
 	a.looks.decoded()
 	decoding = false
+	give() // the caller's body is let go; the built request is counted by the proxy's read below
 
 	r2 := r.Clone(context.WithValue(r.Context(), lookCtxKey{}, true))
 	r2.Method = http.MethodPost

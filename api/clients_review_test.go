@@ -514,10 +514,8 @@ func TestRemoteGrowWaitsForIdle(t *testing.T) {
 	if sl["pending"] != true || sl["why"] != "waiting_for_idle" {
 		t.Fatalf("not told it waits for idle: %v", sl)
 	}
-	// well past DrainMax the stream still runs: a remote grow never drains
-	time.Sleep(3 * 300 * time.Millisecond) // named moment: three DrainMax pass before the gate opens
-	s.Nudge("test")                        // the reactor looks again
-	testkit.Mark(t, s, "past DrainMax")
+	// that the reactor never drains for it is proved by its own pass in
+	// run.TestRemoteGrowWaitsForIdleByTheReactor; here the stream runs to its end uncut
 	for i := 1; i <= 4; i++ {
 		if len(e.Starts()) != n0 || s.Phase() != "ready" {
 			t.Fatalf("the engine was restarted or drained for a remote client with a reply in flight (phase %s)", s.Phase())
@@ -638,37 +636,39 @@ func TestLoneClientDropAndReturnBusy(t *testing.T) {
 	}
 }
 
-// The model stops for another reason (an unload): the next start uses the wants that stand (no
-// client), and the client's return grows it again, uncharged.
+// The model is unloaded (a sleep, as the linger's): the budget is whole again, and the client's
+// return while the model is down costs nothing (rule 1: no running server is restarted); its
+// first request loads the model with its wants, one start, uncharged.
 func TestLoneClientReturnAfterAnUnload(t *testing.T) {
 	e, s, _ := clientsEnv(t, true, nil)
 	_, rs, _ := remoteSrv(t, s)
 	R := growRemote(t, e, s, rs, 1, "r", 2)
+	if restartsLeft(R.first) != 3 {
+		t.Fatalf("the grow while running: restarts left %d", restartsLeft(R.first))
+	}
 	R.cancel()
 	attachmentGone(t, s, R.id)
-	if err := s.Stop(); err != nil {
+	if err := s.Sleep(); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WaitFor(t, 15*time.Second, "stopped", func() bool { return s.Phase() != "ready" })
+	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
 	n := len(e.Starts())
-	if err := s.Start(); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WaitFor(t, 15*time.Second, "started with the standing wants", func() bool { return len(e.Starts()) > n && s.Phase() == "ready" })
-	if sl := s.Status().Shape.Slots; sl != 3 {
-		t.Fatalf("the start after the unload has %d slots, want the base's 3", sl)
-	}
-	n = len(e.Starts())
 	R2 := openHold(t, rs, loneR, tok(1))
+	if R2.status != 200 || restartsLeft(R2.first) != 4 {
+		t.Fatalf("return while down: %d %v", R2.status, R2.first)
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1)); c != 200 {
+		t.Fatalf("the first request after the unload: %d %s", c, b)
+	}
 	m := R2.untilGiven(2)
-	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 3 {
+	if got := len(e.Starts()); got != n+1 || restartsLeft(m) != 4 {
 		t.Fatalf("return after an unload: starts %d (from %d), restarts left %d", got, n, restartsLeft(m))
 	}
 }
 
 // Another caller reshaped the client's range away (a local client that wanted more); the
-// client's return grows the model again, uncharged.
+// client's return grows the model again, charged (S2: else leave and return would restart the
+// model for nothing, forever).
 func TestLoneClientReturnAfterAnotherReshaped(t *testing.T) {
 	e, s, srv := clientsEnv(t, true, nil)
 	_, rs, _ := remoteSrv(t, s)
@@ -688,14 +688,14 @@ func TestLoneClientReturnAfterAnotherReshaped(t *testing.T) {
 	}
 	m := R2.untilGiven(2)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if got := len(e.Starts()); got != n+2 || restartsLeft(m) != 3 {
+	if got := len(e.Starts()); got != n+2 || restartsLeft(m) != 2 {
 		t.Fatalf("return: starts %d (from %d), restarts left %d", got, n+1, restartsLeft(m))
 	}
 	// a change of its wants is charged
 	R3 := openHold(t, rs, `{"hold":true,"name":"r","profile":{"slots":3,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(1))
 	m = R3.untilGiven(3)
 	testkit.WaitPhase(t, s, "ready", 15*time.Second)
-	if restartsLeft(m) != 2 {
+	if restartsLeft(m) != 1 {
 		t.Fatalf("a change of wants: restarts left %d", restartsLeft(m))
 	}
 }
@@ -755,14 +755,46 @@ func TestConversationIDsCarryTheirOwner(t *testing.T) {
 	}
 	// the lookup's ids go in owned and come back as the client sent them
 	c, b, _ := do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(A.id)))
-	if c != 200 || !strings.Contains(b, `"conversation_id":"abc"`) || strings.Contains(b, idA) {
+	if c != 200 || !strings.Contains(b, `"conversation_id":"abc"`) || strings.Contains(b, idA) || strings.Contains(b, idB) {
 		t.Fatalf("lookup: %d %s", c, b)
 	}
 	if l := convLog(e); l[len(l)-1] != idA {
 		t.Fatalf("lookup sent %s, want %s", l[len(l)-1], idA)
 	}
-	// a remote caller never reaches the stream paths
+	// S5: an id then "::" and more (llama-server's lookup reads "<id>::<model>") keeps its tail, so
+	// a lookup of the id still finds its variants, and they come back as the client named them
+	mc := withConv(A.id)
+	mc["X-Conversation-Id"] = "abc::m1"
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, mc); c != 200 {
+		t.Fatalf("A abc::m1: %d %s", c, b)
+	}
+	if l := convLog(e); l[len(l)-1] != idA+"::m1" {
+		t.Fatalf("abc::m1 sent as %s, want %s::m1", l[len(l)-1], idA)
+	}
+	c, b, _ = do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(A.id)))
+	if c != 200 || !strings.Contains(b, `"conversation_id":"abc::m1"`) || !strings.Contains(b, `"conversation_id":"abc"`) {
+		t.Fatalf("lookup of abc with its variant: %d %s", c, b)
+	}
+	// B's lookup of the same id finds none of A's
+	c, b, _ = do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(B.id)))
+	if c != 200 || strings.Contains(b, `"abc`) {
+		t.Fatalf("B's lookup saw A's: %d %s", c, b)
+	}
+	// S4: a remote caller with no attachment has its own name space, never the commons (its id
+	// would otherwise replace, and so cancel, a local stream of the same id)
 	_, rs, _ := remoteSrv(t, s)
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1, map[string]string{"X-Conversation-Id": "abc"})); c != 200 {
+		t.Fatalf("remote abc: %d %s", c, b)
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(2, map[string]string{"X-Conversation-Id": "abc"})); c != 200 {
+		t.Fatalf("remote 2 abc: %d %s", c, b)
+	}
+	l = convLog(e)
+	r1, r2 := l[len(l)-3], l[len(l)-1]
+	if l[len(l)-4] != "HEADER" || l[len(l)-2] != "HEADER" || r1 == idC || r2 == idC || r1 == r2 || r1 == idA || r1 == idB {
+		t.Fatalf("remote ids %s, %s; commons %s, A %s, B %s", r1, r2, idC, idA, idB)
+	}
+	// a remote caller never reaches the stream paths
 	for _, m := range []string{"GET", "DELETE"} {
 		if c, b, _ := do(t, m, rs.URL+"/v1/stream?conv_id=abc", "", as(1)); c != 403 {
 			t.Fatalf("remote %s /v1/stream: %d %s", m, c, b)
@@ -779,17 +811,31 @@ func TestNAboveOneNotOffered(t *testing.T) {
 	_, rs, _ := remoteSrv(t, s)
 	growRemote(t, e, s, rs, 1, "a", 2)
 	before := upstreamBytes(t, e)
-	for _, body := range []string{`{"n":2,"messages":[]}`, `{"n_cmpl":3,"messages":[]}`, `{"n":"2","messages":[]}`, `{"n":1.5,"messages":[]}`} {
+	// every value that is not the literal 1: the model server casts to int32 (-4294967294 and
+	// 4294967297 wrap to 2 and 1, -4294967292 to 4), so the token is judged, not a number
+	for _, v := range []string{`2`, `-4294967294`, `-4294967292`, `4294967297`, `1e0`, `1.0`, `1e400`, `"1"`, `true`, `[1]`, `1.5`, `0`, `-0`, `{}`} {
+		for _, k := range []string{"n", "n_cmpl"} {
+			body := `{"` + k + `":` + v + `,"messages":[]}`
+			c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
+			if c != 400 || codeOf(b) != "n_not_offered" {
+				t.Fatalf("%s: %d %s", body, c, b)
+			}
+		}
+	}
+	// a key given twice is refused whichever value comes last (two readers may keep different ones)
+	for _, body := range []string{`{"n":1,"n":2,"messages":[]}`, `{"n":2,"n":1,"messages":[]}`, `{"n_cmpl":1,"n_cmpl":-4294967294,"messages":[]}`, `{"n":1,"\u006e":2,"messages":[]}`, `{"id_slot":0,"id_slot":1,"messages":[]}`} {
 		c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1))
-		if c != 400 || codeOf(b) != "n_not_offered" {
+		if c != 400 || !strings.Contains(b, "twice") {
 			t.Fatalf("%s: %d %s", body, c, b)
 		}
 	}
 	if upstreamBytes(t, e) != before {
 		t.Fatal("a refused n reached the model server")
 	}
-	if c, b, _ := do(t, "POST", rs.URL+"/v1/completions", `{"n":1,"prompt":"x"}`, as(1)); c == 400 {
-		t.Fatalf("n 1: %d %s", c, b)
+	for _, body := range []string{`{"n":1,"messages":[]}`, `{"n_cmpl":null,"messages":[]}`, `{"n": 1 ,"messages":[]}`} {
+		if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", body, as(1)); c != 200 {
+			t.Fatalf("%s: %d %s", body, c, b)
+		}
 	}
 }
 

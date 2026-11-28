@@ -149,7 +149,11 @@ and it shows in status `errors[]`. Since version 8 every llama.cpp, cudart and u
 `unpacked_size`: gencatalog downloads the archive, unpacks it with the engine's own unpacker and
 counts every file rounded up to 4 KiB plus 4 KiB per directory (`-cache` keeps the archives and
 counts for reruns). `agent_runtime` lists the measured disk of the agent's setup per OS
-(`tools/gencatalog/runtime.json`, measured by a real install; see §7c).
+(`tools/gencatalog/runtime.json`, measured by a real install; see §7c). A model's size and
+sha256 are its LFS record at the repo's pinned commit; where the repo publishes a `SHA256SUMS`
+that names the file, the two must agree or gencatalog stops. `go run ./tools/gencatalog
+-models-only -out catalog/catalog.json` touches no GitHub: it rebuilds only `models` from
+Hugging Face and keeps `llama`, `uv` and `agent_runtime` as they are in the file.
 
 ```json
 {
@@ -167,7 +171,7 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
   },
   "uv": [{"os": "linux", "arch": "amd64", "url": "...", "sha256": "...", "size": 0}],
   "models": [
-    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP",
+    {"id": "gemma4-rp-maxxed-q3kxl", "name": "Gemma 4 26B RP", "codename": "Campfire", "codename_full": "Campfire-26B",
      "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
      "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
      "sha256": "595eddca...", "size": 10001779136,
@@ -179,9 +183,53 @@ counts for reruns). `agent_runtime` lists the measured disk of the agent's setup
 }
 ```
 
+- **Tiers and code names.** The default models are a ladder of tiers, each with a `codename`
+  and a `codename_full` (both optional, short plain text: at most 24 characters, letters,
+  digits, spaces and `.` `-` `'` only, no leading or trailing space; a `codename_full` needs a
+  `codename` and begins with it; checked by `catalog.Parse`). Where a model has one, every place
+  that shows the model shows the full code name first (else the short one) and the model's name
+  second ("Campfire-26B (Gemma 4 26B RP)": the setup page, the tray, the download and swap
+  messages); a catalog without code names reads as before and shows the name alone. The names
+  are display only: what each model does (starter, fallback, recommendation) is unchanged.
+
+  | `codename` | `codename_full` | Model | Catalog id | Picked by |
+  |---|---|---|---|---|
+  | Flashlight | Flashlight-2B | Gemma 4 E2B (fallback) | `gemma4-e2b-q4km` | the ladder, last resort |
+  | Lantern | Lantern-4B | Gemma 4 E4B RP | `gemma4-e4b-rp-q40` | the ladder; the usual first-run starter |
+  | Campfire | Campfire-26B | Gemma 4 26B RP (MoE) | `gemma4-rp-maxxed-q3kxl` | the ladder; the pick on a 16 GB card |
+  | Bonfire | Bonfire-27B | Qwen3.8 27B ASCII-Condensed Heretic Q3_K_XL (dense, not RP) | to come | a person only (`opt_in`) |
+
+- **Opt-in.** `opt_in: true` marks a model a person picks: nothing chooses it by itself. The
+  plan never makes it `recommended` (on a card or CPU-only), the first run never takes it as a
+  starter, and the tier step-down below never steps to it. It is selected through the usual
+  `POST install` / switch, and then serves like any other model; the plan lists it with
+  `opt_in: true`.
+- **Dense, never split.** `moe: false` (and, once the file is on disk, a header with no expert
+  tensors) is a dense model: the sizing core never lays any of its layers off the card
+  (`fit.Choose` moves only MoE expert layers to RAM), so a dense model either fits the card whole
+  or does not fit (`limit: dense_never_split` in the plan). **Tier step-down** (`run/tiers.go`):
+  when the selected catalog model would not fit this card and this machine even with nothing
+  else on them (the card's whole memory, no other program, no game share, and the machine's
+  whole RAM for any expert layers: what passes is left out), the engine serves the best
+  installed catalog model below it (highest `quality` under the selected one's) that is not
+  opt-in and fits the room now, and says so: `GET status` `model`, `model_name`,
+  `model_codename` and `model_codename_full` are the tier that serves, `model_selected` stays
+  the selection, `model_fallback` is true and `model_note` names both ("Bonfire-27B (...) is
+  selected, but it does not fit this card whole, and a dense model is never split between the
+  card and RAM: Campfire-26B (Gemma 4 26B RP) serves instead."). The `model` fact says `serving`
+  beside `model` when a step is taken and again when it ends. The selection (`state.json`
+  `model`) stays the person's; every start tries it first again, so a bigger card serves it.
+  When the model would fit the card alone and only other programs or today's free memory stand
+  in the way, nothing steps down: the engine waits as before (phase `error`, "this model does
+  not fit"). With no installed tier below that fits, it waits too. The served tier's file is in
+  use (storage cannot delete it). Selecting the tier that already serves for a step moves the
+  selection to it and ends the step with no restart. A first-run swap never steps: a target
+  the card cannot hold fails at the fit, it is never started, and the starter comes back with
+  one load (`upgrade.state` `failed`).
 - **Fallback.** `fallback: true` marks a model kept only as a last resort (today gemma4-e2b-q4km);
   `fallback_note` is a one-sentence, game-agnostic description of what to expect. The ladder is
-  gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback. The flag is carried into the plan
+  gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback, which is recommended only when no
+  other model can run (§5, "The fallback is the last resort"). The flag is carried into the plan
   (`models[].fallback`, `fallback_note`) and, when the selected local model is a fallback, into
   `GET status` as `model_fallback` and `model_note`. Front ends show it as a warning; the setup page
   does. `tools/gencatalog` sets it from the model spec.
@@ -519,6 +567,13 @@ reaches the floor, the planner still returns the best shape, flagged slow ("tigh
 With no usable GPU the recommendation is the smallest model whose estimated RAM is at most 60 %
 of `RAMAvail - 2 GiB`, else the smallest that fits at all. Nothing was measured on a CPU, so
 the verdict is marked `estimated` and says so.
+
+**The fallback is the last resort** (`plan.lastResort`). A `fallback` model (today the E2B,
+Flashlight) is a candidate for `recommended` only when no other model is: on a card, the best
+non-fallback, non-opt-in model that fits "yes", else the best that fits "tight", and only with
+neither the fallback ("yes", then "tight"); with no usable GPU, the CPU-only pick above among
+the non-fallback models first (so the E4B wins whenever it fits, comfortable or not), and the
+fallback only when nothing else fits. The fallback stays listed and installable everywhere.
 
 ### Choosing a shape, in order
 
@@ -941,7 +996,8 @@ fields removed (`api.PairedStatus`, copied field by field, so a field added to t
 stays hidden until it is classified; a test fails until it is). Kept: `version`, `api`, `mode`,
 `phase`, `message` (blank in the `error` and `yielded` phases), `progress`, `model`, `backend`,
 `shape`, `tok_s`, `model_tier`, `model_stage`, `kv_type`, `restarts`, `model_fallback`,
-`model_note`, `sampler`, `model_name`, `model_params`, `model_size_class`, `held`. Removed:
+`model_note`, `sampler`, `model_name`, `model_codename`, `model_codename_full`, `model_selected`, `model_params`,
+`model_size_class`, `held`. Removed:
 `port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `upgrade`,
 `contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield`, `build` (paths, pids, the local
 model server's address, error texts, other clients, host program detail). Everything else needs
@@ -949,7 +1005,19 @@ the master token or the engine's own machine.
 
 `serve --open` makes a non-loopback listener with **no** token, and logs one warning line:
 `easy-engine: WARNING: listening on <host>:<port> with no token (--open); ...`. It makes no
-token file.
+token file. What a caller on it may do depends on where it is, judged by the real peer address
+(a loopback address, or one of this machine's own on the listener) and never by a header (a
+forwarding header only ever makes a caller remote):
+
+- **from this machine**: everything, as on the loopback listener (except the person's side of
+  pairing, which answers only on the loopback listener or with the master token).
+- **from another machine**: exactly what a paired token may. On the control API: `hello` and the
+  client's side of pairing (`POST pair`, `GET`/`DELETE pair/{id}`), `GET status` in its reduced
+  form (above: no ports, paths, errors, contexts or other clients), `POST attach` and `DELETE
+  attach/{id}`; every other route, including any added later, is 403 `not_allowed`. On the model
+  server's paths: the same allow list as a paired token (§7g). Administration from another
+  machine (sleep, stop, wake, start, install, remove, settings, storage, logs, events and the rest)
+  needs the master key.
 
 The one exception to the token on a non-loopback listener is the setup page itself (`GET /`,
 `/index.html`): a browser navigation cannot send a header, and the page's script has to load to
@@ -969,11 +1037,11 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `GET events?life=L&since=N[&prefix=P]` | the held NDJSON stream of events after seq N of life L (§7e); 409 for another life |
 | `GET book` | every event name the engine says: `[{name, kind, keyed?, what}]` |
 | `GET hello`, `POST pair`, `GET`/`DELETE pair/{id}`, `GET pairing`, `POST pairing/answer` | who this engine is, and pairing a client on the network (§7f); the first four need no token |
-| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_params, model_size_class}`; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
+| `GET status` | `{version, api, port, held, mode: "local"\|"external", phase, message, progress, model, backend, build, shape, server_url, agent, parents, errors[], model_fallback, model_note, model_tier, model_stage, upgrade, previous, sampler, gpu, device, recovery, model_name, model_codename, model_codename_full, model_selected, model_params, model_size_class}`; `model_name` is the human name of the model that serves, `model_codename` and `model_codename_full` its tier's short and full code names (§3; `""` when it has none, as for a custom file); `model_selected` is the person's selection (the catalog id, `custom:<name>` for a custom file, `""` when none): it equals `model` except after a tier step-down (§3), where `model` and the names are the tier that serves; `build` is the llama.cpp build `{backend, tag, patched, rung, why, pin, vmm, next}` or absent with none installed (§3 "Which llama.cpp build"; `next` is the move to the pin `{backend, tag, state: downloading\|installing\|waiting\|staged\|failed, error, attempt, progress}`); `api` is the control API's version (1; it says the stream and the hold exist), `held` the requests the door holds now (§7e); `recovery` is `{failures, crashes, last_error, retry_in_s, suspect_memory, ceiling_ctx}` while the engine recovers from crashes or failed starts, null once a run has stayed up 2 min (§5 at run time); `device` is what the last llama-server start was given to hold it to the planned adapter (§4a), null before the first start; `model_params`/`model_size_class` are in §7d; `gpu` is the `GPUSummary` of §4a (no processes) as the watchdog last read it, null before the first reading; `previous` is `{id, name, file, bytes}` or null (§7b); `model_tier`, `model_stage` and `upgrade` are the first-run staging fields (§7a); `sampler` is `{policy, active, model, basis, source, note, profiles}` (§7 sampler policy) |
 | `GET gpu[?refresh=1]` | `GPUReport`: `{adapters, engine_adapter, host_adapter, host_integrated, reserve: {others_mib, others_basis, host_mib, host_basis, margin_mib, total_mib}, free_for_model_mib, others_note?, processes: [{pid, name, adapter, dedicated_mib, shared_mib, kind, ours?, host?}], sources}` (§4a); cached 5 s, `?refresh=1` senses now |
 | `POST host {pid?, adapter?: {name, vendor_id, memory_mib}, reserve_mib?}` | what the host app says about itself; 204; 400 for a negative or dead pid, a negative figure, an adapter with neither name nor vendor id. A zero or missing field keeps what is held. The next watchdog tick re-reads with it |
 | `GET hardware` | `Hardware` (§4), cached; `?refresh=1` re-probes |
-| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, size, fits: "yes"\|"tight"\|"no", why, limit, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu, device}` (`gpu` is the `GPUReport` the verdicts were made around; `device` the adapter pin of §4a); `limit`, on a "no", names what stops the model, and `why` says it in words with the figures: `vram` (the card, for an MoE model even with every expert layer in system RAM, or a model kept whole), `ram` (system RAM: a CPU-only run, the expert layers the card cannot hold, or a GPU that borrows system memory), `disk` (the download), `dense_never_split` (a dense model too big for the card: dense models are never split between card and RAM), `vram_block` (no single free block large enough), `kv_type` (an unknown cache type), `model` (the header lacks what the planner needs); the custom file's check carries the same `limit`; `disk_need_bytes` is 0 for an installed model, else what setting it up still needs from the current state (§7c), with `disk_need` `{steps: [{what, peak_bytes, keep_bytes}], peak_bytes, logs_bytes, host_bytes, headroom_bytes, total_bytes}` saying what needs it; the plan's disk verdict uses the same count against the free space read at the time of the request; `disk_free_bytes` is -1 when unknown |
+| `GET plan` | the recommendation and every catalog model with its verdict: `{recommended, models: [{id, name, codename, codename_full, opt_in, size, fits: "yes"\|"tight"\|"no", why, limit, shape, est_vram_mib, est_ram_mib, installed, disk_need_bytes, fallback, fallback_note}], backend, disk_free_bytes, gpu, device}` (`gpu` is the `GPUReport` the verdicts were made around; `device` the adapter pin of §4a); `limit`, on a "no", names what stops the model, and `why` says it in words with the figures: `vram` (the card, for an MoE model even with every expert layer in system RAM, or a model kept whole), `ram` (system RAM: a CPU-only run, the expert layers the card cannot hold, or a GPU that borrows system memory), `disk` (the download), `dense_never_split` (a dense model too big for the card: dense models are never split between card and RAM), `vram_block` (no single free block large enough), `kv_type` (an unknown cache type), `model` (the header lacks what the planner needs); the custom file's check carries the same `limit`; `disk_need_bytes` is 0 for an installed model, else what setting it up still needs from the current state (§7c), with `disk_need` `{steps: [{what, peak_bytes, keep_bytes}], peak_bytes, logs_bytes, host_bytes, headroom_bytes, total_bytes}` saying what needs it; the plan's disk verdict uses the same count against the free space read at the time of the request; `disk_free_bytes` is -1 when unknown |
 | `POST install {model, backend?}` | starts the download/unpack/agent install job; 409 if one runs. While another model is ready and serving it is a **switch** (§7b): the current model keeps serving |
 | `POST cancel` | cancels the running job (keeps `.part` files for resume) |
 | `POST shutdown` | answers 200, then stops the agent and llama-server and exits the engine |
@@ -1045,7 +1113,7 @@ Status fields (all in `GET status`; `null` or `""` when nothing is staged):
 |---|---|
 | `model_tier` | `"starter"`: the answering model is a stand-in, show "simpler speech while the full model downloads"; `"full"`: the chosen model; `""`: external mode or no model |
 | `model_stage` | `""` (no staging), `starter_downloading`, `target_downloading`, `target_retrying`, `target_no_space`, `swapping`, `starter_serving` (upgrade cancelled or the target would not load), `target_serving` (the swap finished this run) |
-| `upgrade` | `{target, target_name, state, progress, error, attempt, retry_in_s}`; `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
+| `upgrade` | `{target, target_name, target_codename, target_codename_full, state, progress, error, attempt, retry_in_s}` (`target_codename` and `target_codename_full` are the target tier's short and full code names, `""` when it has none); `state` is `queued` (starter still downloading), `downloading`, `retrying`, `no_space`, `swapping`, `done`, `cancelled`, `failed`; `progress` is the target download as `{done_bytes, total_bytes, rate_bps, eta_s, step}` |
 | `model_fallback`, `model_note` | also set while `model_tier` is `starter` (the starter's own `fallback_note`, else a generic sentence), the same warning idea as for a fallback model |
 
 ### 7b. Storage, removing downloads, switching models
@@ -1113,7 +1181,7 @@ min_p 0) as both `official` and `rp`. The calibration book keys on `custom-<hash
 instead of a sha256.
 
 Status: `custom` is `{path, name, size, missing, params, size_class}` or null; `model` is `"custom:<name>"` while it
-serves; `model_name` is the human name of the selected model (the catalog name, or the file name).
+serves; `model_name` is the human name of the model that serves (the catalog name, or the file name), `model_codename`/`model_codename_full` its tier's code names (`""` for a custom file).
 `GET plan` gains `custom` (a `CustomCheck` of the current file, or null).
 
 Size class: status has top-level `model_params` (int64, total parameters, 0 unknown) and
@@ -1265,13 +1333,14 @@ host, origin and preflight rules of the gate still apply). 200:
 
 ```json
 {"name":"den-pc","engine":"easy-engine","api":1,"version":"0.4.0","engine_id":"9f2c...32 hex",
- "model_name":"Gemma 4 26B","model_id":"gemma-4-26b","phase":"ready","card":"NVIDIA GeForce RTX 4080",
+ "model_name":"Gemma 4 26B RP","model_codename":"Campfire","model_codename_full":"Campfire-26B","model_id":"gemma4-rp-maxxed-q3kxl","phase":"ready","card":"NVIDIA GeForce RTX 4080",
  "pairing":true,"token_required":true}
 ```
 
 `name` is the `name` setting or the host name; `engine_id` is a stable random id made once and
-kept in `<data dir>/engine-id`; `model_name` the human name of the selected model (its id when it
-has none); `model_id` its catalog id (`""` when none is selected, or when a custom GGUF serves,
+kept in `<data dir>/engine-id`; `model_name` the human name of the model that serves (its id when it
+has none); `model_codename` and `model_codename_full` its tier's short and full code names (§3; `""` when it has none, a custom file or an
+older catalog), shown before the name; `model_id` its catalog id (`""` when none is selected, or when a custom GGUF serves,
 which has no catalog id); `card` the adapter the engine uses ("" before the first reading, or on CPU);
 `pairing` is true only on a non-loopback listener with tokens in force; `token_required` the same
 condition without the pairer. With an `Authorization: Bearer` header the engine checks: a valid
@@ -1417,7 +1486,8 @@ the door still refuses it what cannot be confined while clients hold slots, and 
 An **`--open` caller from another machine** is held on the proxy to the same allow list as a
 paired token (`api/scope.go`: completions, tokenize, detokenize, apply-template, models, health;
 403 `not_allowed` for the rest, so `GET /slots`, `/props`, `/metrics`, embeddings and the like
-never reach the model server from it). Every `open@<ip>` shares one restart budget and one set of
+never reach the model server from it), and on the control API too (§7, `serve --open`): it can
+attach, detach and read the reduced status, never sleep, stop or administer the engine. Every `open@<ip>` shares one restart budget and one set of
 remote caps (each address keeps its own key space).
 
 **Attach.** `POST /engine/v1/attach` (with `X-Easy-Engine: 1`):
@@ -1476,32 +1546,51 @@ the first NDJSON line):
   cache and all, with no restart (`"resumed": true`), and any reshape its leave had asked for is
   cancelled. An attach of a key that stands replaces its presence (`"replaced": true`, the same id
   and slots). A new attachment is served from vacant slots when they suffice, the running ctx is
-  at least its floor, its options change nothing and the RAM prompt cache is off (below); else
-  the model grows. A **local** caller's grow drains: requests are held at the door while the
+  at least its floor, its options change nothing and the RAM prompt cache is off (below); a
+  remote one never from another client's vacant range (that client's prompts are still in it:
+  slots no client held, or its own, only); else the model grows. A **local** caller's grow drains: requests are held at the door while the
   replies in flight finish, and when `DrainMax` (2 min) comes first the ones still running are cut,
   each stream with its terminal event. A **remote** caller's grow or option change never drains:
   it waits for the door's next empty moment (`pending`, `why: waiting_for_idle`); its own requests
   held meanwhile are not in flight, so with no other traffic it grows at once.
 - **The last client's leave reshapes nothing.** The shape and its vacant range stay until (a) the
-  same key returns (it resumes: no restart, no charge), (b) the model server stops for another
+  same key returns (it resumes from its standing range: no restart, no charge), (b) the model server stops for another
   reason (an unload, sleep, a yield, a crash, the person's change: the next start uses the wants
   that stand then), or (c) a local caller with no slots of its own that the stale shape
   under-serves sends a request (the base has no range in it, or it has more slots than the
   standing wants and less context per slot than their max): that request is held and the engine
   reshapes then, as a local grow does. A remote anonymous request never restarts the engine. A
-  leave that is not the last reshapes, when idle, only when that gives someone something (an
-  unserved one served, an option handed over, more ctx to one below its max).
+  **local** leave that is not the last reshapes, when idle, only when that gives someone something
+  (an unserved one served, an option handed over, more ctx to one below its max). A **remote**
+  leave never reshapes by itself: an attachment left out or waiting for room is then given a
+  reshape of its own, when idle, charged to its own budget (a local one's to none); one whose
+  budget is spent waits for the next start made for another reason.
 - **Never held without an event.** A request is held only while something is coming that ends
   the hold: the model on its way up (the phase's word), a reshape asked for its attachment (the
   start that serves it), a stale shape's reshape (that start). A client with no slots in the
   running model and nothing coming for it (its budget spent, its floor short, no room beside the
   others) is answered at once, 503 `no_room` with the why.
-- **Restart budget.** A remote identity is charged only for a restart of a running model server
-  that its own attach or change of wants or options causes: 4 in the engine's life
-  (`restarts_left` in its answer and held lines). A re-attach under a key with the same profile as
-  that key last had (a hash kept per key for the engine's life) is a **return**: never charged,
-  though it still waits for idle if it needs a restart. Leaves, revokes and restarts for other
-  reasons are never charged; local callers and the master key are not budgeted. With the budget
+- **Restart budget.** The budget limits how often a remote client can make a **running** model
+  server stop and start (other callers lose their caches and their time), not ordinary use.
+  Every restart of a running model server is one of: a local caller's want (its attach, change,
+  leave or under-served request), the engine's own reasons (a load, the person's change, a yield,
+  memory, a crash), or a remote identity's attach or change of wants or options, charged to it: 4
+  per **waking period** (`restarts_left` in its answer and held lines; every `--open` address
+  shares one). **A start from down is never charged**: with no model server running (never
+  started, unloaded by the linger, asleep, stopped, yielded), an attach, a return or a change of
+  wants is folded into the wants and costs nothing; the next start (a request wakes the model)
+  takes them. A **return** (the same key again) while the model runs is free when it is served
+  from its own standing range; one that needs a restart is charged as an attach is. Leaves and
+  revokes are never charged and never restart by themselves. **The budget is whole again** when
+  the model server stops for the engine's own reason or the person's: the linger's unload or a
+  sleep asked from this machine, the person's stop, a yield of the card. The stop is the event; no
+  clock. Never by a stop a remote client could cause: a sleep or stop asked from another machine, a
+  crash, an out-of-memory walk or a failed start (after its reshape or any other), a reshape's own
+  stop. Within one waking period, restarts of a running server caused by remote clients alone never
+  exceed what they were charged. An attachment that comes while a start is loading is folded in by
+  a grow once the model is up, and that grow is charged (else each start's loading window would let
+  one more uncharged restart in). The master key from another machine is not budgeted.
+  With the budget
   spent a change is not made (`why: restart_budget_spent`): the attachment keeps what it has, or,
   with nothing, its requests get 503 `no_room` until a start that comes for another reason.
 - **Floors and ceilings.** A remote client's ctx floor never raises the others': it is clamped to
@@ -1597,7 +1686,7 @@ from its source; `api/paths.go`):
 
 | Paths | Slot | At the door |
 |---|---|---|
-| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` above 1 is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329) |
+| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` other than absent, `null` or the literal `1` is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329; the server casts the value to int32, so `-4294967294` would be 2) |
 | `POST /slots/{n}?action=erase` | one, by the path | confined; save and restore refused (403) |
 | `/embedding(s)`, `/v1/embeddings`, `/rerank(ing)`, `/v1/rerank(ing)`, `/tts`, `/(v1/)audio/speech`, `/(v1/)audio/transcriptions` (multipart), `GET /v1/realtime`, `/v1/systemone` | one the server picks | not confinable |
 | `/responses`, `/v1/responses` | one the server picks (its conversion drops `id_slot`, server-chat.cpp:32) | not confinable |
@@ -1607,11 +1696,13 @@ from its source; `api/paths.go`):
 
 A path that cannot be confined is refused to a remote caller while another client holds slots
 (403 `path_not_offered`) and passed for a local one. (A paired token reaches only the completion,
-tokenize and model paths at all: the gate's scope, `api/scope.go`. The table holds for `--open`
-callers and the master key from another machine, which the gate does not scope.)
+tokenize and model paths at all: the gate's scope, `api/scope.go`; an `--open` caller from
+another machine the same. The table holds for the master key from another machine, which the gate
+does not scope.)
 
 A confined request **fails closed**: its body must be exactly one JSON object (a byte-order mark,
-an empty body, an array, trailing data or nesting deeper than 64 is 400 `bad_request`); `id_slot`
+an empty body, an array, trailing data, a top-level key given twice or nesting deeper than 64 is
+400 `bad_request`: two readers may keep different ones of a doubled key); `id_slot`
 must be an integer (or -1, or absent); `/slots/{n}` must be ASCII digits (`1x`, ` 1`, `+1` are 400:
 llama-server would read each as 1). `id_slot` n in the client's numbering goes to its engine slot;
 outside `0..given-1` is 400 `slot_out_of_range`. Absent or -1 takes the least recently used slot of
@@ -1624,8 +1715,14 @@ A body the door must look at (a JSON POST it confines, and the stream lookup it 
 whole before the request reaches the door (a slow sender holds no slot, no count in flight, no
 drain): at most 64 MiB from a local caller and 16 MiB from a remote one (413 `body_too_large`),
 each read bounded by a network timeout on silence (30 s, `API.BodySilence`) and the whole read by
-a second one (5 min, `API.BodyTotal`; 400 `body_unread`), at most 8 remote bodies at once (the
-9th is 429 `busy`). Every other body (multipart uploads, GETs, the unconfinable paths) streams
+a second one (5 min, `API.BodyTotal`; 400 `body_unread`).
+
+**What the engine keeps for other machines is bounded**, whatever they send and however long they
+are held (`api/clientslots.go`): at most 8 remote bodies being read at once, each at most 16 MiB;
+at most 64 MiB of remote bodies read whose requests have not ended (held at the door or in
+flight); so at most 192 MiB of remote bodies in all. At most 8 requests of one remote client
+(every `--open` address counts as one) and 32 of all remote clients are held at the door at once.
+Over any of these: 429 `busy`. Every other body (multipart uploads, GETs, the unconfinable paths) streams
 through as it comes, as before.
 
 **Conversation ids.** llama-server's resumable streams key a session by the `X-Conversation-Id`
@@ -1633,9 +1730,20 @@ header (any case); a new request with a known id replaces and cancels that sessi
 /v1/stream?conv_id=` replays it and `DELETE /v1/stream?conv_id=` cancels it; `POST
 /v1/streams/lookup` takes `conversation_ids` (server-stream.cpp:235-253, :456-470, :510-546,
 :563-604). The engine owns that name space: every id a request gives (the header, the `conv_id`
-query, the lookup's list) is rewritten to one that carries its owner (the attachment's key, or the
-commons, hashed), and the lookup's answer is mapped back; a client replays or cancels only its
-own. A remote caller is refused the stream paths in every method.
+query, the lookup's list) is rewritten to one that carries its owner, hashed: the attachment's
+key; else, for a caller of this machine, the commons; else the remote client's own (a remote
+caller with no attachment never shares the commons, where its id could replace and so cancel a
+local stream). Only the part before the first `::` is owned: the lookup also matches a stored id
+that is the asked one then `::` (`<id>::<model>`, server-stream.cpp:533-536), so the rest is kept
+and a lookup of an id still finds its variants. The lookup's answer is mapped back; a client
+replays, cancels or finds only its own. A remote caller is refused the stream paths in every
+method.
+
+**A departed client's prompts.** A vacant range still carries the prompts of the client that held
+it (the slot's own cache; with the RAM prompt cache on, any slot may load them). A remote caller
+with no attachment is never sent to such a slot (rules 3-4 skip it), and while the RAM prompt cache
+is on and such a range stands it is 409 `attach_required`; a remote attach is never served from
+another client's vacant range. Callers of this machine trust each other and are served as before.
 
 A context saved from a client's slot goes back into that client's slot of the same number after a
 reshape; one saved from a slot no client owned goes back only into the same number when no client

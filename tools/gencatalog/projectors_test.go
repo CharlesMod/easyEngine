@@ -18,8 +18,8 @@ const (
 	f16OID     = "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f"
 )
 
-// fakeHF serves the real tree metadata of the pinned commit and records each request path.
-func fakeHF(t *testing.T, tree string) (*[]string, func()) {
+// fakeProjHF serves the real tree metadata of the pinned commit and records each request path.
+func fakeProjHF(t *testing.T, tree string) (*[]string, func()) {
 	t.Helper()
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,9 +30,8 @@ func fakeHF(t *testing.T, tree string) (*[]string, func()) {
 		}
 		w.Write([]byte(tree))
 	}))
-	old := projHFBase
-	projHFBase = srv.URL
-	return &paths, func() { projHFBase = old; srv.Close() }
+	testHF = srv.URL
+	return &paths, func() { testHF = ""; srv.Close() }
 }
 
 const realTree = `[
@@ -54,7 +53,7 @@ func committed(t *testing.T) catalog.Catalog {
 }
 
 func TestProjectorMatchesCommittedCatalog(t *testing.T) {
-	paths, done := fakeHF(t, realTree)
+	paths, done := fakeProjHF(t, realTree)
 	defer done()
 	c := committed(t)
 	var want *catalog.Projector
@@ -67,7 +66,7 @@ func TestProjectorMatchesCommittedCatalog(t *testing.T) {
 	if want == nil {
 		t.Fatal("committed catalog has no projector on Campfire")
 	}
-	if err := applyProjectors(projClient(), &c); err != nil {
+	if err := applyProjectorsTo(projClient(), c.Models); err != nil {
 		t.Fatal(err)
 	}
 	if len(*paths) != 1 || !strings.HasPrefix((*paths)[0], "/api/models/unsloth/gemma-4-26B-A4B-it-GGUF/tree/"+pinnedRev+"?") {
@@ -80,11 +79,11 @@ func TestProjectorMatchesCommittedCatalog(t *testing.T) {
 		}
 	}
 	// the url differs only in host (the fake server); the rest is exact
-	if got == nil || !strings.HasPrefix(got.URL, projHFBase+"/") {
+	if got == nil || !strings.HasPrefix(got.URL, testHF+"/") {
 		t.Fatalf("projector %+v", got)
 	}
 	g := *got
-	g.URL = strings.Replace(g.URL, projHFBase, "https://huggingface.co", 1)
+	g.URL = strings.Replace(g.URL, testHF, "https://huggingface.co", 1)
 	if !reflect.DeepEqual(&g, want) {
 		t.Fatalf("built %+v\ncommitted %+v", g, *want)
 	}
@@ -106,7 +105,7 @@ func TestProjectorSpecErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, done := fakeHF(t, tc.tree)
+			_, done := fakeProjHF(t, tc.tree)
 			defer done()
 			sp := good
 			tc.mut(&sp)
@@ -118,7 +117,7 @@ func TestProjectorSpecErrors(t *testing.T) {
 		})
 	}
 	t.Run("unknown model", func(t *testing.T) {
-		_, done := fakeHF(t, realTree)
+		_, done := fakeProjHF(t, realTree)
 		defer done()
 		c := committed(t)
 		if err := applyProjectorSpecs(projClient(), &c, map[string]projSpec{"nope": good}); err == nil {
@@ -143,6 +142,10 @@ func TestProjectorSpecKeysAreCatalogModels(t *testing.T) {
 	}
 }
 
+// testHF is the fake Hugging Face of the test running (fakeProjHF); projClient reads it through the
+// client's hf base, the same override the models use.
+var testHF string
+
 func projClient() *client {
-	return &client{http: http.DefaultClient, log: func(string, ...any) {}}
+	return &client{http: http.DefaultClient, log: func(string, ...any) {}, hf: testHF}
 }

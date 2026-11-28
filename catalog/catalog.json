@@ -267,6 +267,8 @@
     {
       "id": "gemma4-rp-maxxed-q3kxl",
       "name": "Gemma 4 26B RP",
+      "codename": "Campfire",
+      "codename_full": "Campfire-26B",
       "file": "gemma4-rp-maxxed-Q3_K_XL.gguf",
       "url": "https://huggingface.co/cmod/gemma4-rp-maxxed-GGUF/resolve/main/gemma4-rp-maxxed-Q3_K_XL.gguf",
       "sha256": "595eddca7b75d56ee4a6fa363deb27f1c70c8792b97508e3336a3a3d3f071b29",
@@ -387,6 +389,8 @@
     {
       "id": "gemma4-e4b-rp-q40",
       "name": "Gemma 4 E4B RP",
+      "codename": "Lantern",
+      "codename_full": "Lantern-4B",
       "file": "gemma-4-E4B-it-qat-rp-Q4_0.gguf",
       "url": "https://huggingface.co/cmod/gemma4-e4b-rp-GGUF/resolve/main/gemma-4-E4B-it-qat-rp-Q4_0.gguf",
       "sha256": "f272d8be50efb4cedeb6895b8fa1e451dad529b2423d99603f8c247a33b0445d",
@@ -461,6 +465,8 @@
     {
       "id": "gemma4-e2b-q4km",
       "name": "Gemma 4 E2B (Q4_K_M)",
+      "codename": "Flashlight",
+      "codename_full": "Flashlight-2B",
       "file": "gemma-4-E2B-it-Q4_K_M.gguf",
       "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf",
       "sha256": "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",

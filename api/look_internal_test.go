@@ -30,7 +30,7 @@ func TestLookGateDecodeBound(t *testing.T) {
 	}
 	g.decoded()
 	g.decoded()
-	g.release("client-1", false, 0)
+	g.release("client-1", false)
 	if g.decoding != 0 || len(g.remote) != 0 {
 		t.Fatalf("gate not empty: decoding %d remote %v", g.decoding, g.remote)
 	}
@@ -57,37 +57,12 @@ func TestLookGateOneRemoteLookPerIdentity(t *testing.T) {
 		}
 		g.decoded()
 	}
-	g.release("client-1", false, 0)
+	g.release("client-1", false)
 	if !g.enter("client-1", false) {
 		t.Fatal("client-1 is still refused after its look was released")
 	}
 }
 
-// The built requests of remote looks hold at most maxLookHeldTotal bytes in all.
-func TestLookGateHeldBytes(t *testing.T) {
-	var g lookGate
-	if !g.hold(maxLookHeldTotal - 10) {
-		t.Fatal("a hold within the total refused")
-	}
-	if g.hold(11) {
-		t.Fatal("a hold over the total admitted")
-	}
-	if !g.hold(10) {
-		t.Fatal("a hold that fills the total exactly refused")
-	}
-	if g.hold(1) {
-		t.Fatal("a hold over a full total admitted")
-	}
-	g.release("client-1", false, maxLookHeldTotal-10)
-	if !g.hold(maxLookHeldTotal - 10) {
-		t.Fatal("release did not free the held bytes")
-	}
-	// a local release holds nothing and frees nothing of the remote identities
-	g.release("loopback", true, 0)
-	if g.held != maxLookHeldTotal {
-		t.Fatalf("held %d", g.held)
-	}
-}
 
 // What parseLook accepts at the edges, and the defaults.
 func TestParseLookEdges(t *testing.T) {

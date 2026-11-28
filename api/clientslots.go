@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CharlesMod/easyEngine/run"
@@ -74,7 +75,50 @@ func oneObject(body []byte) (map[string]json.RawMessage, string) {
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		return nil, "the request body must be exactly one JSON object"
 	}
+	if k, dup := duplicateKey(body); dup {
+		// two readers may keep different ones of the two (the door one, the model server the
+		// other): refused, never guessed
+		return nil, fmt.Sprintf("the request body gives the key %q twice", k)
+	}
 	return obj, ""
+}
+
+// duplicateKey is a key the body's top-level object gives more than once (keys compared as
+// decoded, so "n" and "\u006e" are one key, as llama-server's parser reads them).
+func duplicateKey(body []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		k, _ := t.(string)
+		if seen[k] {
+			return k, true
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// oneCompletion: a confined body's n / n_cmpl is absent, null or exactly the literal 1. The model
+// server reads it as int32 by a plain cast (server-schema.cpp:621-634, nlohmann json.hpp:5203-5236):
+// -4294967294 becomes 2, 1.9 becomes 1, true becomes 1; so the raw token is judged, never a number
+// decoded from it.
+func oneCompletion(raw json.RawMessage) bool {
+	switch string(bytes.TrimSpace(raw)) {
+	case "1", "null":
+		return true
+	}
+	return false
 }
 
 // slotDigits is a /slots/{id} id when confined: ASCII digits only (llama-server reads " 1", "+1"
@@ -154,13 +198,10 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	// over them (server-schema.cpp:64-67, server-task.h:329 "child tasks cannot specify slot",
 	// server-context.cpp:3008-3016, :4726-4745): never in a confined request
 	for _, k := range []string{"n", "n_cmpl"} {
-		if raw, has := obj[k]; has {
-			var n float64
-			if json.Unmarshal(raw, &n) != nil || n > 1 {
-				clientFail(w, &run.ClientError{Status: 400, Code: "n_not_offered",
-					Msg: k + " above 1 runs completions on slots that are not this request's: ask for one completion per request"})
-				return 0, -1, nil, false
-			}
+		if raw, has := obj[k]; has && !oneCompletion(raw) {
+			clientFail(w, &run.ClientError{Status: 400, Code: "n_not_offered",
+				Msg: k + " must be absent, null or exactly 1 here: more runs completions on slots that are not this request's; ask for one completion per request"})
+			return 0, -1, nil, false
 		}
 	}
 	want := -1
@@ -258,10 +299,56 @@ func (a *API) bodyTotal() time.Duration {
 	return 5 * time.Minute
 }
 
+// What the engine keeps for callers on other machines is bounded whatever they send and however
+// long they are held (docs/ENGINE.md §7g): at most maxRemoteReads bodies being read, each at most
+// maxRemoteBody, and at most maxRemoteKept bytes of bodies read and not yet ended (held at the
+// door or in flight), so at most 8 x 16 + 64 = 192 MiB; at most maxRemoteHeldPer requests of one
+// remote client (every --open address one) and maxRemoteHeld of all held at the door at once.
+// Over any of them: 429 busy.
 const (
-	maxRemoteBody  = 16 << 20 // a remote caller's buffered body
-	maxRemoteReads = 8        // remote bodies being read at once (a count: the 9th is 429 busy)
+	maxRemoteBody    = 16 << 20 // a remote caller's buffered body
+	maxRemoteReads   = 8        // remote bodies being read at once (a count: the 9th is 429 busy)
+	maxRemoteKept    = 64 << 20 // bytes of remote bodies read whose requests have not ended
+	maxRemoteHeldPer = 8        // one remote client's requests held at the door at once
+	maxRemoteHeld    = 32       // all remote requests held at the door at once
 )
+
+// busy is the 429 every remote bound answers.
+func busy(w http.ResponseWriter, msg string) {
+	w.Header().Set("Connection", "close")
+	clientFail(w, &run.ClientError{Status: 429, Code: "busy", Msg: msg})
+}
+
+// holdRemote counts a remote request held at the door against its client's share and the remote
+// total; false (answered 429 busy) over either. The result ends the count.
+func (a *API) holdRemote(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	who := identity(r)
+	if strings.HasPrefix(who, "open@") {
+		who = "open" // every --open address is one client (one budget, one share)
+	}
+	a.heldMu.Lock()
+	defer a.heldMu.Unlock()
+	if a.heldBy == nil {
+		a.heldBy = map[string]int{}
+	}
+	if a.heldBy[who] >= maxRemoteHeldPer || a.heldAll >= maxRemoteHeld {
+		busy(w, fmt.Sprintf("too many requests from other machines are waiting (at most %d of one client, %d in all)", maxRemoteHeldPer, maxRemoteHeld))
+		return nil, false
+	}
+	a.heldBy[who]++
+	a.heldAll++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.heldMu.Lock()
+			if a.heldBy[who]--; a.heldBy[who] == 0 {
+				delete(a.heldBy, who)
+			}
+			a.heldAll--
+			a.heldMu.Unlock()
+		})
+	}, true
+}
 
 // bufferedBody: the engine must look at r's body before the door (a JSON POST the table confines,
 // or the stream lookup it rewrites). Every other body streams through as on main.
@@ -276,19 +363,20 @@ func bufferedBody(r *http.Request) bool {
 // that sends slowly holds no slot, no count in flight and no drain. Each read is bounded by a
 // network timeout on silence (BodySilence), the whole read by a second one (BodyTotal), the body
 // by 64 MiB from a local caller and 16 MiB from a remote one (413 body_too_large); at most 8
-// remote bodies are read at once (429 busy). False after it has answered the client.
-func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) bool {
+// remote bodies are read at once, and a remote body read is kept only while all those kept stay
+// within maxRemoteKept (429 busy). The result gives the kept bytes back when the request ends;
+// ok is false after it has answered the client.
+func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) (func(), bool) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return true
+		return func() {}, true
 	}
 	limit := int64(maxSamplerBody)
 	if !local {
 		limit = maxRemoteBody
 		if n := a.remoteReads.Add(1); n > maxRemoteReads {
 			a.remoteReads.Add(-1)
-			w.Header().Set("Connection", "close")
-			clientFail(w, &run.ClientError{Status: 429, Code: "busy", Msg: "too many request bodies from other machines are arriving at once"})
-			return false
+			busy(w, "too many request bodies from other machines are arriving at once")
+			return nil, false
 		} else if a.readsSaid != nil {
 			a.readsSaid(n)
 		}
@@ -317,15 +405,26 @@ func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) bool 
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			clientFail(w, &run.ClientError{Status: 413, Code: "body_too_large", Msg: fmt.Sprintf("the request body is larger than %d MiB", limit>>20)})
-			return false
+			return nil, false
 		}
 		clientFail(w, &run.ClientError{Status: 400, Code: "body_unread", Msg: "the request body did not arrive: " + err.Error()})
-		return false
+		return nil, false
+	}
+	give := func() {}
+	if !local {
+		n := int64(len(body))
+		if a.remoteKept.Add(n) > maxRemoteKept {
+			a.remoteKept.Add(-n)
+			busy(w, fmt.Sprintf("the request bodies from other machines kept now are at the engine's bound (%d MiB)", maxRemoteKept>>20))
+			return nil, false
+		}
+		var once sync.Once
+		give = func() { once.Do(func() { a.remoteKept.Add(-n) }) }
 	}
 	_ = rc.SetReadDeadline(time.Time{})
 	r.Body.Close()
 	setBody(r, body)
-	return true
+	return give, true
 }
 
 // replyTooLarge is a JSON reply over the cap the door maps slot numbers in: answered 502 with a

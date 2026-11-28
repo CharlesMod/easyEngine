@@ -17,17 +17,19 @@ import (
 // network and holds no token yet. It carries nothing secret: no paths, no user name, no tokens,
 // no client list.
 type Hello struct {
-	Name          string `json:"name"`
-	Engine        string `json:"engine"` // always "easy-engine"
-	API           int    `json:"api"`
-	Version       string `json:"version"`
-	EngineID      string `json:"engine_id"`
-	ModelName     string `json:"model_name"`
-	ModelID       string `json:"model_id"` // the selected model's catalog id; "" when none (or a custom file)
-	Phase         string `json:"phase"`
-	Card          string `json:"card"`
-	Pairing       bool   `json:"pairing"`
-	TokenRequired bool   `json:"token_required"`
+	Name              string `json:"name"`
+	Engine            string `json:"engine"` // always "easy-engine"
+	API               int    `json:"api"`
+	Version           string `json:"version"`
+	EngineID          string `json:"engine_id"`
+	ModelName         string `json:"model_name"`
+	ModelCodename     string `json:"model_codename"`      // the tier's code name (Campfire); "" when it has none
+	ModelCodenameFull string `json:"model_codename_full"` // its full code name (Campfire-26B); "" when it has none
+	ModelID           string `json:"model_id"`            // the selected model's catalog id; "" when none (or a custom file)
+	Phase             string `json:"phase"`
+	Card              string `json:"card"`
+	Pairing           bool   `json:"pairing"`
+	TokenRequired     bool   `json:"token_required"`
 	// Vision is true while the running model server has its vision projector loaded.
 	Vision bool `json:"vision"`
 	// Look is true when this engine offers POST /engine/v1/look (docs/ENGINE.md 7h).
@@ -110,7 +112,8 @@ func (a *API) hello(r *http.Request) Hello {
 	}
 	if a.S != nil {
 		st := a.S.Status()
-		h.Version, h.Phase, h.ModelName, h.Vision = st.Version, st.Phase, st.ModelName, st.Vision
+		h.Version, h.Phase, h.ModelName, h.ModelCodename, h.ModelCodenameFull = st.Version, st.Phase, st.ModelName, st.ModelCodename, st.ModelCodenameFull
+		h.Vision = st.Vision
 		if h.ModelName == "" {
 			h.ModelName = st.Model
 		}

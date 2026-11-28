@@ -96,8 +96,16 @@ type Status struct {
 	Contexts *ContextsInfo `json:"contexts,omitempty"`
 	// ModelName is the human name of the selected model; Custom is the user's own GGUF file
 	// (nil when none is set). While it serves, Model is "custom:<name>".
-	ModelName string      `json:"model_name"`
-	Custom    *CustomInfo `json:"custom"`
+	ModelName string `json:"model_name"`
+	// ModelCodename is the catalog tier's code name (Flashlight, Lantern, Campfire, Bonfire) and
+	// ModelCodenameFull its full one (Campfire-26B), shown before ModelName; "" for a model without
+	// one (a custom file, an older catalog).
+	ModelCodename     string `json:"model_codename"`
+	ModelCodenameFull string `json:"model_codename_full"`
+	// ModelSelected is the person's selection (the catalog id, or "custom:<name>"; "" when none).
+	// It is Model except under a tier step (tiers.go), where Model is the tier that serves.
+	ModelSelected string      `json:"model_selected"`
+	Custom        *CustomInfo `json:"custom"`
 	// ModelParams is the total parameter count of the served custom file (0 unknown);
 	// ModelSizeClass is "small" (< 8e9), "large" or "" (custom.go).
 	ModelParams    int64  `json:"model_params"`
@@ -244,6 +252,8 @@ type Supervisor struct {
 	jobRunning  bool
 	jobCancel   context.CancelFunc
 	loadCancel  context.CancelFunc
+	step        *tierStep // tiers.go: the lower tier serving for a selected model the card cannot hold
+	noStepFor   string    // a swap to this id is being judged: its start never steps (starter.go)
 	waking      bool
 	restarts    int
 	hw          *probe.Hardware
@@ -424,7 +434,7 @@ func (s *Supervisor) refresh() {
 // sayModel says the selected model and how it runs.
 func (s *Supervisor) sayModel() {
 	s.mu.Lock()
-	b := map[string]any{"mode": s.st.Mode, "model": s.st.Model, "backend": s.st.Backend, "kv_type": s.st.KVType,
+	b := map[string]any{"mode": s.st.Mode, "model": s.st.Model, "serving": s.servedIDLocked(), "backend": s.st.Backend, "kv_type": s.st.KVType,
 		"target": s.st.Target, "previous": s.st.Previous, "starter_owned": s.st.StarterOwned, "custom": s.st.Custom,
 		"sampler_policy": s.st.SamplerPolicy, "linger_s": s.st.LingerS}
 	s.mu.Unlock()
@@ -484,6 +494,8 @@ func (s *Supervisor) Status() Status {
 	s.stagingLocked(&st)
 	st.Sampler = s.samplerLocked()
 	s.customStatusLocked(&st)
+	st.ModelSelected = st.Model
+	s.tierStatusLocked(&st)
 	st.Previous = s.previousLocked()
 	if s.yieldInfo != nil {
 		y := *s.yieldInfo
@@ -692,7 +704,7 @@ type install struct {
 
 func (s *Supervisor) resolveInstall() (install, bool) {
 	s.mu.Lock()
-	id, be, tag := s.st.Model, s.st.Backend, s.st.Build
+	id, be, tag := s.servedIDLocked(), s.st.Backend, s.st.Build
 	s.mu.Unlock()
 	if id == "" || be == "" {
 		return install{}, false
@@ -958,8 +970,13 @@ func (s *Supervisor) Start() error {
 	return s.startLocked()
 }
 
-// Stop stops the model server and keeps it stopped.
-func (s *Supervisor) Stop() error {
+// Stop stops the model server and keeps it stopped: the person's act, which ends a waking period
+// (every remote client's restart budget is whole again: refillBudgets).
+func (s *Supervisor) Stop() error { return s.StopBy(true) }
+
+// StopBy is Stop asked by a caller of this machine (local) or not: a stop a remote caller asked
+// never refills a restart budget (a remote client never causes the refill itself).
+func (s *Supervisor) StopBy(byLocal bool) error {
 	s.mu.Lock()
 	s.userStopped = true
 	lc := s.loadCancel
@@ -983,11 +1000,19 @@ func (s *Supervisor) Stop() error {
 	if local && !installed && !s.customMissingPhase() {
 		s.setPhase("not_installed", "No model installed")
 	}
+	if byLocal {
+		s.refillBudgets("the model was stopped")
+	}
 	return nil
 }
 
-// Sleep unloads the model; a proxied request or Wake loads it again.
-func (s *Supervisor) Sleep() error {
+// Sleep unloads the model (the linger's unload, or a sleep asked); a proxied request or Wake loads
+// it again. It ends a waking period: every remote client's restart budget is whole again.
+func (s *Supervisor) Sleep() error { return s.SleepBy(true) }
+
+// SleepBy is Sleep asked by a caller of this machine (local) or not: one a remote caller asked
+// never refills a restart budget.
+func (s *Supervisor) SleepBy(byLocal bool) error {
 	s.mu.Lock()
 	lc := s.loadCancel
 	local := s.st.Mode == "local"
@@ -1004,6 +1029,9 @@ func (s *Supervisor) Sleep() error {
 	s.setPhase("sleeping", "Model unloaded")
 	s.keepContexts("a sleep", false)
 	s.stopServerLocked()
+	if byLocal {
+		s.refillBudgets("the model was unloaded")
+	}
 	return nil
 }
 

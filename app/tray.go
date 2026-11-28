@@ -171,7 +171,7 @@ func newController(t Tray, m MenuOptions, sup *run.Supervisor, dir, chat string,
 	c := &controller{t: t, m: m, sup: sup, file: settings.Path(dir), quit: quit, chat: chat, names: map[string]string{}}
 	if cat, err := catalog.Load(dir); err == nil && cat != nil {
 		for _, md := range cat.Models {
-			c.names[md.ID] = md.Name
+			c.names[md.ID] = md.Label() // "Campfire (Gemma 4 26B RP)"
 		}
 	}
 	c.v.autostart, _ = m.Autostart.Enabled(AutostartName)

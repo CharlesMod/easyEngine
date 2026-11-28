@@ -41,6 +41,7 @@ var scopeRoutes = []route{
 	{"GET", "status", true, false},
 	{"POST", "attach", true, false},
 	{"DELETE", "attach/abc", true, false},
+	{"POST", "look", true, false}, // the one way a remote caller's images reach the model (look.go)
 	{"GET", "hardware", false, false},
 	{"GET", "gpu", false, false},
 	{"POST", "host", false, false},

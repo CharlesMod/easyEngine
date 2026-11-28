@@ -195,7 +195,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			s.beginQueued(m)
 			defer s.dropQueued()
 			if !s.modelInstalled(serve) {
-				s.setPhase("downloading", "Downloading "+serve.Name+" first")
+				s.setPhase("downloading", "Downloading "+serve.Label()+" first")
 				if err := s.download(ctx, serve.URL, s.modelPath(serve), serve.SHA256, serve.Size, s.jobProgress("model "+serve.ID)); err != nil {
 					return err
 				}
@@ -207,7 +207,7 @@ func (s *Supervisor) runInstall(ctx context.Context, modelID, backendID string) 
 			if err := s.checkDisk(m); err != nil {
 				return err
 			}
-			s.setPhase("downloading", "Downloading "+m.Name)
+			s.setPhase("downloading", "Downloading "+m.Label())
 			if err := s.download(ctx, m.URL, s.modelPath(m), m.SHA256, m.Size, s.jobProgress("model "+m.ID)); err != nil {
 				return err
 			}

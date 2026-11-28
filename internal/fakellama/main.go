@@ -699,7 +699,16 @@ func main() {
 	mux.HandleFunc("/completion", completion)
 	// resumable streams, as far as a test needs: every conversation id asked is logged to
 	// <ctl>/convs.log ("<what> <id>"); the lookup answers each id it was given
+	// the sessions a header opened, matched by lookup as llama-server does (server-stream.cpp:533-536:
+	// the id itself, or the id then "::")
+	var sessMu sync.Mutex
+	sessions := map[string]bool{}
 	convLog := func(what, id string) {
+		if what == "HEADER" {
+			sessMu.Lock()
+			sessions[id] = true
+			sessMu.Unlock()
+		}
 		if ctl == "" {
 			return
 		}
@@ -724,7 +733,13 @@ func main() {
 		var out []map[string]any
 		for _, id := range in.IDs {
 			convLog("LOOKUP", id)
-			out = append(out, map[string]any{"conversation_id": id, "alive": true})
+			sessMu.Lock()
+			for sid := range sessions {
+				if sid == id || strings.HasPrefix(sid, id+"::") {
+					out = append(out, map[string]any{"conversation_id": sid, "alive": true})
+				}
+			}
+			sessMu.Unlock()
 		}
 		js(w, map[string]any{"sessions": out})
 	})

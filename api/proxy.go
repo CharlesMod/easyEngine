@@ -79,8 +79,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if (bufferedBody(r) || scan) && !a.readBody(w, r, local) {
-		return
+	if bufferedBody(r) || scan {
+		give, ok := a.readBody(w, r, local)
+		if !ok {
+			return
+		}
+		defer give() // the kept bytes count until the request ends
 	}
 	if scan {
 		// a body the scan could not read whole could hide a part the model server still parses
@@ -107,7 +111,17 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sw *streamWriter // a streamed request's stream, opened before its hold
+	var unheld func()    // a remote request's count among those held
 	if rt.Hold {
+		if !local {
+			// held requests of other machines are bounded by count (each a goroutine, a
+			// connection and its kept body)
+			var ok bool
+			if unheld, ok = a.holdRemote(w, r); !ok {
+				return
+			}
+			defer unheld()
+		}
 		if a.S.Streamer() && r.Method == http.MethodPost && completionPath(r.URL.Path) {
 			want, ok := wantsStream(w, r)
 			if !ok {
@@ -122,7 +136,11 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var ok bool
-		if rt, door, done, ok = a.hold(r, q); !ok {
+		rt, door, done, ok = a.hold(r, q)
+		if unheld != nil {
+			unheld() // no longer held: the count is the door's waiting ones only
+		}
+		if !ok {
 			return // the client went away while held
 		}
 		if door.Err != nil {

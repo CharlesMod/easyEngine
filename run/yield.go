@@ -723,6 +723,7 @@ func (s *Supervisor) yieldNow(d yield.Decision) {
 	}
 	s.stopServerLocked()
 	s.opMu.Unlock()
+	s.refillBudgets("the card was yielded to " + d.Reason)
 	s.logf("yield: unloaded in %s", s.cfg.Now().Sub(start).Round(time.Millisecond))
 }
 

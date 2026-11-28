@@ -69,8 +69,11 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	// Every other body streams through as it comes.
 	// A caller from another machine may put no media into a request (api/media.go): its POST
 	// bodies are all read whole here, by the same bounded read, and scanned.
-	scan := !local && r.Method == http.MethodPost
-	if !local {
+	// A look's chat request (api/look.go) is the engine's own, built from images it decoded: the
+	// checks of a remote caller's media are not for it.
+	look := isLook(r)
+	scan := !local && r.Method == http.MethodPost && !look
+	if !local && !look {
 		if why := mediaRefusal(r); why != "" {
 			clientFail(w, mediaRefused(why))
 			return
@@ -154,6 +157,16 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	defer func() { done(sum) }()
 	if sw != nil {
 		w = sw // from here every answer goes through the stream opened for the hold
+	}
+	if look && rt.Kind != "unavailable" && (rt.Kind == "external" || !a.S.VisionLoaded()) {
+		// the model is up (woken and held for, if it slept) and has no projector
+		const msg = "the model server has no vision projector loaded (status vision_note says why)"
+		if sw != nil {
+			sw.refuse(run.Route{Kind: "unavailable", Message: msg})
+			return
+		}
+		clientFail(w, &run.ClientError{Status: 409, Code: "vision_off", Msg: msg})
+		return
 	}
 	switch rt.Kind {
 	case "unavailable":

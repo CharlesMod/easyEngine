@@ -53,6 +53,8 @@ type API struct {
 	BodyTotal time.Duration
 	// remoteReads counts remote bodies being read now (clientslots.go readBody).
 	remoteReads atomic.Int32
+	// looks bounds the look calls (api/look.go).
+	looks lookGate
 	// readsSaid, when set (tests), is told each new count of remoteReads: the event a test
 	// waits on, since the count itself says nothing to any hub.
 	readsSaid func(int32)
@@ -354,6 +356,10 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 	case "attach":
 		if need("POST") {
 			a.attach(w, r)
+		}
+	case "look":
+		if need("POST") {
+			a.look(w, r)
 		}
 	case "facts":
 		if need("GET") {

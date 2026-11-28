@@ -122,7 +122,9 @@ func TestLocalImageBodyUnchanged(t *testing.T) {
 	e, _, srv := clientsEnv(t, true, nil)
 	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"what is it"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`
 	c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", body, jsonCT)
-	if c != 200 {
+	// no projector is loaded: the model server answers its own clean 500 (server-common.cpp:1420),
+	// which the engine leaves alone for a local caller
+	if c != 500 || !strings.Contains(b, "image input is not supported") {
 		t.Fatalf("local image: %d %s", c, b)
 	}
 	if got := upstreamBytes(t, e); got != body {

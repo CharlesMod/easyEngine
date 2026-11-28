@@ -35,6 +35,7 @@ type PairedStatus struct {
 	Held           int             `json:"held"`
 	Vision         bool            `json:"vision"`
 	VisionNote     string          `json:"vision_note"`
+	Look           bool            `json:"look"`
 }
 
 // StatusKept lists the run.Status JSON names a paired token sees; StatusRemoved the ones it does
@@ -43,7 +44,7 @@ var (
 	StatusKept = []string{"version", "api", "mode", "phase", "message", "progress", "model", "backend",
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
 		"model_note", "sampler", "model_name", "model_params", "model_size_class", "held",
-		"vision", "vision_note"}
+		"vision", "vision_note", "look"}
 	StatusRemoved = []string{
 		"port",       // the control API's own port
 		"server_url", // the local model server's URL and port
@@ -82,7 +83,7 @@ func PairedStatusOf(st run.Status) PairedStatus {
 		ModelTier: st.ModelTier, ModelStage: st.ModelStage, KVType: st.KVType, Restarts: st.Restarts,
 		ModelFallback: st.ModelFallback, ModelNote: st.ModelNote, Sampler: st.Sampler,
 		ModelName: st.ModelName, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
-		Held: st.Held, Vision: st.Vision, VisionNote: st.VisionNote,
+		Held: st.Held, Vision: st.Vision, VisionNote: st.VisionNote, Look: st.Look,
 	}
 }
 

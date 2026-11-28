@@ -128,6 +128,9 @@ type Status struct {
 	Vision         bool      `json:"vision"`
 	VisionNote     string    `json:"vision_note"`
 	VisionProgress *Progress `json:"vision_progress"`
+	// Look says this engine offers POST /engine/v1/look (always true since ee-vision part B; it
+	// does not depend on a projector being loaded, which vision says).
+	Look bool `json:"look"`
 }
 
 // Parent is a watched parent process.
@@ -497,6 +500,7 @@ func (s *Supervisor) Status() Status {
 	st.Recovery = s.recoveryLocked()
 	vi := s.visionInfoLocked()
 	st.Vision, st.VisionNote, st.VisionProgress = vi.Vision, vi.Note, s.visionProgressLocked()
+	st.Look = true
 	st.Held = int(s.door.held.Load())
 	st.Contexts = s.kept.info()
 	st.Attachments, st.Wants = atts, wi

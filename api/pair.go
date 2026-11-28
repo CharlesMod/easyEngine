@@ -30,6 +30,8 @@ type Hello struct {
 	TokenRequired bool   `json:"token_required"`
 	// Vision is true while the running model server has its vision projector loaded.
 	Vision bool `json:"vision"`
+	// Look is true when this engine offers POST /engine/v1/look (docs/ENGINE.md 7h).
+	Look bool `json:"look"`
 	// Said only when the request sent a bearer that this engine checks.
 	Paired   *bool  `json:"paired,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
@@ -102,7 +104,7 @@ func (a *API) pairRoute(w http.ResponseWriter, r *http.Request, name string, nee
 
 func (a *API) hello(r *http.Request) Hello {
 	h := Hello{Engine: "easy-engine", API: run.APIVersion, EngineID: a.EngineID,
-		Pairing: a.Pair != nil, TokenRequired: a.AnyHost && a.Tokens != nil}
+		Pairing: a.Pair != nil, TokenRequired: a.AnyHost && a.Tokens != nil, Look: true}
 	if a.Name != nil {
 		h.Name = a.Name()
 	}

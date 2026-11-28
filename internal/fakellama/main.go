@@ -573,11 +573,38 @@ func main() {
 			return
 		}
 		var body struct {
-			Stream bool `json:"stream"`
+			Stream        bool `json:"stream"`
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+			Messages []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
 		}
 		raw, _ := io.ReadAll(r.Body)
 		recordBody(raw)
 		json.Unmarshal(raw, &body)
+		// images: llama-server answers 500 without a projector (server-common.cpp:1420), and
+		// with one each image is 100 prompt tokens here
+		images := 0
+		for _, m := range body.Messages {
+			var parts []struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(m.Content, &parts) == nil {
+				for _, p := range parts {
+					if p.Type == "image_url" {
+						images++
+					}
+				}
+			}
+		}
+		if images > 0 && mmproj == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			fmt.Fprint(w, `{"error":{"code":500,"message":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj","type":"server_error"}}`)
+			return
+		}
 		cacheN, promptN, slot := account(raw, t, 5)
 		// FAKELLAMA_ID_SLOT: every reply says the slot it used, as llama-server's native replies do
 		withSlot := os.Getenv("FAKELLAMA_ID_SLOT") != ""
@@ -628,6 +655,12 @@ func main() {
 				fmt.Fprintf(w, "data: %s\n\n", last)
 				fl.Flush()
 			}
+			if body.StreamOptions.IncludeUsage { // the usage chunk: no choices, usage and timings
+				u, _ := json.Marshal(map[string]any{"choices": []any{}, "usage": map[string]any{"prompt_tokens": promptN + 100*images, "completion_tokens": 5, "total_tokens": promptN + 100*images + 5},
+					"timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN + 100*images, "prompt_ms": 12.5, "predicted_n": 5, "predicted_ms": 100}})
+				fmt.Fprintf(w, "data: %s\n\n", u)
+				fl.Flush()
+			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			fl.Flush()
 			return
@@ -635,7 +668,13 @@ func main() {
 		if d, _ := time.ParseDuration(os.Getenv("FAKELLAMA_CHAT_DELAY")); d > 0 {
 			time.Sleep(d) // named moment: FAKELLAMA_CHAT_DELAY, how long the fake takes to answer
 		}
-		reply := map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ready"}}}, "timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN, "predicted_n": 5}}
+		content := "ready"
+		if images > 0 {
+			content = fmt.Sprintf("saw %d images", images)
+		}
+		reply := map[string]any{"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": content}}},
+			"usage":   map[string]any{"prompt_tokens": promptN + 100*images, "completion_tokens": 5, "total_tokens": promptN + 100*images + 5},
+			"timings": map[string]any{"cache_n": cacheN, "prompt_n": promptN + 100*images, "prompt_ms": 12.5, "predicted_n": 5, "predicted_ms": 100}}
 		if withSlot {
 			reply["id_slot"] = slot
 		}

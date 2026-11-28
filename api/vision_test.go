@@ -214,8 +214,8 @@ func TestVisionInStatusAndHello(t *testing.T) {
 		t.Error("paired status has vision_progress")
 	}
 	for name, mm := range map[string]map[string]json.RawMessage{"hello": hm, "paired status": pm, "status": m} {
-		if _, ok := mm["look"]; ok {
-			t.Errorf("%s carries look", name)
+		if string(mm["look"]) != "true" { // the look call is offered (POST /engine/v1/look)
+			t.Errorf("%s look = %s, want true", name, mm["look"])
 		}
 	}
 }

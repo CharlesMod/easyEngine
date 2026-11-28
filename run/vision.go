@@ -447,3 +447,31 @@ func (s *Supervisor) visionFilesLocked(cat *catalog.Catalog, servedID string) []
 	}
 	return out
 }
+
+// VisionLoaded says the running model server has the vision projector loaded (status vision).
+func (s *Supervisor) VisionLoaded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vis.loaded && s.shape != nil
+}
+
+// LookSpec is what the look call needs of the projector it will run with: the loaded one, or,
+// while no server runs (asleep, loading), the served model's, which the start the look wakes
+// would load. ok is false when no projector can serve a look: none loaded on a running server,
+// or the served model has none.
+func (s *Supervisor) LookSpec() (p catalog.Projector, ok bool) {
+	s.mu.Lock()
+	if s.shape != nil {
+		defer s.mu.Unlock()
+		if !s.vis.loaded || s.vis.proj == nil {
+			return catalog.Projector{}, false
+		}
+		return *s.vis.proj, true
+	}
+	s.mu.Unlock()
+	in, found := s.servingModel()
+	if !found || in.model.Projector == nil {
+		return catalog.Projector{}, false
+	}
+	return *in.model.Projector, true
+}

@@ -46,6 +46,8 @@ func pairedMay(id string, r *http.Request) bool {
 			return r.Method == http.MethodGet
 		case p == "/engine/v1/attach":
 			return r.Method == http.MethodPost
+		case p == "/engine/v1/look": // the one way a remote caller's images reach the model (api/look.go)
+			return r.Method == http.MethodPost
 		case strings.HasPrefix(p, "/engine/v1/attach/"):
 			rest := strings.TrimPrefix(p, "/engine/v1/attach/")
 			return rest != "" && !strings.Contains(rest, "/") && r.Method == http.MethodDelete

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -22,6 +23,7 @@ type projSpec struct {
 	imageMiB        int
 	maxImageTokens  int
 	detail          catalog.Detail
+	kwargs          map[string]json.RawMessage // chat_template_kwargs for look calls (Bonfire: enable_thinking false)
 }
 
 // projectorSpecs is keyed by catalog model id.
@@ -29,7 +31,7 @@ type projSpec struct {
 // Proposal, not an entry yet (Bonfire, the hive's Qwen 27B): repo ggml-org/Qwen3.8-27B-GGUF,
 // file mmproj-Qwen3.8-27B-Q8_0.gguf, rev c1869413 (short: resolve it to the full sha when it is
 // added), loadMiB 852, imageMiB 106 (958 peak - 852), maxImageTokens 0, detail low 768, high 1536,
-// max 2048.
+// max 2048, kwargs {"enable_thinking": false} (each look call must turn thinking off).
 var projectorSpecs = map[string]projSpec{
 	"gemma4-rp-maxxed-q3kxl": {
 		repo: "unsloth/gemma-4-26B-A4B-it-GGUF", rev: "c099eb48e663fd284577b04978a94ffccb261841",
@@ -97,6 +99,7 @@ func (c *client) hfProjector(sp projSpec) (catalog.Projector, error) {
 			URL:    projHFBase + "/" + sp.repo + "/resolve/" + sp.rev + "/" + url.PathEscape(sp.file),
 			SHA256: strings.ToLower(e.LFS.OID), Size: size,
 			LoadMiB: sp.loadMiB, ImageMiB: sp.imageMiB, MaxImageTokens: sp.maxImageTokens, Detail: sp.detail,
+			ChatTemplateKwargs: sp.kwargs,
 		}, nil
 	}
 	return catalog.Projector{}, fmt.Errorf("%s: file %s not in the repo at %s", sp.repo, sp.file, sp.rev)

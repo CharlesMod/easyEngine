@@ -291,9 +291,12 @@ func TestBuildStartDuringRemoveLeavesNothing(t *testing.T) {
 	p.gate = nil
 	p.mu.Unlock()
 	close(gate)
+	// The engine says the remove is complete with the phase not_installed and a "Removed" message,
+	// after the disk is emptied and state.json written. Leaving "removing" is not that word: a Start
+	// racing the remove can move the phase on while the state still stands on disk.
 	testkit.WaitFor(t, 15*time.Second, "the remove done", func() bool {
 		st := s.Status()
-		return st.Phase != "removing" && st.Backend == "" && st.Build == nil
+		return st.Phase == "not_installed" && strings.HasPrefix(st.Message, "Removed") && st.Backend == "" && st.Build == nil
 	})
 	s.Start() // and one after it: nothing selected, nothing to move
 	left, _ := os.ReadDir(filepath.Join(p.e.Data, "backends"))

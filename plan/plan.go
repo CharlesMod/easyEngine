@@ -53,9 +53,15 @@ func Seed(info gguf.Info, kvType string) (fit.Footprint, error) {
 type Verdict struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Fits string `json:"fits"` // yes | tight | no
-	Why  string `json:"why"`
+	// Codename is the tier's code name, shown before Name ("" when the catalog has none).
+	Codename string `json:"codename"`
+	// CodenameFull is the full code name (Campfire-26B); "" when the catalog has none.
+	CodenameFull string `json:"codename_full"`
+	// OptIn: a person picks this model; it is never Recommended.
+	OptIn bool   `json:"opt_in,omitempty"`
+	Size  int64  `json:"size"`
+	Fits  string `json:"fits"` // yes | tight | no
+	Why   string `json:"why"`
 	// Limit is what stops a "no" model, one of the Limit* codes ("" when it fits). Why says it
 	// in words; front ends may key on Limit.
 	Limit      string    `json:"limit,omitempty"`
@@ -150,9 +156,9 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 	room := RoomForSensed(hw, sum, res.Backend)
 	pin := PinDevice(sum, AccelOf(res.Backend), nil)
 	res.Device = &pin
-	bestYes, bestTight := -1, -1
+	bestYes, bestTight := [2]int{-1, -1}, [2]int{-1, -1} // [0] the models, [1] the last resorts
 	for _, m := range c.Models {
-		v := Verdict{ID: m.ID, Name: m.Name, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
+		v := Verdict{ID: m.ID, Name: m.Name, Codename: m.Codename, CodenameFull: m.CodenameFull, OptIn: m.OptIn, Size: m.Size, ImportOnly: m.URL == "", Fallback: m.Fallback, FallbackNote: m.FallbackNote}
 		if installed != nil {
 			v.Installed = installed(m)
 		}
@@ -194,26 +200,39 @@ func PlanSensedDisk(c *catalog.Catalog, hw probe.Hardware, w fit.Wants, sum gpus
 			v.Fits, v.Why = verdictFor(fp, sh, w)
 		}
 		res.Models = append(res.Models, v)
-		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
-			continue // cannot be recommended: no fit, or not installable from here
+		if v.Fits == "no" || (!v.Installed && v.ImportOnly) || v.OptIn {
+			continue // cannot be recommended: no fit, not installable from here, or a person's pick
 		}
-		if v.Fits == "yes" && (bestYes < 0 || m.Quality > c.Models[bestYes].Quality) {
-			bestYes = len(res.Models) - 1
+		k := 0 // a fallback model is a candidate only when nothing else is (lastResort)
+		if lastResort(v) {
+			k = 1
 		}
-		if v.Fits == "tight" && (bestTight < 0 || m.Quality > c.Models[bestTight].Quality) {
-			bestTight = len(res.Models) - 1
+		if v.Fits == "yes" && (bestYes[k] < 0 || m.Quality > c.Models[bestYes[k]].Quality) {
+			bestYes[k] = len(res.Models) - 1
+		}
+		if v.Fits == "tight" && (bestTight[k] < 0 || m.Quality > c.Models[bestTight[k]].Quality) {
+			bestTight[k] = len(res.Models) - 1
 		}
 	}
 	switch {
 	case room.NoGPU:
 		res.Recommended = cpuOnlyPick(res.Models, room)
-	case bestYes >= 0:
-		res.Recommended = res.Models[bestYes].ID
-	case bestTight >= 0:
-		res.Recommended = res.Models[bestTight].ID
+	case bestYes[0] >= 0:
+		res.Recommended = res.Models[bestYes[0]].ID
+	case bestTight[0] >= 0:
+		res.Recommended = res.Models[bestTight[0]].ID
+	case bestYes[1] >= 0:
+		res.Recommended = res.Models[bestYes[1]].ID
+	case bestTight[1] >= 0:
+		res.Recommended = res.Models[bestTight[1]].ID
 	}
 	return res
 }
+
+// lastResort says whether a verdict may be recommended only when no other is a candidate: a
+// fallback model (today the E2B) is offered where nothing else can run, and never ahead of a
+// model that can, even one that fits tight or runs on the processor.
+func lastResort(v Verdict) bool { return v.Fallback }
 
 // cpuComfort is the share of free RAM (after the OS reserve) a CPU-only model may take and still
 // count as comfortable: the rest is for the game and the OS caches.
@@ -221,27 +240,30 @@ const cpuComfort = 0.6
 
 // cpuOnlyPick is the recommendation without a usable GPU. Nothing was ever measured on a CPU, so
 // the choice is conservative: the smallest installable model that fits in RAM, preferring one
-// whose need stays within cpuComfort of the free RAM, not the best-quality one. The verdicts are
-// marked Estimated.
+// whose need stays within cpuComfort of the free RAM, not the best-quality one. A last resort (a
+// fallback model) is picked only when no other model fits at all, comfortable or not. The
+// verdicts are marked Estimated.
 func cpuOnlyPick(vs []Verdict, room fit.Room) string {
 	_, free, _ := room.Budget() // RoomFor's room: every field read
-	best, bestComfy := -1, -1
-	for i, v := range vs {
-		if v.Fits == "no" || (!v.Installed && v.ImportOnly) {
-			continue
+	for _, last := range []bool{false, true} {
+		best, bestComfy := -1, -1
+		for i, v := range vs {
+			if v.Fits == "no" || (!v.Installed && v.ImportOnly) || v.OptIn || lastResort(v) != last {
+				continue
+			}
+			if best < 0 || v.Size < vs[best].Size {
+				best = i
+			}
+			if float64(v.EstRAMMiB) <= cpuComfort*free && (bestComfy < 0 || v.Size < vs[bestComfy].Size) {
+				bestComfy = i
+			}
 		}
-		if best < 0 || v.Size < vs[best].Size {
-			best = i
+		if bestComfy >= 0 {
+			return vs[bestComfy].ID
 		}
-		if float64(v.EstRAMMiB) <= cpuComfort*free && (bestComfy < 0 || v.Size < vs[bestComfy].Size) {
-			bestComfy = i
+		if best >= 0 {
+			return vs[best].ID
 		}
-	}
-	if bestComfy >= 0 {
-		return vs[bestComfy].ID
-	}
-	if best >= 0 {
-		return vs[best].ID
 	}
 	return ""
 }

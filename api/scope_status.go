@@ -12,27 +12,30 @@ import (
 // listed here into a fresh value, so a field added to run.Status later is withheld from a
 // paired token until it is added here on purpose (a test fails until it is classified).
 type PairedStatus struct {
-	Version        string          `json:"version"`
-	API            int             `json:"api"`
-	Mode           string          `json:"mode"`
-	Phase          string          `json:"phase"`
-	Message        string          `json:"message"`
-	Progress       *run.Progress   `json:"progress"`
-	Model          string          `json:"model"`
-	Backend        string          `json:"backend"`
-	Shape          *run.ShapeInfo  `json:"shape"`
-	TokS           *float64        `json:"tok_s"`
-	ModelTier      string          `json:"model_tier"`
-	ModelStage     string          `json:"model_stage"`
-	KVType         string          `json:"kv_type"`
-	Restarts       int             `json:"restarts"`
-	ModelFallback  bool            `json:"model_fallback"`
-	ModelNote      string          `json:"model_note,omitempty"`
-	Sampler        run.SamplerInfo `json:"sampler"`
-	ModelName      string          `json:"model_name"`
-	ModelParams    int64           `json:"model_params"`
-	ModelSizeClass string          `json:"model_size_class"`
-	Held           int             `json:"held"`
+	Version           string          `json:"version"`
+	API               int             `json:"api"`
+	Mode              string          `json:"mode"`
+	Phase             string          `json:"phase"`
+	Message           string          `json:"message"`
+	Progress          *run.Progress   `json:"progress"`
+	Model             string          `json:"model"`
+	Backend           string          `json:"backend"`
+	Shape             *run.ShapeInfo  `json:"shape"`
+	TokS              *float64        `json:"tok_s"`
+	ModelTier         string          `json:"model_tier"`
+	ModelStage        string          `json:"model_stage"`
+	KVType            string          `json:"kv_type"`
+	Restarts          int             `json:"restarts"`
+	ModelFallback     bool            `json:"model_fallback"`
+	ModelNote         string          `json:"model_note,omitempty"`
+	Sampler           run.SamplerInfo `json:"sampler"`
+	ModelName         string          `json:"model_name"`
+	ModelCodename     string          `json:"model_codename"`
+	ModelCodenameFull string          `json:"model_codename_full"`
+	ModelSelected     string          `json:"model_selected"`
+	ModelParams       int64           `json:"model_params"`
+	ModelSizeClass    string          `json:"model_size_class"`
+	Held              int             `json:"held"`
 }
 
 // StatusKept lists the run.Status JSON names a paired token sees; StatusRemoved the ones it does
@@ -40,7 +43,7 @@ type PairedStatus struct {
 var (
 	StatusKept = []string{"version", "api", "mode", "phase", "message", "progress", "model", "backend",
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
-		"model_note", "sampler", "model_name", "model_params", "model_size_class", "held"}
+		"model_note", "sampler", "model_name", "model_codename", "model_codename_full", "model_selected", "model_params", "model_size_class", "held"}
 	StatusRemoved = []string{
 		"port",       // the control API's own port
 		"server_url", // the local model server's URL and port
@@ -73,7 +76,7 @@ func PairedStatusOf(st run.Status) PairedStatus {
 		Progress: st.Progress, Model: st.Model, Backend: st.Backend, Shape: st.Shape, TokS: st.TokS,
 		ModelTier: st.ModelTier, ModelStage: st.ModelStage, KVType: st.KVType, Restarts: st.Restarts,
 		ModelFallback: st.ModelFallback, ModelNote: st.ModelNote, Sampler: st.Sampler,
-		ModelName: st.ModelName, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
+		ModelName: st.ModelName, ModelCodename: st.ModelCodename, ModelCodenameFull: st.ModelCodenameFull, ModelSelected: st.ModelSelected, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
 		Held: st.Held,
 	}
 }

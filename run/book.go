@@ -11,7 +11,7 @@ var book = []event.Decl{
 	{Name: "engine", Kind: event.Fact, What: "this engine: {version, api, port}; api is the control API's version (run.APIVersion)"},
 	{Name: "door", Kind: event.Fact, What: "the door: {held}, the requests held until the model is up (not in flight; request counts those)"},
 	{Name: "phase", Kind: event.Fact, What: "where the engine stands: {phase, message}, as status says them"},
-	{Name: "model", Kind: event.Fact, What: "the selected model and the settings it runs with, as state.json holds them (no keys): {mode, model, backend, kv_type, target, previous, starter_owned, custom, sampler_policy, linger_s}"},
+	{Name: "model", Kind: event.Fact, What: "the selected model and the settings it runs with, as state.json holds them (no keys): {mode, model, serving (the catalog id that serves: model, or the tier a step serves for it), backend, kv_type, target, previous, starter_owned, custom, sampler_policy, linger_s}"},
 	{Name: "mind.shape", Kind: event.Fact, What: "the running shape (status shape); gone when no model server is up"},
 	{Name: "mind.device", Kind: event.Fact, What: "what the last model server start was given to hold it to its card (status device)"},
 	{Name: "mind.exit", Kind: event.Happening, What: "the model server ended on its own: {pid, why, quick, oom}"},

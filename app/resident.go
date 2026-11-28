@@ -144,7 +144,9 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 	}()
 	for {
 		now := trafficOf(sup)
-		if now.requests() != seen.requests() {
+		// the cause is read from the arrivals alone: a request arrives (EnterAs) before it begins,
+		// and a look between the two must not take its begin for another, local, request
+		if now.arrivals != seen.arrivals {
 			cause = "local_requests"
 			if now.remoteArrivals != seen.remoteArrivals {
 				cause = "remote_requests"

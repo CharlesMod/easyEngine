@@ -18,10 +18,20 @@ func remoteReq(who, name string, slots int) run.AttachRequest {
 	return run.AttachRequest{Name: name, Profile: clProf(slots, 8192, 4096), Identity: who, Hold: true}
 }
 
-// settle lets the reactor act on every reshape asked, each to its start, with no traffic.
+// settle lets the reactor act on every reshape asked, each to its start, with no traffic. The
+// mind may take a plan itself (a client's word wakes it) before the test's pass: a start under way
+// is waited for too (its phase), so the next act never lands in its loading window by chance.
 func settle(t *testing.T, s *run.Supervisor) {
 	t.Helper()
+	moving := func() bool {
+		switch s.Phase() {
+		case "resizing", "starting", "loading":
+			return true
+		}
+		return false
+	}
 	for i := 0; i < 8; i++ {
+		testkit.WaitFor(t, 15*time.Second, "no start under way", func() bool { return !moving() })
 		n, g := s.PlansNow()
 		if n == 0 {
 			return

@@ -45,10 +45,10 @@ func TestSleepIdleHoldsARequestAfterItsDecision(t *testing.T) {
 		t.Fatalf("a request after the decision was routed %+v: it would go to a server being stopped", r)
 	}
 	testkit.WaitPhase(t, s, "ready", 15*time.Second) // the held request woke the model again
-	// the held request woke the model: one more start (a port another program took meanwhile
-	// can make it two: the engine's own retry of a bind clash, not this test's matter)
-	if n := len(e.Starts()); n < 2 {
-		t.Fatalf("starts %v, want the first and the wake", e.Starts())
+	// the held request woke the model: one more start (a start that lost its port to another
+	// program is started again within the same launch: counted apart, bindfails.log)
+	if n := len(e.Starts()); n != 2+bindFails(e) {
+		t.Fatalf("starts %v (%d lost a port), want the first and the wake", e.Starts(), bindFails(e))
 	}
 }
 
@@ -131,4 +131,26 @@ func TestIdleSleepAndTheSwap(t *testing.T) {
 	if x.Phase != "sleeping" || x.SleepReason != "idle" || x.Message != run.IdleMessage || sup2.StoppedByPerson() {
 		t.Fatalf("after the swap's end: phase %q reason %q message %q stopped %v", x.Phase, x.SleepReason, x.Message, sup2.StoppedByPerson())
 	}
+}
+
+// A local caller held while the engine reshapes to give the commons a range (every slot is an
+// attachment's) is held at the door: SleepIdle declines while it waits, as for any held request.
+func TestSleepIdleDeclinesAHeldCommonsCaller(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	_, h := clAttach(t, s, remoteReq("client-1", "far", 3)) // every slot: no commons
+	defer s.LeaveHold(h.ID, h.Gen)
+	settle(t, s)
+	rt, _, end := s.EnterAs(run.DoorAsk{ReqID: "local", Identity: "loopback", Local: true, Touch: run.TouchSlot})
+	if !rt.Hold || end != nil {
+		if end != nil {
+			end(nil)
+		}
+		t.Skipf("the commons had room (route %+v): nothing to hold here", rt)
+	}
+	release := s.Hold() // as the proxy holds it while it waits for the reshape
+	if err := s.SleepIdle(); !errors.Is(err, run.ErrIdleBusy) {
+		t.Fatalf("SleepIdle with a held local caller: %v", err)
+	}
+	release()
 }

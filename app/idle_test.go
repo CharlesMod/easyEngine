@@ -17,6 +17,7 @@ import (
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/event"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/internal/tokens"
 	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/settings"
 )
@@ -434,8 +435,17 @@ func TestServeWakeOnABusyCard(t *testing.T) {
 	}
 }
 
-// fwd makes a caller another machine's, as a forwarder says (api.peerLocal: never local).
-var fwd = map[string]string{"X-Forwarded-For": "10.9.8.7"}
+// fwd makes a caller another machine's, as a forwarder says (api.peerLocal: never local), with
+// the master key the gate asks of a forwarded request on the loopback listener (D7; the engine
+// reads tokens.json in its data dir at each request: made here as api/gate_fwd_test.go does).
+func (r *residentRun) fwd(t *testing.T) map[string]string {
+	t.Helper()
+	master, err := tokens.Open(r.dir).Master()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"X-Forwarded-For": "10.9.8.7", "Authorization": "Bearer " + master}
+}
 
 // postFrom sends a chat completion with extra headers and answers the status code.
 func (r *residentRun) postFrom(t *testing.T, hdr map[string]string) int {
@@ -499,7 +509,7 @@ func TestRemoteLeaveWaitsTheLongDelay(t *testing.T) {
 	r, _ := startEngine(t, false, nil, nil)
 	s := r.follow(t)
 	waitPhase(t, r, "ready")
-	leave := r.holdFrom(t, s, fwd)
+	leave := r.holdFrom(t, s, r.fwd(t))
 	from := len(s.events())
 	leave()
 	r.awaitArmed(t, "idle_sleep/remote_leave", settings.DefaultIdleSleepS*time.Second)
@@ -533,7 +543,7 @@ func TestRemoteAttachDetachCycleNeitherStartsNorStops(t *testing.T) {
 	starts := len(e.Starts())
 	from := len(s.events())
 	for i := 0; i < 5; i++ {
-		r.holdFrom(t, s, fwd)()
+		r.holdFrom(t, s, r.fwd(t))()
 	}
 	r.awaitArmed(t, "idle_sleep/remote_leave", settings.DefaultIdleSleepS*time.Second)
 	evs := s.events()
@@ -553,11 +563,11 @@ func TestRemoteFloorWhenIdleSleepIsZero(t *testing.T) {
 	r.put(t, `{"idle_sleep_s": 0}`)
 	s.until(t, "asleep at once after the load", func(evs []event.Event) bool { return indexOf(evs, 0, sleptFor("idle")) >= 0 })
 	from := len(s.events())
-	if code := r.postFrom(t, fwd); code != 200 {
+	if code := r.postFrom(t, r.fwd(t)); code != 200 {
 		t.Fatalf("remote request: %d", code)
 	}
 	r.awaitArmed(t, "floor/remote_requests", run.RemoteIdleFloor)
-	leave := r.holdFrom(t, s, fwd)
+	leave := r.holdFrom(t, s, r.fwd(t))
 	leave()
 	r.awaitArmed(t, "floor/remote_leave", run.RemoteIdleFloor)
 	if i := indexOf(s.events(), indexOf(s.events(), from, isReady), isSleeping); i >= 0 {

@@ -85,7 +85,9 @@ func (s *Supervisor) Nudge(why string) {
 	s.nudge(why)
 }
 
-// Begin marks a request at the door in flight; call the result when it ends.
+// Begin marks a request in flight with no route taken (tests, and the engine's own work that
+// routes nothing); call the result when it ends. A request that is forwarded to the model server
+// takes Enter or EnterAs, which route and count it in one step under the door's lock.
 func (s *Supervisor) Begin() func() {
 	end := s.begin("")
 	return func() { end(nil) }

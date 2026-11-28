@@ -405,8 +405,13 @@ func (a *API) test() TestResult {
 		}
 		return res
 	}
-	rt := a.S.Route()
+	// the route and the count in flight are one step at the door (Enter), as for a proxied
+	// request: an idle sleep never stops the server between them (run.SleepIdleSince)
+	rt, end := a.S.Enter("")
 	if rt.Kind != "local" {
+		if end != nil {
+			end(nil)
+		}
 		light := "amber"
 		if st.Phase == "not_installed" || st.Phase == "error" {
 			light = "red"
@@ -416,8 +421,7 @@ func (a *API) test() TestResult {
 		}
 		return TestResult{Light: light, Message: rt.Message, Model: st.Model, Code: "not_ready"}
 	}
-	done := a.S.Begin()
-	defer done()
+	defer end(nil)
 	return RunTest(rt.URL+"/v1", st.Model, "", send)
 }
 

@@ -75,7 +75,7 @@ func TestRemoteInFlightThenLocalRequestKeepsTheFloor(t *testing.T) {
 	s := r.follow(t)
 	r.put(t, `{"idle_sleep_s": 0}`)
 	s.until(t, "asleep after the load", func(evs []event.Event) bool { return indexOf(evs, 0, sleptFor("idle")) >= 0 })
-	got, done, release := r.streamFrom(t, e, fwd)
+	got, done, release := r.streamFrom(t, e, r.fwd(t))
 	<-got
 	waitPhase(t, r, "ready")
 	if code := r.post(t); code != 200 { // a local request, during the remote one
@@ -95,7 +95,7 @@ func TestRemoteInFlightThenLocalLeaveKeepsTheFloor(t *testing.T) {
 	r, e := startEngine(t, false, nil, gated)
 	s := r.follow(t)
 	waitPhase(t, r, "ready")
-	got, done, release := r.streamFrom(t, e, fwd)
+	got, done, release := r.streamFrom(t, e, r.fwd(t))
 	<-got
 	r.put(t, `{"idle_sleep_s": 0}`)
 	r.holdFrom(t, s, nil)() // a local attachment comes and leaves while the remote request runs
@@ -129,7 +129,7 @@ func TestRemoteAttachAndLeaveDuringTheSleepIsRemote(t *testing.T) {
 	waitPhase(t, r, "ready")
 	r.put(t, `{"idle_sleep_s": 0}`)
 	<-decided
-	r.holdFrom(t, s, fwd)() // attaches (and asks a wake) and leaves inside the sleep
+	r.holdFrom(t, s, r.fwd(t))() // attaches (and asks a wake) and leaves inside the sleep
 	from := len(s.events())
 	close(proceed)
 	if f := armedAfter(t, s, from); f.Why != "floor/remote_leave" || f.DelayMS != run.RemoteIdleFloor.Milliseconds() {

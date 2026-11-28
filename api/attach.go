@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -158,8 +160,16 @@ func (a *API) attach(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	who := identity(r)
+	cred := ""
+	if strings.HasPrefix(who, tokens.MasterID+"@") {
+		sum := sha256.Sum256([]byte(bearerOf(r)))
+		cred = hex.EncodeToString(sum[:])
+	}
 	v, hold, ce := a.S.AttachClient(run.AttachRequest{Pid: in.Pid, Name: in.Name, Hold: in.Hold, Profile: in.Profile,
-		Identity: identity(r), Local: local})
+		Identity: who, Local: local, Cred: cred,
+		// a token revoked between the gate and the registration: the attach does not stand
+		Valid: func() bool { return a.credValid(who, cred) }})
 	if ce != nil {
 		clientFail(w, ce)
 		return

@@ -145,15 +145,23 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	default:
 		return -1, -1, func() {}, true // touches no slot the door must name
 	}
-	var body []byte
-	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body) // read before the door (readBody): in memory
-		r.Body.Close()
-	}
-	obj, why := oneObject(body)
+	obj, why := oneObject(bodyOf(r))
 	if why != "" {
 		badRequest(w, why)
 		return 0, -1, nil, false
+	}
+	// n / n_cmpl above 1 makes the server run child tasks on any free slots, copying the state
+	// over them (server-schema.cpp:64-67, server-task.h:329 "child tasks cannot specify slot",
+	// server-context.cpp:3008-3016, :4726-4745): never in a confined request
+	for _, k := range []string{"n", "n_cmpl"} {
+		if raw, has := obj[k]; has {
+			var n float64
+			if json.Unmarshal(raw, &n) != nil || n > 1 {
+				clientFail(w, &run.ClientError{Status: 400, Code: "n_not_offered",
+					Msg: k + " above 1 runs completions on slots that are not this request's: ask for one completion per request"})
+				return 0, -1, nil, false
+			}
+		}
 	}
 	want := -1
 	if raw, has := obj["id_slot"]; has && string(bytes.TrimSpace(raw)) != "null" {
@@ -173,7 +181,7 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	}
 	es, release = a.S.TakeSlot(slots, want)
 	obj["id_slot"] = json.RawMessage(strconv.Itoa(es))
-	out, err := json.Marshal(obj)
+	out, err := marshalObject(obj)
 	if err != nil {
 		release()
 		badRequest(w, "the request body must be exactly one JSON object")
@@ -183,8 +191,41 @@ func (a *API) confine(w http.ResponseWriter, r *http.Request, door run.ClientDoo
 	return clientOf(es), es, release, true
 }
 
+// marshalObject writes a body object back: every value as the client sent it (numbers, unicode
+// and the order of keys inside each value kept; no HTML escaping), the top-level keys sorted.
+func marshalObject(obj map[string]json.RawMessage) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// heldBody is a body read whole before the door: its bytes are taken as they are, not copied.
+type heldBody struct {
+	*bytes.Reader
+	b []byte
+}
+
+func (heldBody) Close() error { return nil }
+
+// bodyOf is r's body bytes (a held body's own; else read now).
+func bodyOf(r *http.Request) []byte {
+	if hb, ok := r.Body.(heldBody); ok {
+		return hb.b
+	}
+	if r.Body == nil {
+		return nil
+	}
+	b, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	return b
+}
+
 func setBody(r *http.Request, b []byte) {
-	r.Body = io.NopCloser(bytes.NewReader(b))
+	r.Body = heldBody{bytes.NewReader(b), b}
 	r.ContentLength = int64(len(b))
 	r.Header.Set("Content-Length", strconv.Itoa(len(b)))
 	r.TransferEncoding = nil
@@ -201,7 +242,8 @@ func (b *silentBody) Read(p []byte) (int, error) {
 	return b.r.Read(p)
 }
 
-// bodySilence is how long a request body may go silent between reads.
+// bodySilence is how long a request body may go silent between reads; bodyTotal how long one
+// body may take in all.
 func (a *API) bodySilence() time.Duration {
 	if a.BodySilence > 0 {
 		return a.BodySilence
@@ -209,26 +251,66 @@ func (a *API) bodySilence() time.Duration {
 	return 30 * time.Second
 }
 
+func (a *API) bodyTotal() time.Duration {
+	if a.BodyTotal > 0 {
+		return a.BodyTotal
+	}
+	return 5 * time.Minute
+}
+
+const (
+	maxRemoteBody  = 16 << 20 // a remote caller's buffered body
+	maxRemoteReads = 8        // remote bodies being read at once (a count: the 9th is 429 busy)
+)
+
+// bufferedBody: the engine must look at r's body before the door (a JSON POST the table confines,
+// or the stream lookup it rewrites). Every other body streams through as on main.
+func bufferedBody(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return classify(r.Method, r.URL.Path) == pathSlot || path.Clean("/"+r.URL.Path) == "/v1/streams/lookup"
+}
+
 // readBody reads a proxied request's whole body before the request reaches the door: a client
 // that sends slowly holds no slot, no count in flight and no drain. Each read is bounded by a
-// network timeout on silence (BodySilence); the body by maxSamplerBody (413 body_too_large).
-// False after it has answered the client.
-func (a *API) readBody(w http.ResponseWriter, r *http.Request) bool {
+// network timeout on silence (BodySilence), the whole read by a second one (BodyTotal), the body
+// by 64 MiB from a local caller and 16 MiB from a remote one (413 body_too_large); at most 8
+// remote bodies are read at once (429 busy). False after it has answered the client.
+func (a *API) readBody(w http.ResponseWriter, r *http.Request, local bool) bool {
 	if r.Body == nil || r.Body == http.NoBody {
 		return true
 	}
+	limit := int64(maxSamplerBody)
+	if !local {
+		limit = maxRemoteBody
+		if a.remoteReads.Add(1) > maxRemoteReads {
+			a.remoteReads.Add(-1)
+			w.Header().Set("Connection", "close")
+			clientFail(w, &run.ClientError{Status: 429, Code: "busy", Msg: "too many request bodies from other machines are arriving at once"})
+			return false
+		}
+		defer a.remoteReads.Add(-1)
+	}
 	rc := http.NewResponseController(w)
-	d := a.bodySilence()
-	// network timeout: a request body that sends nothing for d between two reads is cut
-	arm := func() { _ = rc.SetReadDeadline(time.Now().Add(d)) }
-	body, err := io.ReadAll(&silentBody{r: http.MaxBytesReader(w, r.Body, maxSamplerBody), arm: arm})
+	d, end := a.bodySilence(), time.Now().Add(a.bodyTotal())
+	arm := func() {
+		// network timeout: a request body that sends nothing for d between two reads is cut;
+		// network timeout: and one that is still arriving at end (a drip) is cut too
+		dl := time.Now().Add(d)
+		if end.Before(dl) {
+			dl = end
+		}
+		_ = rc.SetReadDeadline(dl)
+	}
+	body, err := io.ReadAll(&silentBody{r: http.MaxBytesReader(w, r.Body, limit), arm: arm})
 	if err != nil {
 		// the deadline stays passed: the server must not wait for the rest of the body before it
 		// answers (net/http reads an unread body before a reply), and the connection ends after
 		w.Header().Set("Connection", "close")
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			clientFail(w, &run.ClientError{Status: 413, Code: "body_too_large", Msg: fmt.Sprintf("the request body is larger than %d MiB", maxSamplerBody>>20)})
+			clientFail(w, &run.ClientError{Status: 413, Code: "body_too_large", Msg: fmt.Sprintf("the request body is larger than %d MiB", limit>>20)})
 			return false
 		}
 		clientFail(w, &run.ClientError{Status: 400, Code: "body_unread", Msg: "the request body did not arrive: " + err.Error()})

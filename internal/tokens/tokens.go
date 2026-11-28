@@ -235,6 +235,23 @@ func (s *Store) Verify(bearer string) (clientID string, v Verdict) {
 	return clientID, v
 }
 
+// MasterIs reports whether the master token that stands now has this SHA-256 (hex): an
+// attachment made with an earlier master token ends when the master is replaced.
+func (s *Store) MasterIs(sha string) bool {
+	want, err := hex.DecodeString(sha)
+	if err != nil || len(want) != sha256.Size {
+		return false
+	}
+	s.mu.Lock()
+	d, _, err := s.load()
+	s.mu.Unlock()
+	if err != nil || d.Master == "" {
+		return false
+	}
+	h := hash(d.Master)
+	return subtle.ConstantTimeCompare(h[:], want) == 1
+}
+
 // Valid reports whether id names a token that stands: the master, or an issued token not revoked.
 func (s *Store) Valid(id string) bool {
 	if id == MasterID {

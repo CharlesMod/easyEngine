@@ -264,12 +264,7 @@ func (a *API) ForgetRevoked() {
 	}
 	// a revoked token's attachments end at once: held streams end with {"end":"revoked"}, slots
 	// go vacant, the facts say them gone (only a paired token's id is asked about)
-	a.S.DetachRevoked(func(id string) bool {
-		if id == "loopback" || id == "unknown" || id == "engine" || strings.Contains(id, "@") {
-			return true
-		}
-		return v.Valid(id)
-	})
+	a.S.DetachRevoked(func(id, cred string) bool { return a.credValid(id, cred) })
 	a.seen.Range(func(k, _ any) bool {
 		id := k.(string)
 		if !v.Valid(id) {
@@ -278,6 +273,21 @@ func (a *API) ForgetRevoked() {
 		}
 		return true
 	})
+}
+
+// credValid says whether the credential an attachment of identity came with still stands: a
+// paired token not revoked, the master token not replaced (cred: its hash). Callers with no
+// credential of their own (loopback, --open) always stand.
+func (a *API) credValid(id, cred string) bool {
+	switch {
+	case strings.HasPrefix(id, tokens.MasterID+"@"):
+		m, ok := a.Tokens.(interface{ MasterIs(sha string) bool })
+		return !ok || m.MasterIs(cred)
+	case id == "loopback" || id == "unknown" || id == "engine" || strings.Contains(id, "@"):
+		return true
+	}
+	v, ok := a.Tokens.(interface{ Valid(id string) bool })
+	return !ok || v.Valid(id)
 }
 
 // sawClient says a paired client as a client fact the first time the gate accepts its token in

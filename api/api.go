@@ -49,6 +49,10 @@ type API struct {
 	// BodySilence is the network timeout on a proxied request's body: the longest it may send
 	// nothing between two reads before it is cut (default 30 s; clientslots.go readBody).
 	BodySilence time.Duration
+	// BodyTotal bounds the whole read of such a body (a second network timeout; default 5 min).
+	BodyTotal time.Duration
+	// remoteReads counts remote bodies being read now (clientslots.go readBody).
+	remoteReads atomic.Int32
 
 	// Pair holds the pairing requests (pair.go). Nil: pairing is not offered (a loopback
 	// listener, or --open), hello says pairing false and POST pair answers 404.

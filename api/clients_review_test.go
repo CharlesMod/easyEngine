@@ -52,7 +52,11 @@ func (c *revocable) revoke(id string) {
 }
 
 func newRevocable() *revocable {
-	return &revocable{toks: map[string]string{"tok-1": "client-1", "tok-2": "client-2", "tok-3": "client-3"}, gone: map[string]bool{}}
+	toks := map[string]string{}
+	for i := 1; i <= 6; i++ {
+		toks["tok-"+strconv.Itoa(i)] = "client-" + strconv.Itoa(i)
+	}
+	return &revocable{toks: toks, gone: map[string]bool{}}
 }
 
 // remoteSrv is a tokened listener on the same engine: every caller is a remote client.
@@ -149,47 +153,75 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 		refused("paired "+p, c, b, "not_allowed", 403)
 	}
 	// an --open listener's caller from another machine (here: through a forwarder that says so)
-	// is not scoped by the gate: the door alone keeps it to its own slots. It attaches C (engine 6).
+	// is held to the paired allow list on the proxy: the same lists (api/scope.go)
 	openSrv := httptest.NewServer((&api.API{S: s, AnyHost: true, Open: true}).Handler())
 	t.Cleanup(openSrv.Close)
 	fwd := map[string]string{"X-Forwarded-For": "10.9.8.7"}
-	C := openHold(t, openSrv, `{"hold":true,"name":"c","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, fwd)
-	if C.status != 200 || C.first["client_id"] != "open@127.0.0.1" || C.first["local"] != false {
-		t.Fatalf("open attach: %d %v", C.status, C.first)
-	}
-	C.untilGiven(1)
-	testkit.WaitPhase(t, s, "ready", 15*time.Second)
 	opost := func(path, body string) (int, string) {
 		c, b, _ := do(t, "POST", openSrv.URL+path, body, hdr(fwd))
 		return c, b
 	}
+	for _, p := range []string{"/slots/0?action=erase", "/infill", "/v1/embeddings", "/v1/some/new/path", "/v1/responses", "/v1/streams/lookup"} {
+		c, b = opost(p, `{}`)
+		refused("open "+p, c, b, "not_allowed", 403)
+	}
+	for _, p := range []string{"/slots", "/props", "/metrics", "/lora-adapters", "/v1/stream?conv_id=x"} {
+		c, b, _ := do(t, "GET", openSrv.URL+p, "", fwd)
+		refused("open GET "+p, c, b, "not_allowed", 403)
+	}
+	C := openHold(t, openSrv, `{"hold":true,"name":"c","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, fwd)
+	if C.status != 200 || C.first["client_id"] != "open@127.0.0.1" || C.first["local"] != false {
+		t.Fatalf("open attach: %d %v", C.status, C.first)
+	}
+	C.untilGiven(1) // engine 6
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	if c, b := opost("/v1/chat/completions", `{"id_slot":0,"messages":[]}`); c != 200 || upstreamSlot(t, e) != float64(6) {
+		t.Fatalf("open completion: %d %s upstream %v", c, b, upstreamSlot(t, e))
+	}
+	// the master key from another machine is the owner: not held to the list, but the door still
+	// refuses it what cannot be confined while clients hold slots, and the stream paths
+	msrv := httptest.NewServer((&api.API{S: s, AnyHost: true, Tokens: testChecker{"tok-m": "master"}}).Handler())
+	t.Cleanup(msrv.Close)
+	mh := map[string]string{"Authorization": "Bearer tok-m", "X-Forwarded-For": "10.9.8.6", "Content-Type": "application/json"}
+	for _, p := range []string{"/v1/embeddings", "/v1/some/new/path", "/v1/responses", "/v1/streams/lookup"} {
+		c, b, _ := do(t, "POST", msrv.URL+p, `{}`, mh)
+		refused("master "+p, c, b, "path_not_offered", 403)
+	}
+	for _, m := range []string{"GET", "DELETE"} {
+		c, b, _ := do(t, m, msrv.URL+"/v1/stream?conv_id=x", "", mh)
+		refused("master "+m+" /v1/stream", c, b, "path_not_offered", 403)
+	}
+	// a local attachment L (engine 7): the slot path takes digits only, its own numbers
+	L := openHold(t, srv, `{"hold":true,"name":"l","profile":{"slots":1,"ctx_per_slot":{"max":8192,"floor":4096}}}`, nil)
+	L.untilGiven(1)
+	testkit.WaitPhase(t, s, "ready", 15*time.Second)
+	lpost := func(path, body string) (int, string) {
+		c, b, _ := do(t, "POST", srv.URL+path, body, asClient(L.id))
+		return c, b
+	}
 	acts := slotActs(e)
-	c, b = opost("/slots/1x?action=erase", ``)
+	c, b = lpost("/slots/1x?action=erase", ``)
 	refused("/slots/1x", c, b, "bad_request", 400)
-	c, b = opost("/slots/%201?action=erase", ``)
+	c, b = lpost("/slots/%201?action=erase", ``)
 	refused("/slots/ 1", c, b, "bad_request", 400)
-	c, b = opost("/slots/%2B0?action=erase", ``)
+	c, b = lpost("/slots/%2B0?action=erase", ``)
 	refused("/slots/+0", c, b, "bad_request", 400)
-	c, b = opost("/slots/1?action=erase", ``)
+	c, b = lpost("/slots/1?action=erase", ``)
 	refused("/slots/1", c, b, "slot_out_of_range", 400)
 	if slotActs(e) != acts {
 		t.Fatalf("a refused slot action reached the model server: %q", slotActs(e))
 	}
-	opost("/slots/0?action=erase", ``)
-	if got := strings.TrimPrefix(slotActs(e), acts); got != "/slots/6?action=erase\n" {
+	lpost("/slots/0?action=erase", ``)
+	if got := strings.TrimPrefix(slotActs(e), acts); got != "/slots/7?action=erase\n" {
 		t.Fatalf("erase of its slot 0 went to %q", got)
 	}
 	// /infill honours id_slot: confined as a completion, a bad body fails closed
-	if c, b := opost("/infill", `{"id_slot":0,"input_prefix":"a","input_suffix":"b"}`); c != 200 || upstreamSlot(t, e) != float64(6) {
+	if c, b := lpost("/infill", `{"id_slot":0,"input_prefix":"a","input_suffix":"b"}`); c != 200 || upstreamSlot(t, e) != float64(7) {
 		t.Fatalf("/infill: %d %s upstream %v", c, b, upstreamSlot(t, e))
 	}
-	c, b = opost("/infill", "\xEF\xBB\xBF"+`{"id_slot":0}`)
+	c, b = lpost("/infill", "\xEF\xBB\xBF"+`{"id_slot":0}`)
 	refused("/infill BOM", c, b, "bad_request", 400)
-	// a path that cannot be confined: refused to a remote caller, a local one passes the door
-	c, b = opost("/v1/embeddings", `{"input":"x"}`)
-	refused("embeddings", c, b, "path_not_offered", 403)
-	c, b = opost("/v1/some/new/path", `{}`)
-	refused("an unknown POST", c, b, "path_not_offered", 403)
+	// a local caller passes the door on a path that cannot be confined
 	if c, b, _ := do(t, "POST", srv.URL+"/v1/embeddings", `{"input":"x"}`, jsonCT); c == 403 {
 		t.Fatalf("a local caller's embeddings: %d %s", c, b)
 	}
@@ -215,11 +247,9 @@ func TestTwoRemoteClientsIsolation(t *testing.T) {
 	} else if v, _ := upstreamSlot(t, e).(float64); v > 2 {
 		t.Fatalf("client-3's pick went to %v", v)
 	}
-	// the open caller, gone, now holds nothing: the commons for it too, by the slot path as well
-	c, b = opost("/slots/4?action=erase", ``)
-	refused("open erase 4", c, b, "slot_not_offered", 400)
-	c, b = opost("/infill", `{"id_slot":3}`)
-	refused("open infill 3", c, b, "slot_not_offered", 400)
+	// the open caller, gone, now holds nothing: the commons for it too
+	c, b = opost("/v1/chat/completions", `{"id_slot":3,"messages":[]}`)
+	refused("open id_slot 3", c, b, "slot_not_offered", 400)
 }
 
 func TestClientRequiredAndAttachRequired(t *testing.T) {
@@ -257,18 +287,24 @@ func TestRemoteCapsAndPid(t *testing.T) {
 	if c != 413 {
 		t.Fatalf("70 KiB remote body: %d %.200s", c, b)
 	}
-	// four attachments per remote identity
-	for i := 0; i < 4; i++ {
-		if h := openHold(t, rs, fmt.Sprintf(`{"hold":true,"name":"h%d","profile":{}}`, i), tok(1)); h.status != 200 {
-			t.Fatalf("hold %d: %d %v", i, h.status, h.first)
+	// four attachments per remote identity; sixteen remote in all; neither counts a local one
+	for n := 1; n <= 4; n++ {
+		for i := 0; i < 4; i++ {
+			if h := openHold(t, rs, fmt.Sprintf(`{"hold":true,"name":"h%d","profile":{}}`, i), tok(n)); h.status != 200 {
+				t.Fatalf("client-%d hold %d: %d %v", n, i, h.status, h.first)
+			}
 		}
 	}
 	h := openHold(t, rs, `{"hold":true,"name":"h4","profile":{}}`, tok(1))
 	if h.status != 429 || h.first["code"] != "too_many_attachments" {
-		t.Fatalf("the fifth: %d %v", h.status, h.first)
+		t.Fatalf("the fifth of one client: %d %v", h.status, h.first)
 	}
-	// 32 in all: local pid attachments fill the rest
-	for i := 0; i < 28; i++ {
+	h = openHold(t, rs, `{"hold":true,"name":"h0","profile":{}}`, tok(5))
+	if h.status != 429 || h.first["code"] != "too_many_attachments" {
+		t.Fatalf("the seventeenth remote: %d %v", h.status, h.first)
+	}
+	// 32 local attachments, whatever the remote ones hold
+	for i := 0; i < 32; i++ {
 		c, b, _ := do(t, "POST", srv.URL+"/engine/v1/attach", fmt.Sprintf(`{"pid":%d,"name":"p%d","profile":{}}`, os.Getpid(), i), csrfHdr)
 		if c != 200 {
 			t.Fatalf("local %d: %d %s", i, c, b)
@@ -276,8 +312,33 @@ func TestRemoteCapsAndPid(t *testing.T) {
 	}
 	c, b, _ = do(t, "POST", srv.URL+"/engine/v1/attach", fmt.Sprintf(`{"pid":%d,"name":"p-last","profile":{}}`, os.Getpid()), csrfHdr)
 	if c != 429 || codeOf(b) != "too_many_attachments" {
-		t.Fatalf("the 33rd: %d %s", c, b)
+		t.Fatalf("the 33rd local: %d %s", c, b)
 	}
+}
+
+func TestRemoteSlotCaps(t *testing.T) {
+	e, s, srv := clientsEnv(t, false, nil)
+	_, rs, _ := remoteSrv(t, s)
+	want := func(n int, name string, slots int) *held {
+		return openHold(t, rs, fmt.Sprintf(`{"hold":true,"name":%q,"profile":{"slots":%d,"ctx_per_slot":{"max":8192,"floor":1024}}}`, name, slots), tok(n))
+	}
+	if h := want(1, "a", 10); h.status != 200 {
+		t.Fatalf("10 slots: %d %v", h.status, h.first)
+	}
+	if h := want(1, "b", 7); h.status != 429 || h.first["code"] != "too_many_slots" {
+		t.Fatalf("17 for one client: %d %v", h.status, h.first)
+	}
+	if h := want(2, "a", 16); h.status != 200 {
+		t.Fatalf("16 for another: %d %v", h.status, h.first)
+	}
+	if h := want(3, "a", 7); h.status != 429 || h.first["code"] != "too_many_slots" {
+		t.Fatalf("33 remote in all: %d %v", h.status, h.first)
+	}
+	// a local caller's slots are counted over local attachments only
+	if h := openHold(t, srv, `{"hold":true,"name":"l","profile":{"slots":16,"ctx_per_slot":{"max":8192,"floor":1024}}}`, nil); h.status != 200 {
+		t.Fatalf("local 16 beside 26 remote: %d %v", h.status, h.first)
+	}
+	_ = e
 }
 
 func TestForwardingHeaderIsNeverLocal(t *testing.T) {

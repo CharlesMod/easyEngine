@@ -16,6 +16,7 @@
 //	FAKELLAMA_VRAM_BASE_MIB / FAKELLAMA_VRAM_PER_TOKEN  fake VRAM = base + per_token * ctx
 //	FAKELLAMA_HIDE             comma list of flags the help text omits and the parser rejects
 //	FAKELLAMA_DIE_ON           a flag the server takes but exits on while starting
+//	FAKELLAMA_CACHE_RAM        set: the help lists -cram, --cache-ram (the RAM prompt cache)
 //	FAKELLAMA_STREAM_DELAY     gap between streamed chunks (default 100ms)
 //	FAKELLAMA_CHAT_DELAY       delay of a non-streaming completion (default 0)
 //	FAKELLAMA_TIMINGS          set: a stream ends with llama-server's last chunk (finish_reason,
@@ -78,6 +79,7 @@ var withValue = map[string]bool{
 	"--dry-base": true, "--dry-allowed-length": true, "--dry-penalty-last-n": true,
 	"--slot-save-path": true,
 	"-ub":              true, "--ubatch-size": true, "--top-n-sigma": true, "--spec-type": true,
+	"--cache-ram": true, "-cram": true,
 }
 var bare = map[string]bool{"--jinja": true, "--no-webui": true, "--metrics": true, "--slots": true, "--no-kv-unified": true}
 
@@ -123,11 +125,12 @@ func helpText(hidden map[string]bool) string {
 		"--dry-allowed-length N         set allowed length for DRY sampling",
 		"--dry-penalty-last-n N         set DRY penalty for the last n tokens",
 		"-ub,   --ubatch-size N         physical maximum batch size",
+		"-cram, --cache-ram N           RAM prompt cache size in MiB (FAKELLAMA_CACHE_RAM: listed)",
 		"--top-nsigma, --top-n-sigma N  top-n-sigma sampling",
 		"--spec-type TYPE               speculative decoding type",
 	}
 	for _, l := range lines {
-		skip := false
+		skip := strings.Contains(l, "--cache-ram") && os.Getenv("FAKELLAMA_CACHE_RAM") == ""
 		for h := range hidden {
 			if strings.Contains(l, h+" ") || strings.HasSuffix(l, h) || strings.Contains(l, " "+h+",") {
 				skip = true

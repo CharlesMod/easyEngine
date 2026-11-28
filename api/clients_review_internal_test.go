@@ -18,11 +18,11 @@ import (
 // docs/ENGINE.md section 7g): every route it registers, what the door makes of it.
 func TestPathTableWalk(t *testing.T) {
 	slot := []string{"/completion", "/completions", "/v1/completions", "/chat/completions", "/v1/chat/completions",
-		"/v1/responses", "/responses", "/v1/messages", "/infill"}
+		"/v1/messages", "/infill"}
 	unconfinable := []string{"/embedding", "/embeddings", "/v1/embeddings", "/rerank", "/reranking", "/v1/rerank",
 		"/v1/reranking", "/tts", "/v1/audio/speech", "/audio/speech", "/v1/audio/transcriptions",
 		"/audio/transcriptions", "/v1/systemone", "/v1/chat/completions/control", "/lora-adapters", "/props",
-		"/predict", "/v1/stream", "/some/path/a/newer/build/adds"}
+		"/predict", "/v1/stream", "/some/path/a/newer/build/adds", "/v1/responses", "/responses"}
 	free := []string{"/tokenize", "/detokenize", "/apply-template", "/v1/messages/count_tokens",
 		"/chat/completions/input_tokens", "/v1/chat/completions/input_tokens", "/responses/input_tokens",
 		"/v1/responses/input_tokens"}

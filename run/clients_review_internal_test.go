@@ -194,7 +194,7 @@ func TestRemoteFloorIsClamped(t *testing.T) {
 	r := s.addAtt("R", "client-1", false, 1)
 	r.prof.CtxPerSlot.Max, r.prof.CtxPerSlot.Floor = 32768, 16384
 	w, _ := s.mergedWants()
-	if w.CtxFloor != 4096 || w.CtxMax != 32768 {
+	if w.CtxFloor != 4096 || w.CtxMax != 8192 { // both clamped to the owner's
 		t.Fatalf("merged: floor %d max %d", w.CtxFloor, w.CtxMax)
 	}
 	l := s.addAtt("L", "loopback", true, 1)
@@ -213,7 +213,7 @@ func TestRemoteFloorIsClamped(t *testing.T) {
 	if len(l.slots) != 1 {
 		t.Fatalf("local slots %v", l.slots)
 	}
-	if s.clients.givesLocked(s.cfg.Profile) {
+	if s.clients.givesLocked() {
 		t.Fatal("the short remote is a cause of a reshape")
 	}
 }
@@ -243,39 +243,110 @@ func TestRestartBudget(t *testing.T) {
 	a := s.addAtt("R", "client-1", false, 1)
 	r := &s.clients
 	for i := 0; i < maxRemoteRestarts; i++ {
-		if !r.planLocked(2, "client-1", a) || a.why != whyIdle || r.reLocal {
+		if !r.planLocked(2, a.key, "client-1", false, a) || a.why != whyIdle || r.reLocal {
 			t.Fatalf("restart %d: asked false, why %q, local %v", i+1, a.why, r.reLocal)
 		}
 		s.countRestartCauses()
 	}
-	if r.planLocked(2, "client-1", a) || a.why != whyBudget || r.reclient != 0 {
+	if r.planLocked(2, a.key, "client-1", false, a) || a.why != whyBudget || r.reclient != 0 {
 		t.Fatalf("over the budget: why %q reclient %d", a.why, r.reclient)
 	}
-	// the person's and a local caller's are not counted, and a local grow drains
-	if !r.planLocked(2, "", nil) || !r.reLocal || r.reclient != 2 {
-		t.Fatalf("local: local %v reclient %d", r.reLocal, r.reclient)
+	// the budget-spent client's requests are answered at once (503 no_room with the why), not held
+	d, pending := doorOf(s, DoorAsk{Att: "R", Identity: "client-1", Touch: TouchSlot})
+	if pending || d.Err == nil || d.Err.Code != "no_room" || !strings.Contains(d.Err.Msg, whyBudget) {
+		t.Fatalf("budget spent at the door: pending %v %+v", pending, d.Err)
 	}
-	if r.restarts["client-1"] != maxRemoteRestarts {
-		t.Fatalf("counted %d", r.restarts["client-1"])
+	// a return (uncharged) still plans, and waits for idle; a local caller's grow drains
+	if !r.planLocked(2, a.key, "", false, a) || r.reLocal || r.reclient != 2 {
+		t.Fatalf("return: local %v reclient %d", r.reLocal, r.reclient)
+	}
+	if d, pending := doorOf(s, DoorAsk{Att: "R", Identity: "client-1", Touch: TouchSlot}); !pending || d.Err != nil {
+		t.Fatalf("with a reshape coming it is held: %v %+v", pending, d.Err)
+	}
+	r.unplanLocked(a.key) // its key came back to its range
+	if r.reclient != 0 {
+		t.Fatalf("a cancelled plan stands: %d", r.reclient)
+	}
+	if !r.planLocked(2, commonsKey, "", true, nil) || !r.reLocal {
+		t.Fatal("a local grow does not drain")
+	}
+	s.countRestartCauses() // an uncharged restart
+	if r.restarts["client-1"] != maxRemoteRestarts || len(r.restarts) != 1 {
+		t.Fatalf("counted %v", r.restarts)
 	}
 }
 
-func TestLastClientLeavingReshapesToTheBase(t *testing.T) {
+func TestBudgetAndCapKeys(t *testing.T) {
+	for _, c := range []struct {
+		id           string
+		local        bool
+		budget, caps string
+	}{
+		{"loopback", true, "", ""},
+		{"client-1", false, "client-1", "client-1"},
+		{"open@10.0.0.1", false, "open", "open"},
+		{"open@10.0.0.2", false, "open", "open"}, // every --open address shares one
+		{"master@10.0.0.1", false, "", "master@10.0.0.1"},
+		{"engine", true, "", ""},
+	} {
+		if b, k := budgetKey(c.id, c.local), capKey(c.id, c.local); b != c.budget || k != c.caps {
+			t.Errorf("%s: budget %q caps %q", c.id, b, k)
+		}
+	}
+}
+
+func TestRemoteCtxMaxIsClamped(t *testing.T) {
+	s := regSup(true) // the base's max 8192 (also the default's)
+	r := s.addAtt("R", "client-1", false, 1)
+	r.prof.CtxPerSlot.Max = 131072
+	if w, _ := s.mergedWants(); w.CtxMax != 8192 {
+		t.Fatalf("a remote max raised the merge: %d", w.CtxMax)
+	}
+	l := s.addAtt("L", "loopback", true, 1)
+	l.prof.CtxPerSlot.Max = 32768
+	if w, _ := s.mergedWants(); w.CtxMax != 32768 {
+		t.Fatalf("a local max is the ceiling: %d", w.CtxMax)
+	}
+}
+
+func TestLastClientLeavingReshapesNothing(t *testing.T) {
 	s := regSup(true)
 	s.setMap(4, 0, 1) // the base wants 2; a client made it 4
+	s.cfg.Profile.CtxPerSlot.Max = 8192
 	r := &s.clients
-	if !r.givesLocked(s.cfg.Profile) { // no client stands: 4 slots is not the base's 2
-		t.Fatal("the running shape is not the base's and nothing asked for a reshape")
+	r.run.ctx = 4096
+	r.stale = true
+	// a local anonymous request the stale shape under-serves (4 slots of 4096 for wants of 2 x
+	// 8192) is held and asks for a reshape that drains as a local grow
+	if d, pending := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchSlot}); !pending || d.Err != nil || r.reclient != 2 || !r.reLocal {
+		t.Fatalf("under-served: pending %v reclient %d local %v", pending, r.reclient, r.reLocal)
 	}
-	s.setMap(2, 0, 1)
-	if r.givesLocked(s.cfg.Profile) {
-		t.Fatal("the base's own shape asked for a reshape")
+	// a remote one is not (a remote anonymous caller never restarts the engine)
+	r.unplanLocked(commonsKey)
+	if _, pending := doorOf(s, DoorAsk{Identity: "client-9", Touch: TouchSlot}); pending || r.reclient != 0 {
+		t.Fatal("a remote anonymous request reshaped")
 	}
-	// with no base, the defaults
-	n := regSup(false)
-	n.setMap(3)
-	if !n.clients.givesLocked(n.cfg.Profile) {
-		t.Fatal("no base: 3 slots is not the defaults' 2")
+	// a shape that serves the base fully is not under-served
+	r.run.ctx = 8192
+	if _, pending := doorOf(s, DoorAsk{Identity: "loopback", Local: true, Touch: TouchSlot}); pending {
+		t.Fatal("held with the base served")
+	}
+}
+
+func TestSlotMarkOfAnEarlierMap(t *testing.T) {
+	s := regSup(false)
+	s.setMap(2)
+	_, rel := s.TakeSlot([]int{0, 1}, 0)
+	s.clients.gen++ // a restart: a new map (startMap clears the marks)
+	clear(s.clients.busy)
+	_, rel2 := s.TakeSlot([]int{0, 1}, 0)
+	rel() // the old map's release
+	if s.clients.busy[0] != 1 {
+		t.Fatalf("an earlier map's release lowered the new mark: %d", s.clients.busy[0])
+	}
+	rel2()
+	if s.clients.busy[0] != 0 {
+		t.Fatalf("busy %d", s.clients.busy[0])
 	}
 }
 

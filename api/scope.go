@@ -52,6 +52,13 @@ func pairedMay(id string, r *http.Request) bool {
 		}
 		return false
 	}
+	return proxyMay(r)
+}
+
+// proxyMay reports whether a scoped caller (a paired token, or an --open caller from another
+// machine: api/proxy.go) may make this request of the model server: the one allow list.
+func proxyMay(r *http.Request) bool {
+	p := r.URL.Path
 	// The model server's paths. A dot segment is never needed by a client; refuse it so the
 	// path the engine judged is the path the model server gets.
 	for _, seg := range strings.Split(p, "/") {

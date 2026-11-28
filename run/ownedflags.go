@@ -142,6 +142,9 @@ var ownedFlagNames = []string{
 	// Flags that write a file, or read a cache file another run wrote: the lookup caches (-lcd is
 	// written as the server runs), and the long forms of the log and save paths above.
 	"-lcs", "-lcd", "--lookup-cache-static", "--lookup-cache-dynamic",
+	// The RAM prompt cache is shared by every slot (its states load into whichever slot asks):
+	// the engine turns it off when the slots have more than one owner. The batch size is sizing.
+	"-cram", "--cache-ram", "--cache-idle-slots", "--no-cache-idle-slots", "-b", "--batch-size",
 }
 
 var ownedSet = func() map[string]bool {

@@ -299,8 +299,11 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	args = withBefore(args, "--host", s.slotSaveArgs(known))
 	// the clients' launch options (run/clients.go), checked against this build's --help
 	help := helpOf(lc.in.bin, s.cfg.ExtraEnv)
-	opts := s.clientOpts(help)
+	opts := s.clientOpts(help, shape, known)
 	args = withOptions(args, opts.args, help)
+	if opts.ramOff { // more than one owner of the slots: no RAM prompt cache shared among them
+		args = withBefore(args, "--host", []string{"--cache-ram", "0"})
+	}
 	if len(dropped) > 0 {
 		s.logf("llama-server does not know %v: dropped", dropped)
 	}

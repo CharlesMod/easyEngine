@@ -2,6 +2,7 @@ package run
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -124,6 +125,12 @@ const (
 	// the engine's life (an attach that grows, a replace with other wants, a leave that reshapes,
 	// an option change); after that its changes are accepted and wait (whyBudget).
 	maxRemoteRestarts = 4
+	// the remote clients' share: one identity's attachments want at most maxSlotsPerRemote slots
+	// together; all remote attachments at most maxRemoteSlots slots and maxRemoteAttachments
+	// attachments. Remote attachments never count against a local caller's caps.
+	maxSlotsPerRemote    = 16
+	maxRemoteSlots       = 32
+	maxRemoteAttachments = 16
 )
 
 // The words an attachment's options and pending slots are told with.
@@ -181,6 +188,11 @@ type attachment struct {
 	short    bool   // unserved because the context given is below its floor: never a reshape's cause
 	why      string // why its slots are pending (whyIdle, whyBudget), "" none said
 	report   OptReport
+	// charge: the budget key its own attach or change is charged to ("" none: a local one, the
+	// base, the master key, or a return under its key with the profile that key last had)
+	charge string
+	// cred: the hash of the master token a master@<ip> attachment came with (a new master ends it)
+	cred string
 }
 
 func (a *attachment) poke() {
@@ -200,6 +212,9 @@ type runMap struct {
 	args  [][]string // the options' args as launched, in order
 	help  *Help      // the build's help the options were checked against
 	base  bool       // the base attachment has a range
+	// ramCache: the server runs with llama-server's RAM prompt cache (one owner at its start);
+	// a second owner is then never served from vacant slots (run/clients.go serveFromVacantLocked)
+	ramCache bool
 }
 
 // clientReg is the attachments and the running map, on the Supervisor (no package state).
@@ -217,8 +232,13 @@ type clientReg struct {
 	// it (reLocal); a remote one's waits for idle. Read and cleared by the reactor.
 	reclient int
 	reLocal  bool
-	cause    map[string]bool // remote identities whose change the next reshape is for
-	restarts map[string]int  // remote identity -> restarts it caused in this life
+	plans    map[string]reshapePlan // whose change a reshape is asked for: attachment key -> plan
+	restarts map[string]int         // budget key -> restarts its own changes caused in this life
+	profHash map[string]string      // attachment key -> the hash of the profile it last attached with
+	// stale: the last client with wants left; the shape it grew stands (its range vacant) until
+	// it returns, the model stops for another reason, or an under-served caller's request comes
+	stale bool
+	gen   uint64 // the running map's generation: a slot mark of an earlier map is not this one's
 	// badExtra: the clients' extra_args a server exited with while starting (runShape): launched
 	// without them while the extra_args standing are the same
 	badExtra map[string]string
@@ -237,8 +257,9 @@ func (s *Supervisor) clientsInit() {
 	r.excl = map[string]string{}
 	r.busy = map[int]int{}
 	r.used = map[int]uint64{}
-	r.cause = map[string]bool{}
+	r.plans = map[string]reshapePlan{}
 	r.restarts = map[string]int{}
+	r.profHash = map[string]string{}
 	if !s.cfg.ProfileGiven {
 		return
 	}
@@ -396,9 +417,11 @@ func (s *Supervisor) mergedWants() (w fit.Wants, from []string) {
 	// a remote client's floor never raises the others': it is clamped to the local attachments'
 	// and the base's merged floor (the defaults' when there are none)
 	localFloor, anyLocal := 0, false
+	localMax := s.cfg.Profile.CtxPerSlot.Max // a remote max is clamped to the owner's ceiling
 	for _, a := range ws {
 		if a.local || a.base {
 			localFloor, anyLocal = max(localFloor, a.prof.CtxPerSlot.Floor), true
+			localMax = max(localMax, a.prof.CtxPerSlot.Max)
 		}
 	}
 	if !anyLocal {
@@ -406,13 +429,13 @@ func (s *Supervisor) mergedWants() (w fit.Wants, from []string) {
 	}
 	for _, a := range ws {
 		p := a.prof
-		floor := p.CtxPerSlot.Floor
+		floor, ctxMax := p.CtxPerSlot.Floor, p.CtxPerSlot.Max
 		if !a.local && !a.base {
-			floor = min(floor, localFloor)
+			floor, ctxMax = min(floor, localFloor), min(ctxMax, localMax)
 		}
 		w.Slots += p.Slots
 		w.MinSlots += p.MinSlots
-		w.CtxMax = max(w.CtxMax, p.CtxPerSlot.Max)
+		w.CtxMax = max(w.CtxMax, ctxMax)
 		w.CtxFloor = max(w.CtxFloor, floor)
 		from = append(from, a.id)
 	}
@@ -530,6 +553,9 @@ type launchSet struct {
 	help    *Help
 	seq     uint64 // the attachments up to this seq were in the merge
 	extra   bool   // it carries clients' extra_args
+	// ramOff: the slot map will have more than one owner: the launch passes --cache-ram 0.
+	// ramCache: the server runs with its RAM prompt cache (the build has it and it is not off).
+	ramOff, ramCache bool
 }
 
 // extraOf is the extra_args part of merged option values.
@@ -545,10 +571,45 @@ func extraOf(vals map[string]string) map[string]string {
 
 // clientOpts is the merged launch options of the standing attachments now, less the extra_args
 // a server would not start with (badExtra): those are told not taken.
-func (s *Supervisor) clientOpts(h *Help) launchSet {
+func (s *Supervisor) clientOpts(h *Help, shape fit.Shape, known map[string]bool) launchSet {
 	r := &s.clients
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	ls := s.clientOptsLocked(h)
+	// llama-server's RAM prompt cache (--cache-ram, default 8192 MiB) keeps states from every
+	// slot and loads the best match into whichever slot asks: with more than one owner of the
+	// slots (the base and a client are two; the commons count as one) it is turned off
+	if has(known, "--cache-ram", "-cram") {
+		ls.ramOff = r.ownersLocked(shape) > 1
+		ls.ramCache = !ls.ramOff
+	}
+	return ls
+}
+
+// ownersLocked is how many owners a start at shape would give the slots: each attachment granted
+// slots, and the commons when slots are left over.
+func (r *clientReg) ownersLocked(shape fit.Shape) int {
+	var ws []*attachment
+	for _, a := range r.wantingLocked() {
+		if a.local || a.base || a.prof.CtxPerSlot.Floor <= shape.CtxPerSlot {
+			ws = append(ws, a)
+		}
+	}
+	n, sum := 0, 0
+	for _, g := range grantSlots(ws, shape.Slots) {
+		if len(g) > 0 {
+			n++
+			sum += len(g)
+		}
+	}
+	if sum < shape.Slots {
+		n++
+	}
+	return n
+}
+
+func (s *Supervisor) clientOptsLocked(h *Help) launchSet {
+	r := &s.clients
 	args, vals, reports := launchOpts(r.list, h)
 	ex := extraOf(vals)
 	if len(ex) > 0 && r.badExtra != nil && mapsEqual(ex, r.badExtra) {
@@ -686,12 +747,15 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 		}
 		a.poke()
 	}
+	m.ramCache = ls.ramCache
 	r.run = m
-	r.reclient, r.reLocal = 0, false
-	clear(r.cause)
+	r.gen++
+	r.stale = false
+	clear(r.plans)
+	r.replanLocked()
 	asked := false
 	for _, a := range late { // came during the start: the next look grows for it
-		asked = r.planLocked(2, a.causer(), a) || asked
+		asked = r.planLocked(2, a.key, a.charge, a.local, a) || asked
 	}
 	clear(r.busy)
 	clear(r.used)
@@ -702,50 +766,98 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 	}
 }
 
-// causer is who an attachment's own change is counted against: "" a local one, else its identity.
-func (a *attachment) causer() string {
-	if a.local || a.base {
-		return ""
-	}
-	return a.identity
+// reshapePlan is a reshape asked for on someone's behalf: level 1 when idle, 2 a grow; who is the
+// budget key charged when it happens ("" none); local: a local caller's (its grow drains).
+type reshapePlan struct {
+	level int
+	who   string
+	local bool
 }
 
-// planLocked asks the reactor for a reshape: level 1 when idle, 2 a grow. who is the remote
-// identity that caused it ("" a local caller or the person: not counted, and its grow drains). A
-// remote identity that has caused maxRemoteRestarts restarts asks for nothing: its change waits
-// (a.why says so) for a start that comes for another reason. False when nothing was asked.
-func (r *clientReg) planLocked(level int, who string, a *attachment) bool {
+// commonsKey is the plan key of a reshape for a caller with no attachment (an under-served one).
+const commonsKey = "~commons"
+
+// budgetKey is who a remote attachment's restarts are counted against: "" none (a local caller,
+// the base, the master key from another machine: the owner); every --open caller shares one.
+func budgetKey(identity string, local bool) string {
+	switch {
+	case local || identity == "engine" || strings.HasPrefix(identity, "master@"):
+		return ""
+	case strings.HasPrefix(identity, "open@"):
+		return "open"
+	}
+	return identity
+}
+
+// capKey is whose share of the remote caps an attachment counts in ("" a local caller's).
+func capKey(identity string, local bool) string {
+	if local {
+		return ""
+	}
+	if strings.HasPrefix(identity, "open@") {
+		return "open"
+	}
+	return identity
+}
+
+// replanLocked sets reclient and reLocal from the plans.
+func (r *clientReg) replanLocked() {
+	r.reclient, r.reLocal = 0, false
+	for _, p := range r.plans {
+		r.reclient = max(r.reclient, p.level)
+		if p.level == 2 && p.local {
+			r.reLocal = true
+		}
+	}
+}
+
+// planLocked asks the reactor for a reshape on behalf of key (an attachment's, or commonsKey):
+// level 1 when idle, 2 a grow. who is the budget key the restart is charged to ("" none); local:
+// a local caller's grow drains, a remote one's waits for idle (a.why says so). A charged change
+// whose budget is spent asks for nothing (a.why: restart_budget_spent): its requests are then
+// answered at once, never held. False when nothing was asked.
+func (r *clientReg) planLocked(level int, key, who string, local bool, a *attachment) bool {
 	if r.run == nil {
 		return false
 	}
-	if who != "" {
-		if r.restarts[who] >= maxRemoteRestarts {
-			if a != nil {
-				a.why = whyBudget
-			}
-			return false
+	if who != "" && r.restarts[who] >= maxRemoteRestarts {
+		if a != nil {
+			a.why = whyBudget
 		}
-		r.cause[who] = true
-		if a != nil && level == 2 {
-			a.why = whyIdle
-		}
-	} else if level == 2 {
-		r.reLocal = true
+		return false
 	}
-	r.reclient = max(r.reclient, level)
+	p := r.plans[key]
+	p.level = max(p.level, level)
+	if who != "" {
+		p.who = who
+	}
+	p.local = p.local || local
+	r.plans[key] = p
+	if a != nil && level == 2 && !local {
+		a.why = whyIdle
+	}
+	r.replanLocked()
 	return true
 }
 
-// countRestartCauses is a reshape for the clients going ahead: each remote identity it is for
-// spends one of its restarts.
+// unplanLocked cancels the reshape asked on key's behalf (its key returned to its range).
+func (r *clientReg) unplanLocked(key string) {
+	delete(r.plans, key)
+	r.replanLocked()
+}
+
+// countRestartCauses is a reshape for the clients going ahead: each budget key a plan names
+// spends one of its restarts; the plans are spent.
 func (s *Supervisor) countRestartCauses() {
 	r := &s.clients
 	r.mu.Lock()
-	for who := range r.cause {
-		r.restarts[who]++
+	for _, p := range r.plans {
+		if p.who != "" {
+			r.restarts[p.who]++
+		}
 	}
-	clear(r.cause)
-	r.reclient, r.reLocal = 0, false
+	clear(r.plans)
+	r.replanLocked()
 	r.mu.Unlock()
 }
 
@@ -758,6 +870,10 @@ func (s *Supervisor) stopMap() {
 		return
 	}
 	r.run = nil
+	r.gen++
+	r.stale = false
+	clear(r.plans)
+	r.replanLocked()
 	for _, a := range r.list {
 		a.slots = nil
 		a.poke()
@@ -778,6 +894,11 @@ type AttachRequest struct {
 	Profile  *Profile // nil: the old wire ({pid} alone), no wants
 	Identity string   // "loopback" for a local caller, else the paired client id
 	Local    bool
+	// Valid, when set, says whether the caller's credential still stands; it is asked under the
+	// clients lock as the attachment registers (a token revoked after the gate let it in).
+	Valid func() bool
+	// Cred is the hash of the master token a master@<ip> caller came with.
+	Cred string
 }
 
 // AttachHold is a held attachment's connection: the API writes a line on Notify and the last
@@ -806,6 +927,9 @@ type AttachView struct {
 	Server     OptReport  `json:"server"`
 	Model      *ModelView `json:"model,omitempty"`
 	Agent      string     `json:"agent,omitempty"`
+	// RestartsLeft is how many more restarts a remote client's own changes may cause (absent: not
+	// budgeted: a local caller, the master key)
+	RestartsLeft *int `json:"restarts_left,omitempty"`
 }
 
 // SlotsView is an attachment's slots: what it wants, the least it takes, what the running mind
@@ -863,8 +987,8 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 		v.Ctx.Asked = a.prof.CtxPerSlot.Max
 		if r.run != nil {
 			v.Ctx.Given = r.run.ctx
-			v.Slots.Pending = len(a.slots) == 0 && a.unserved == ""
-			if v.Slots.Pending {
+			v.Slots.Pending = len(a.slots) == 0 && a.unserved == "" && r.plans[a.key].level > 0
+			if len(a.slots) == 0 && a.unserved == "" {
 				v.Slots.Why = a.why
 			}
 		}
@@ -881,6 +1005,10 @@ func (r *clientReg) viewLocked(a *attachment, model string) AttachView {
 	}
 	if a.prof.Agent != nil && a.prof.Agent.Wheel != "" {
 		v.Agent = a.prof.Agent.ID
+	}
+	if b := budgetKey(a.identity, a.local); b != "" && !a.base {
+		left := max(0, maxRemoteRestarts-r.restarts[b])
+		v.RestartsLeft = &left
 	}
 	return v
 }
@@ -922,9 +1050,14 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 	}
 	var prof Profile
 	wanting := false
+	// the build's --help is read only for an attach that brings extra_args; otherwise the help
+	// already read (if any) checks the rest, and the launch checks again
+	h := s.cachedHelp()
+	if req.Profile != nil && req.Profile.Server != nil && len(req.Profile.Server.ExtraArgs) > 0 {
+		h = s.buildHelp()
+	}
 	if req.Profile != nil {
 		prof = *req.Profile
-		h := s.buildHelp()
 		if e := checkProfile(&prof, req.Local, h); e != nil {
 			return AttachView{}, nil, e
 		}
@@ -963,45 +1096,76 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 			stopWatch()
 		}
 	}()
-	h := s.buildHelp()
 	model := s.selectedID()
+	hash := profileHash(req.Profile)
 	r := &s.clients
 	r.mu.Lock()
+	if req.Valid != nil && !req.Valid() {
+		r.mu.Unlock()
+		return AttachView{}, nil, cerr(401, "token_revoked", "the token this attach came with was revoked")
+	}
 	var old *attachment
-	count, mine := 0, 0
+	// caps: a local caller's are counted over local attachments only; a remote caller's over its
+	// own share (one --open share for every address) and over all remote attachments
+	ck := capKey(req.Identity, req.Local)
+	count, mine, slotsMine, slotsSide := 0, 0, 0, 0
 	for _, a := range r.list {
 		if a.key == key && !a.base {
 			old = a
+			continue
 		}
-		if !a.base {
-			count++
-			if a.identity == req.Identity {
-				mine++
+		if a.base {
+			if ck == "" && a.wanting {
+				slotsSide += a.prof.Slots
+			}
+			continue
+		}
+		akey := capKey(a.identity, a.local)
+		if (akey == "") != (ck == "") {
+			continue // the other side's: never counted against this caller
+		}
+		count++
+		if a.wanting {
+			slotsSide += a.prof.Slots
+		}
+		if ck != "" && akey == ck {
+			mine++
+			if a.wanting {
+				slotsMine += a.prof.Slots
 			}
 		}
 	}
-	if old == nil && !oldWire && count >= maxAttachments {
+	refuse := func(status int, code, format string, args ...any) (AttachView, *AttachHold, *ClientError) {
 		r.mu.Unlock()
-		return AttachView{}, nil, cerr(429, "too_many_attachments", "this engine holds %d attachments already", maxAttachments)
+		return AttachView{}, nil, cerr(status, code, format, args...)
 	}
-	if old == nil && !oldWire && !req.Local && mine >= maxPerIdentity {
-		r.mu.Unlock()
-		return AttachView{}, nil, cerr(429, "too_many_attachments", "this client holds %d attachments already", maxPerIdentity)
+	if !oldWire {
+		switch {
+		case old == nil && ck == "" && count >= maxAttachments:
+			return refuse(429, "too_many_attachments", "this machine's programs hold %d attachments already", maxAttachments)
+		case old == nil && ck != "" && count >= maxRemoteAttachments:
+			return refuse(429, "too_many_attachments", "clients on other machines hold %d attachments already", maxRemoteAttachments)
+		case old == nil && ck != "" && mine >= maxPerIdentity:
+			return refuse(429, "too_many_attachments", "this client holds %d attachments already", maxPerIdentity)
+		}
 	}
 	if wanting {
-		sum := prof.Slots
-		for _, a := range r.list {
-			if a.wanting && a != old {
-				sum += a.prof.Slots
-			}
-		}
-		if sum > maxSlotsAll {
-			r.mu.Unlock()
-			return AttachView{}, nil, cerr(400, "bad_request", "the attachments would want %d slots; at most %d in all", sum, maxSlotsAll)
+		switch {
+		case ck == "" && slotsSide+prof.Slots > maxSlotsAll:
+			return refuse(400, "bad_request", "this machine's attachments would want %d slots; at most %d in all", slotsSide+prof.Slots, maxSlotsAll)
+		case ck != "" && slotsMine+prof.Slots > maxSlotsPerRemote:
+			return refuse(429, "too_many_slots", "this client's attachments would want %d slots; at most %d", slotsMine+prof.Slots, maxSlotsPerRemote)
+		case ck != "" && slotsSide+prof.Slots > maxRemoteSlots:
+			return refuse(429, "too_many_slots", "clients on other machines would want %d slots; at most %d in all", slotsSide+prof.Slots, maxRemoteSlots)
 		}
 	}
+	// a return: the key attaches again with the profile it last had; never charged
+	charge := budgetKey(req.Identity, req.Local)
+	if r.profHash[key] == hash {
+		charge = ""
+	}
 	cand := &attachment{id: newID(), name: name, identity: req.Identity, key: key, local: req.Local, prof: prof, wanting: wanting,
-		notify: make(chan struct{}, 1)}
+		notify: make(chan struct{}, 1), charge: charge, cred: req.Cred}
 	if old != nil {
 		cand.id = old.id
 	}
@@ -1047,7 +1211,7 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		// the same key stands: its presence is replaced; the same id and the same slots
 		a, replaced = old, true
 		sameWants := old.wanting == wanting && (!wanting || (old.prof.Slots == prof.Slots && old.prof.CtxPerSlot == prof.CtxPerSlot && old.prof.MinSlots == prof.MinSlots))
-		old.prof, old.wanting, old.local, old.report = prof, wanting, req.Local, rep
+		old.prof, old.wanting, old.local, old.report, old.charge, old.cred = prof, wanting, req.Local, rep, charge, req.Cred
 		if old.hasHold {
 			endOld = old.holdEnd
 			old.hasHold, old.holdEnd = false, nil
@@ -1058,7 +1222,7 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		}
 		old.pid = 0
 		if !sameWants || !r.optsSameLocked(h) {
-			r.planLocked(2, a.causer(), a)
+			r.planLocked(2, a.key, charge, req.Local, a)
 		}
 	} else {
 		cand.seq = r.seq + 1
@@ -1068,6 +1232,10 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		if wanting && r.run != nil {
 			resumed = r.serveFromVacantLocked(a, h)
 		}
+	}
+	r.profHash[key] = hash
+	if wanting {
+		r.stale = false // a client with wants stands again
 	}
 	var hold *AttachHold
 	if req.Hold {
@@ -1083,8 +1251,7 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		if ended != nil {
 			// the watch is the attachment's under the same lock that registers it: a replace
 			// that races in later stops this one (stopOld above), never leaves it running
-			a.pidStop, watching = stopWatch, true
-			s.watchPid(a.id, a.pidGen, ended, stopWatch)
+			a.pidStop, watching = s.watchPid(a.id, a.pidGen, ended, stopWatch), true
 		}
 	}
 	v := r.viewLocked(a, model)
@@ -1148,14 +1315,22 @@ func (r *clientReg) serveFromVacantLocked(a *attachment, h *Help) (resumed bool)
 	}
 	optsOK := r.optsSameLocked(h)
 	ctxOK := m.ctx >= a.prof.CtxPerSlot.Floor
+	// with the RAM prompt cache on (one owner at the start), only the key's own return is served
+	// from vacant slots: a second owner's states would mix with the first's in that cache
+	ownReturn := len(own) == a.prof.Slots && len(own) > 0 && m.want[own[0]] == a.prof.Slots
+	if m.ramCache && !ownReturn {
+		r.planLocked(2, a.key, a.charge, a.local, a)
+		return false
+	}
 	if !ctxOK && optsOK && !a.local && !a.base {
 		// a remote floor cannot raise the others': unserved until a start gives it room
 		a.unserved, a.short = floorWhy(m.ctx, a.prof.CtxPerSlot.Floor), true
 		return false
 	}
 	switch {
-	case optsOK && ctxOK && len(own) == a.prof.Slots && m.want[own[0]] == a.prof.Slots:
+	case optsOK && ctxOK && ownReturn:
 		a.slots, resumed = own, true
+		r.unplanLocked(a.key) // a reshape its leave asked for is not needed: it is back
 	case optsOK && ctxOK && len(free) >= a.prof.Slots:
 		pick := append([]int{}, own...)
 		for _, e := range free {
@@ -1170,7 +1345,7 @@ func (r *clientReg) serveFromVacantLocked(a *attachment, h *Help) (resumed bool)
 		sort.Ints(pick)
 		a.slots = pick
 	default:
-		r.planLocked(2, a.causer(), a)
+		r.planLocked(2, a.key, a.charge, a.local, a)
 		return false
 	}
 	for _, e := range a.slots {
@@ -1180,16 +1355,27 @@ func (r *clientReg) serveFromVacantLocked(a *attachment, h *Help) (resumed bool)
 }
 
 // watchPid follows an attachment's pid: its end is the attachment's leave (gen: a later attach
-// of the same key that brought another pid makes this watch's word stale, and stops it).
-func (s *Supervisor) watchPid(id string, gen uint64, ended <-chan struct{}, stop func()) {
+// of the same key that brought another pid makes this watch's word stale). The answer stops the
+// watch and ends its goroutine (a replace, a detach, a leave): host's stop does not close ended.
+func (s *Supervisor) watchPid(id string, gen uint64, ended <-chan struct{}, stop func()) func() {
+	done := make(chan struct{})
+	var once sync.Once
+	stopAll := func() {
+		once.Do(func() {
+			close(done)
+			stop()
+		})
+	}
 	go func() {
 		select {
 		case <-ended:
 			s.leavePid(id, gen)
 		case <-s.root.Done():
+		case <-done:
 		}
-		stop()
+		stopAll()
 	}()
+	return stopAll
 }
 
 func (s *Supervisor) leavePid(id string, gen uint64) {
@@ -1199,7 +1385,7 @@ func (s *Supervisor) leavePid(id string, gen uint64) {
 		}
 		a.pid = 0
 		return true
-	}, "", true)
+	}, "")
 }
 
 // LeaveHold is a held attachment's connection ending (gen: the hold it was).
@@ -1210,7 +1396,7 @@ func (s *Supervisor) LeaveHold(id string, gen uint64) {
 		}
 		a.hasHold, a.holdEnd = false, nil
 		return true
-	}, "", true)
+	}, "")
 }
 
 // Detach is DELETE attach/{id}: identity must own it (loopback may detach any).
@@ -1232,34 +1418,33 @@ func (s *Supervisor) Detach(id, identity string) *ClientError {
 		return cerr(403, "not_yours", "attachment %s is another client's", id)
 	}
 	r.mu.Unlock()
-	// a client's own detach counts against its restarts; the person's (a local caller's) does not
-	s.leaveIf(id, func(*attachment) bool { return true }, "detached", identity != identityLoopback)
+	s.leaveIf(id, func(*attachment) bool { return true }, "detached")
 	return nil
 }
 
 // DetachRevoked ends at once every attachment of a remote identity whose token no longer stands
-// (valid says false): its held stream ends with {"end":"revoked"}, its slots go vacant, its fact
+// (valid says false; cred is the master token's hash a master@<ip> attachment came with, so a
+// new master token ends those): its held stream ends with {"end":"revoked"}, its slots go vacant, its fact
 // is said gone. The person's act: no restart is counted against anyone.
-func (s *Supervisor) DetachRevoked(valid func(identity string) bool) {
+func (s *Supervisor) DetachRevoked(valid func(identity, cred string) bool) {
 	r := &s.clients
 	r.mu.Lock()
 	var ids []string
 	for _, a := range r.list {
-		if !a.base && !a.local && !valid(a.identity) {
+		if !a.base && !a.local && !valid(a.identity, a.cred) {
 			ids = append(ids, a.id)
 		}
 	}
 	r.mu.Unlock()
 	for _, id := range ids {
-		s.leaveIf(id, func(*attachment) bool { return true }, "revoked", false)
+		s.leaveIf(id, func(*attachment) bool { return true }, "revoked")
 	}
 }
 
 // leaveIf removes the attachment when ok says the word that came ends its presence (with pid and
-// hold both, the first to end ends it). Its slots stay in the running mind, vacant. own: the
-// leave is the attachment's own act (its pid ended, its hold or its own detach), so a reshape it
-// causes is counted against a remote identity; the person's acts are not.
-func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord string, own bool) {
+// hold both, the first to end ends it). Its slots stay in the running mind, vacant. A leave is
+// never charged against a budget.
+func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord string) {
 	r := &s.clients
 	r.mu.Lock()
 	idx := -1
@@ -1289,12 +1474,21 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 	a.slots = nil
 	end, stop := a.holdEnd, a.pidStop
 	a.holdEnd, a.pidStop = nil, nil
-	if r.run != nil && r.givesLocked(s.cfg.Profile) {
-		who := ""
-		if own {
-			who = a.causer()
+	if r.run != nil {
+		last := a.wanting
+		for _, x := range r.list {
+			if x.wanting && !x.base {
+				last = false
+			}
 		}
-		r.planLocked(1, who, nil)
+		switch {
+		case last:
+			// the last client with wants: nothing reshapes. Its range stays vacant for its return;
+			// the model stopping for another reason, or an under-served caller's request, reshapes
+			r.stale = true
+		case r.givesLocked():
+			r.planLocked(1, a.key, "", false, nil) // a leave is never charged
+		}
 	}
 	r.mu.Unlock()
 	if end != nil && endWord != "" {
@@ -1312,29 +1506,13 @@ func (s *Supervisor) leaveIf(id string, ok func(*attachment) bool, endWord strin
 }
 
 // givesLocked: a reshape now would give someone something (an attachment left out or waiting
-// served, an option handed over, more context to those below their max), or the last wanting
-// client is gone and the running shape is not what the base (or the defaults, def) would get.
-// Otherwise the vacant slots stay until the next start for another reason.
-func (r *clientReg) givesLocked(def Profile) bool {
+// served, an option handed over, more context to those below their max). Otherwise the vacant
+// slots stay until the next start for another reason.
+func (r *clientReg) givesLocked() bool {
 	m := r.run
-	clients := false
-	var base *attachment
 	for _, a := range r.list {
-		if a.base {
-			base = a
-		} else if a.wanting {
-			clients = true
-		}
 		if a.wanting && len(a.slots) == 0 && !a.short {
 			return true // left out, or waiting for a grow (one below its floor is not served by one)
-		}
-	}
-	if !clients {
-		if base != nil {
-			def = base.prof
-		}
-		if len(m.owner) != def.Slots || m.ctx > def.CtxPerSlot.Max {
-			return true
 		}
 	}
 	_, vals, _ := launchOpts(r.list, m.help)
@@ -1427,6 +1605,7 @@ type DoorAsk struct {
 // it is a range in the engine's numbering (the commons) and a slot outside it is refused.
 type ClientDoor struct {
 	ID    string
+	Key   string // the attachment's key (its name space for conversation ids), "" none
 	Slots []int
 	Own   bool
 	Err   *ClientError
@@ -1462,7 +1641,7 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		if a.identity != q.Identity && q.Identity != "engine" && !(a.base && q.Local) {
 			return ClientDoor{Err: cerr(403, "not_yours", "attachment %s is another client's", q.Att)}, false
 		}
-		d.ID = a.id
+		d.ID, d.Key = a.id, a.key
 	}
 	m := r.run
 	others := false // a client besides the base holds slots in the running mind
@@ -1483,7 +1662,7 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		return d, false
 	}
 	own := func(a *attachment) (ClientDoor, bool) {
-		d.ID = a.id
+		d.ID, d.Key = a.id, a.key
 		switch {
 		case len(a.slots) > 0:
 			d.Slots, d.Own = append([]int{}, a.slots...), true
@@ -1491,11 +1670,28 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		case a.unserved != "":
 			d.Err = cerr(503, "no_room", "%s", a.unserved)
 			return d, false
+		case m != nil && r.plans[a.key].level > 0:
+			// a reshape for it is asked: the start that serves it (or the stop) ends the hold
+			return d, true
 		}
-		return d, m != nil
+		// nothing is coming for it: answered at once, never held without an event to end it
+		why := a.why
+		if why == "" {
+			why = "no restart is coming for it"
+		}
+		d.Err = cerr(503, "no_room", "this client has no slots in the running model: %s", why)
+		d.Err.Extra = map[string]any{"why": why}
+		return d, false
 	}
 	if a != nil && a.wanting && !a.base {
 		return own(a)
+	}
+	// the last client left a shape grown for it (stale): a local caller with no slots of its own
+	// that the shape under-serves is held while the engine reshapes, as a local grow is
+	if m != nil && r.stale && q.Local && q.Touch != TouchNone && s.underServedLocked() {
+		r.planLocked(2, commonsKey, "", true, nil)
+		s.wakeMind(func(c *causes) { c.clients = true })
+		return d, true
 	}
 	holders := false // anyone besides the base holds slots (the caller included)
 	if m != nil {
@@ -1543,6 +1739,24 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 	return d, false
 }
 
+// underServedLocked: with no client standing, the running shape gives the base (or, with no base,
+// the defaults) less than the wants that stand would: the base has no range in it, or the shape
+// has more slots than those wants and less context per slot than their max.
+func (s *Supervisor) underServedLocked() bool {
+	r := &s.clients
+	m := r.run
+	def := s.cfg.Profile
+	for _, a := range r.list {
+		if a.base {
+			if len(a.slots) == 0 {
+				return true
+			}
+			def = a.prof
+		}
+	}
+	return len(m.owner) > def.Slots && m.ctx < def.CtxPerSlot.Max
+}
+
 // EnterAs is Enter for a request whose attachment and touch the door has read. A request whose
 // attachment waits for its slots is held like one the model is on its way up for.
 func (s *Supervisor) EnterAs(q DoorAsk) (Route, ClientDoor, func(*RequestEnd)) {
@@ -1579,6 +1793,7 @@ func (s *Supervisor) EnterAs(q DoorAsk) (Route, ClientDoor, func(*RequestEnd)) {
 func (s *Supervisor) TakeSlot(slots []int, want int) (e int, release func()) {
 	r := &s.clients
 	r.mu.Lock()
+	gen := r.gen // a release after a restart is not the new map's
 	e = want
 	if e < 0 {
 		best, bestFree := -1, false
@@ -1599,7 +1814,7 @@ func (s *Supervisor) TakeSlot(slots []int, want int) (e int, release func()) {
 	return e, func() {
 		once.Do(func() {
 			r.mu.Lock()
-			if r.busy[e] > 0 {
+			if r.gen == gen && r.busy[e] > 0 {
 				r.busy[e]--
 			}
 			r.mu.Unlock()
@@ -1633,6 +1848,8 @@ type WantsInfo struct {
 	Unserved []UnservedInfo    `json:"unserved"`
 	Vacant   []VacantInfo      `json:"vacant"`
 	Server   map[string]string `json:"server"`
+	// RAMCache: the running server keeps llama-server's RAM prompt cache (one owner of the slots)
+	RAMCache bool `json:"ram_cache"`
 }
 
 // UnservedInfo is an attachment that wants slots and has none in the running mind, and why.
@@ -1665,8 +1882,14 @@ func (s *Supervisor) wantsInfo() WantsInfo {
 		switch {
 		case a.unserved != "":
 			wi.Unserved = append(wi.Unserved, UnservedInfo{a.id, a.unserved})
-		case r.run != nil:
+		case r.run != nil && r.plans[a.key].level > 0:
 			wi.Unserved = append(wi.Unserved, UnservedInfo{a.id, "waiting for the model to make room (a reshape when the replies in flight end)"})
+		case r.run != nil:
+			why := a.why
+			if why == "" {
+				why = "no restart is coming for it"
+			}
+			wi.Unserved = append(wi.Unserved, UnservedInfo{a.id, why})
 		}
 	}
 	if m := r.run; m != nil {
@@ -1683,6 +1906,7 @@ func (s *Supervisor) wantsInfo() WantsInfo {
 		for k, v := range m.opts {
 			wi.Server[k] = v
 		}
+		wi.RAMCache = m.ramCache
 	}
 	return wi
 }
@@ -1856,6 +2080,30 @@ func (s *Supervisor) agentChanged() {
 
 // buildHelp is the installed llama-server's --help (nil: no build installed, or it could not be
 // read): never anything a client names is run.
+// cachedHelp is the installed build's help when it has been read already; it never runs the
+// binary (nil: not read yet).
+func (s *Supervisor) cachedHelp() *Help {
+	in, ok := s.resolveInstall()
+	if !ok || in.bin == "" {
+		return nil
+	}
+	if v, ok := helpCache.Load(in.bin); ok {
+		h, _ := v.(*Help)
+		return h
+	}
+	return nil
+}
+
+// profileHash identifies a profile for a key's return (the same profile as it last had).
+func profileHash(p *Profile) string {
+	if p == nil {
+		return "none"
+	}
+	b, _ := json.Marshal(p)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *Supervisor) buildHelp() *Help {
 	in, ok := s.resolveInstall()
 	if !ok || in.bin == "" {

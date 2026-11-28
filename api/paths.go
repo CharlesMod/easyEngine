@@ -23,11 +23,12 @@ const (
 	pathUnconfinable
 )
 
-// slotPaths honour id_slot: the JSON body goes through handle_completions_impl.
+// slotPaths honour id_slot: the JSON body goes through handle_completions_impl (/v1/messages
+// forwards id_slot in its conversion, server-chat.cpp:646; /v1/responses does NOT, server-chat.cpp:32,
+// so it is unconfinable below).
 var slotPaths = map[string]bool{
 	"/completion": true, "/completions": true, "/v1/completions": true,
 	"/chat/completions": true, "/v1/chat/completions": true,
-	"/v1/responses": true, "/responses": true,
 	"/v1/messages": true, "/infill": true,
 }
 
@@ -41,6 +42,7 @@ var unconfinablePaths = map[string]bool{
 	"/v1/audio/transcriptions": true, "/audio/transcriptions": true,
 	"/v1/realtime": true, "/v1/systemone": true, "/v1/chat/completions/control": true,
 	"/lora-adapters": true, "/props": true, "/predict": true,
+	"/v1/responses": true, "/responses": true,
 }
 
 // freePosts are POST paths that run no slot task.

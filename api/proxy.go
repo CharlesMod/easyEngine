@@ -53,12 +53,24 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 	if len(att) > 64 {
 		att = "-" // no attachment has such an id: answered as unknown
 	}
-	// the body is read whole before the door: a client that sends slowly holds no slot, no count
-	// in flight and no drain
-	if !a.readBody(w, r) {
+	local := localCaller(r)
+	if !local && ClientID(r.Context()) == ClientOpen && !proxyMay(r) {
+		// an --open caller from another machine reaches the model server only as a paired token
+		// does (api/scope.go: the one allow list)
+		failCode(w, http.StatusForbidden, "not_allowed", scopeRefusal)
 		return
 	}
-	q := run.DoorAsk{ReqID: id, Att: att, Identity: identity(r), Local: localCaller(r), Touch: touchOf(r)}
+	if !local && streamPath(r.URL.Path) {
+		clientFail(w, &run.ClientError{Status: 403, Code: "path_not_offered", Msg: "resumable streams are offered to this machine's callers only"})
+		return
+	}
+	// a body the engine must look at (a JSON POST the door confines or rewrites) is read whole
+	// before the door: a client that sends slowly holds no slot, no count in flight and no drain.
+	// Every other body streams through as it comes.
+	if bufferedBody(r) && !a.readBody(w, r, local) {
+		return
+	}
+	q := run.DoorAsk{ReqID: id, Att: att, Identity: identity(r), Local: local, Touch: touchOf(r)}
 	rt, door, done := a.S.EnterAs(q)
 	if door.Err != nil && !rt.Hold {
 		clientFail(w, door.Err)
@@ -174,6 +186,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 		if !a.applySampler(w, r, door.ID) {
 			return
 		}
+		// the conversation ids of resumable streams are the engine's name space: each carries its
+		// owner, so one client can neither replay nor cancel another's stream (convid.go)
+		lookup, ok := a.ownConversations(w, r, door)
+		if !ok {
+			return
+		}
 		if door.Slots != nil { // confined (run.ClientDoor): one slot of its range, no other
 			cs, es, release, ok := a.confine(w, r, door)
 			if !ok {
@@ -192,9 +210,12 @@ func (a *API) proxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		modify := dropCORS
-		if engineSlots != nil {
+		if engineSlots != nil || lookup != nil {
 			modify = func(resp *http.Response) error {
 				dropCORS(resp)
+				if lookup != nil {
+					return conversationsBack(resp, lookup)
+				}
 				return slotsBack(resp, engineSlots)
 			}
 		}

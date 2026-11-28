@@ -1317,10 +1317,13 @@ func (r *clientReg) serveFromVacantLocked(a *attachment, h *Help) (resumed bool)
 		if m.keys[e] == "" && m.base {
 			continue // the base's anonymous room is not vacant
 		}
-		free = append(free, e)
 		if m.keys[e] == a.key {
 			own = append(own, e)
 		}
+		if m.keys[e] != "" && m.keys[e] != a.key && !a.local {
+			continue // another client's prompts are still in it: never a remote client's to read
+		}
+		free = append(free, e)
 	}
 	optsOK := r.optsSameLocked(h)
 	ctxOK := m.ctx >= a.prof.CtxPerSlot.Floor
@@ -1749,8 +1752,23 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 			}
 		}
 	}
-	if m == nil || !holders {
+	// a vacant slot that a client held still carries its prompts (llama-server keeps a slot's
+	// cache, and the RAM prompt cache any slot's): a remote caller with no slots of its own is never
+	// sent where it could read another's prefixes by its cache hits. Callers of this machine trust
+	// each other (docs/ENGINE.md §7g).
+	tainted := func(e int) bool { return m.owner[e] == "" && m.keys[e] != "" }
+	anyTaint := false
+	if m != nil {
+		for e := range m.owner {
+			anyTaint = anyTaint || tainted(e)
+		}
+	}
+	if m == nil || (!holders && (q.Local || !anyTaint)) {
 		return d, false // nothing is confined: as before clients
+	}
+	if !q.Local && anyTaint && m.ramCache {
+		d.Err = cerr(409, "attach_required", "another client's prompts are still in this model's prompt cache: attach to be given slots of your own")
+		return d, false
 	}
 	for _, x := range r.list {
 		if x.base && len(x.slots) > 0 {
@@ -1759,7 +1777,7 @@ func (s *Supervisor) clientDoorLocked(q DoorAsk) (d ClientDoor, pending bool) {
 		}
 	}
 	for e, o := range m.owner {
-		if o == "" {
+		if o == "" && (q.Local || !tainted(e)) {
 			d.Slots = append(d.Slots, e)
 		}
 	}

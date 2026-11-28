@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -113,4 +114,77 @@ func TestRemoteKeptBytesBounded(t *testing.T) {
 			t.Fatalf("a held request after the grow: %d %.200s", r.code, r.body)
 		}
 	}
+}
+
+// The prefix oracle: a vacant range still carries the prompts of the client that held it (the
+// slot's cache, and the RAM prompt cache any slot's). A remote caller with no attachment is never
+// sent where its cache hits could read them, and a remote attach is never served from another
+// client's vacant range.
+func TestDepartedPromptsNeverReachAnotherRemote(t *testing.T) {
+	t.Run("lone owner, cache on", func(t *testing.T) {
+		e, s, srv := clientsEnv(t, false, func(e *testkit.Env) { e.Llama["FAKELLAMA_CACHE_RAM"] = "1" })
+		_, rs, _ := remoteSrv(t, s)
+		A := growRemote(t, e, s, rs, 1, "a", 2)
+		if f, _ := s.Hub().Fact("wants", ""); !strings.Contains(string(f.Body), `"ram_cache":true`) || s.Status().Shape.Slots != 2 {
+			t.Fatalf("A is not the one owner with the cache on: %s, %d slots", f.Body, s.Status().Shape.Slots)
+		}
+		if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"id_slot":0,"messages":[{"role":"user","content":"a secret prefix"}]}`, as(1)); c != 200 {
+			t.Fatalf("A: %d %s", c, b)
+		}
+		A.cancel()
+		attachmentGone(t, s, A.id)
+		before := upstreamBytes(t, e)
+		c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[{"role":"user","content":"a secret prefix"}]}`, as(2))
+		if c != 409 || codeOf(b) != "attach_required" {
+			t.Fatalf("an anonymous remote caller after A left: %d %s", c, b)
+		}
+		if upstreamBytes(t, e) != before {
+			t.Fatal("it reached the model server")
+		}
+		// a caller of this machine is trusted: served
+		if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, jsonCT); c != 200 {
+			t.Fatalf("local: %d %s", c, b)
+		}
+	})
+	t.Run("a clean slot only", func(t *testing.T) {
+		e, s, _ := clientsEnv(t, false, nil)
+		_, rs, _ := remoteSrv(t, s)
+		A := growRemote(t, e, s, rs, 1, "a", 2)
+		sl, _ := A.first["slots"].(map[string]any)
+		first, _ := sl["first"].(float64)
+		A.cancel()
+		attachmentGone(t, s, A.id)
+		for i := 0; i < 4; i++ {
+			c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(2))
+			var rep struct {
+				IDSlot *int `json:"id_slot"`
+			}
+			json.Unmarshal([]byte(b), &rep)
+			switch {
+			case c == 409 && codeOf(b) == "attach_required":
+			case c == 200 && rep.IDSlot != nil && (*rep.IDSlot < int(first) || *rep.IDSlot >= int(first)+2):
+			default:
+				t.Fatalf("an anonymous remote caller after A left (A's range %v..%v): %d %s", first, first+1, c, b)
+			}
+		}
+	})
+	t.Run("two owners, cache off", func(t *testing.T) {
+		e, s, _ := clientsEnv(t, false, nil)
+		_, rs, _ := remoteSrv(t, s)
+		A := growRemote(t, e, s, rs, 1, "a", 2)
+		growRemote(t, e, s, rs, 3, "c", 1)
+		A.cancel()
+		attachmentGone(t, s, A.id)
+		n := len(e.Starts())
+		// D wants what A's vacant range holds: never given it; a grow (its own, charged) instead
+		D := openHold(t, rs, `{"hold":true,"name":"d","profile":{"slots":2,"ctx_per_slot":{"max":8192,"floor":4096}}}`, tok(4))
+		if sl, _ := D.first["slots"].(map[string]any); D.status != 200 || sl["given"] != float64(0) || sl["pending"] != true {
+			t.Fatalf("D: %d %v", D.status, D.first)
+		}
+		m := D.untilGiven(2)
+		testkit.WaitPhase(t, s, "ready", 15*time.Second)
+		if len(e.Starts()) != n+1 || restartsLeft(m) != 3 {
+			t.Fatalf("D's grow: starts %d (from %d), restarts left %d", len(e.Starts()), n, restartsLeft(m))
+		}
+	})
 }

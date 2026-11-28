@@ -48,13 +48,13 @@ var (
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
 		"model_note", "sampler", "model_name", "model_codename", "model_codename_full", "model_selected", "model_params", "model_size_class", "held", "sleep_reason"}
 	StatusRemoved = []string{
-		"port",                       // the control API's own port
-		"server_url",                 // the local model server's URL and port
-		"agent",                      // the agent's pid and detail
-		"parents",                    // watched parent pids
-		"errors",                     // error texts can name paths and user names
-		"external",                   // the owner's external endpoint
-		"linger_s",                   // owner setting
+		"port",                                            // the control API's own port
+		"server_url",                                      // the local model server's URL and port
+		"agent",                                           // the agent's pid and detail
+		"parents",                                         // watched parent pids
+		"errors",                                          // error texts can name paths and user names
+		"external",                                        // the owner's external endpoint
+		"linger_s",                                        // owner setting
 		"idle_sleep", "idle_sleep_s", "idle_sleep_forced", // owner settings: the idle rule
 		"upgrade",  // carries error text
 		"contexts", // saved slots, with other clients' ids

@@ -304,6 +304,23 @@ func (s *Supervisor) launch(ctx context.Context, lc loadCtx, shape fit.Shape) la
 	}
 }
 
+// portLostIn: a line of the server's last words says it could not bind the port it was given:
+// llama-server's "couldn't bind HTTP server socket, hostname: 127.0.0.1, port: <port>"
+// (tools/server/server-http.cpp:517), or the system's "...:<port>: bind: address already in use".
+// Only a line that names this launch's port counts: an exit for another reason is never taken
+// for a lost port, whatever else its log says.
+func portLostIn(tail string, port int) bool {
+	p := strconv.Itoa(port)
+	for _, l := range strings.Split(tail, "\n") {
+		switch {
+		case strings.Contains(l, "couldn't bind HTTP server socket") && strings.HasSuffix(strings.TrimSpace(l), "port: "+p),
+			strings.Contains(l, ":"+p+": bind: address already in use"):
+			return true
+		}
+	}
+	return false
+}
+
 // launchOnce starts llama-server at a shape and waits until it is healthy.
 func (s *Supervisor) launchOnce(ctx context.Context, lc loadCtx, shape fit.Shape) launchResult {
 	port := s.cfg.LlamaPort
@@ -443,7 +460,7 @@ func (s *Supervisor) launchOnce(ctx context.Context, lc loadCtx, shape fit.Shape
 			oom, mb := ParseOOM(tail)
 			// llama-server binds before it loads: "couldn't bind HTTP server socket"
 			// (tools/server/server-http.cpp), the system's "address already in use"
-			lost := !oom && (strings.Contains(tail, "couldn't bind HTTP server socket") || strings.Contains(tail, "address already in use"))
+			lost := !oom && portLostIn(tail, port)
 			return launchResult{oom: oom, failedMB: mb, exited: true, opts: opts, portLost: lost, err: fmt.Errorf("llama-server exited while loading: %s", lastLine(tail))}
 		case <-ask:
 			if !s.healthy(url) {

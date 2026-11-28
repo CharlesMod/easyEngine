@@ -500,3 +500,44 @@ func TestTakeSlotForOrdersTheHandover(t *testing.T) {
 		t.Fatalf("failed erase: %+v, tag %+v", ce, m.tags[1])
 	}
 }
+
+// A local caller's ask for the commons that comes after a start's merge was taken is asked again
+// at that start (a grow), never answered 503 no_room as if the card had no room for it.
+func TestCommonsAskedAfterTheMergeIsAskedAgain(t *testing.T) {
+	s := regSup(false)
+	s.addAtt("A", "client-1", false, 2)
+	s.mergedWants() // the start's merge: the commons not asked yet
+	s.clients.commons = true
+	s.startMap(fit.Shape{Slots: 2, CtxPerSlot: 8192}, launchSet{seq: 1 << 60})
+	r := &s.clients
+	if r.commonsShort {
+		t.Fatal("the commons said short by a start whose merge did not ask for it")
+	}
+	if _, ok := r.plans[commonsKey]; !ok {
+		t.Fatalf("the commons not asked again: plans %v", r.plans)
+	}
+	// a start whose merge did ask, and still gave it nothing: short
+	s.mergedWants()
+	s.startMap(fit.Shape{Slots: 2, CtxPerSlot: 8192}, launchSet{seq: 1 << 60})
+	if !r.commonsShort {
+		t.Fatal("a start that merged the commons and gave it nothing is not short")
+	}
+}
+
+// A lost port is read only from a line that names this launch's port.
+func TestPortLostReadsOnlyThisPort(t *testing.T) {
+	for _, c := range []struct {
+		tail string
+		want bool
+	}{
+		{"srv start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 4242\n", true},
+		{"listen tcp 127.0.0.1:4242: bind: address already in use\n", true},
+		{"srv start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 42421\n", false},
+		{"rpc: listen tcp 0.0.0.0:50052: bind: address already in use\nmain: model load failed\n", false},
+		{"error: out of memory\n", false},
+	} {
+		if got := portLostIn(c.tail, 4242); got != c.want {
+			t.Errorf("%q: %v", c.tail, got)
+		}
+	}
+}

@@ -271,6 +271,10 @@ type clientReg struct {
 	// anonymous requests are answered 503 until the next start, never held for a reshape that
 	// cannot give it room.
 	commons, commonsShort bool
+	// commonsMerged: the last merge taken (mergedWants, for the start that follows it) gave the
+	// commons the defaults' slots. A start whose merge was taken before the commons was asked for
+	// says nothing of its room: the commons is asked again (a grow), never answered 503.
+	commonsMerged bool
 	// stale: the last client with wants left; the shape it grew stands (its range vacant) until
 	// it returns, the model stops for another reason, or an under-served caller's request comes
 	stale bool
@@ -447,6 +451,7 @@ func (s *Supervisor) mergedWants() (w fit.Wants, from []string) {
 	r.mu.Lock()
 	ws := r.wantingLocked()
 	commons := r.commons
+	r.commonsMerged = commons
 	r.mu.Unlock()
 	if len(ws) == 0 {
 		p := s.cfg.Profile
@@ -832,13 +837,17 @@ func (s *Supervisor) startMap(shape fit.Shape, ls launchSet) {
 			m.tags[e] = SlotTag{Who: a.key, Trusted: trustedIdentity(a.identity, a.local)}
 		}
 	}
-	r.commonsShort = r.commons && !commonsRange
+	r.commonsShort = r.commons && r.commonsMerged && !commonsRange
 	r.run = m
 	r.gen++
 	r.stale = false
 	clear(r.plans)
 	r.replanLocked()
 	asked := false
+	if r.commons && !r.commonsMerged && !commonsRange {
+		// asked for after this start's merge was taken: the next look grows for it
+		asked = r.planLocked(2, commonsKey, "", true, nil) || asked
+	}
 	for _, a := range late { // came during the start: the next look grows for it
 		asked = r.planLocked(2, a.key, a.charge, a.local, a) || asked
 	}

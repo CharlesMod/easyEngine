@@ -318,7 +318,7 @@ func lookMembers(v []byte, what string, f func(k string, v []byte) *run.ClientEr
 		}
 		seen[k] = true
 		w.ws()
-		w.i++ // the colon
+		w.i++ // the ':' after the key
 		if ce := f(k, w.value()); ce != nil {
 			return ce
 		}

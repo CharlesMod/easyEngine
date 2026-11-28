@@ -925,7 +925,7 @@ refused with 403 `{"error":"...","code":"not_allowed"}`:
 
 - `/engine/v1`: `GET hello`; the keyless pairing paths (`POST pair`, `GET pair/{id}`,
   `DELETE pair/{id}`); `GET status`, in the reduced view below; `POST attach`;
-  `DELETE attach/{id}`.
+  `DELETE attach/{id}`; `POST look` (§7h, the one way its images reach the model).
 - The proxy, on the cleaned path (`//v1/chat/completions`, a trailing slash and encoded forms
   are judged as what they spell; a path with a `.` or `..` segment is refused): `POST`
   `/v1/chat/completions`, `/chat/completions`, `/v1/completions`, `/completions`, `/completion`,
@@ -985,6 +985,7 @@ other timer: streams and long model calls run as long as the client keeps them.
 | `POST sleep`, `POST wake` | §6 |
 | `PUT settings {mode?, external?:{base_url?, model?, api_key?, clear_api_key?}, linger_s?, kv_type?, sampler_policy?, streamer?: "on"\|"off", keep_context?: "on"\|"off"\|"always", vision?: bool}` | **partial**: only the fields sent change, the rest keep their saved value. An explicit empty `base_url` clears it; an empty or missing `api_key` keeps the key, and `clear_api_key: true` removes it. Written to `settings.json` (whole, with the `listen` and `yield` keys it holds; §2); a mode change takes effect at once, and so does `streamer` (the next request; 400 for any value but on or off) and `keep_context` (the next planned stop; 400 for any value but on, off or always; §5 "The prompt cache across a restart"). `GET settings` shows `streamer`, `keep_context` and `vision` (with `vision_forced: true` while `serve --vision` holds it on; then `{"vision": false}` answers 409 `vision_forced` and changes nothing; a change of `vision` reloads the running server when idle if it loads or drops the projector; §7h). `listen` and `yield` are edited in the file, not here |
 | `POST test` | tests the current endpoint (local or external): `GET /models` then an 8-token chat; returns `{light: "green"\|"amber"\|"red", message, latency_ms, model}` using the same rules as the mod's `LlmProbe` |
+| `POST look {images, question, detail?, max_tokens?, id_slot?, stream?}` | the model reads the caller's images (PNG/JPEG, decoded and re-encoded by the engine) and answers the question: `{text, tokens:{image,prompt,completion}, ms:{prefill,total}}`; **409** `vision_off` without a loaded projector; every rule and bound in §7h "The look call" |
 | `POST attach {pid?, name?, hold?, profile?}` | adds a parent pid (the old wire, `{pid}` alone, answers as before plus fields) and an **attachment** with the client's profile; `hold: true` keeps the answer open as its presence (§7g); **409** once the engine is stopping |
 | `DELETE attach/{id}` | detaches an attachment: 204; 404 `attachment_unknown`; 403 `not_yours` (§7g) |
 | `GET logs?name=engine\|llama-server\|agent&tail=200` | plain text |
@@ -1812,7 +1813,75 @@ was added or removed").
 **Images.** A local caller may send images in a chat body untouched. A remote caller's body
 with any media is refused (below); with vision off a local body with an image is left alone
 (llama-server answers it with a clean error: 500 "image input is not supported" on the chat
-paths, 400 on `/completion`).
+paths, 400 on `/completion`). A remote caller's images reach the model only through the look call.
+
+#### The look call: `POST /engine/v1/look`
+
+Status, hello (keyless too) and the paired status say `look: true`: this engine offers the call.
+It does not depend on a projector being loaded (`vision` says that). A paired token may call it;
+like every non-GET control call it needs `X-Easy-Engine: 1`.
+
+Request (one JSON object, strict: an unknown or repeated key at any level is 400 `bad_request`;
+numbers must be integer tokens: no fraction, exponent, leading zero or quotes):
+
+```json
+{"images": [{"data": "<base64 PNG or JPEG>", "label": "optional text"}],
+ "question": "what is on the map?", "detail": "low|high|max", "max_tokens": 256,
+ "id_slot": 0, "stream": false}
+```
+
+| field | rule |
+|---|---|
+| `images` | required, 1 to 4 objects `{data, label?}` (`too_many_images` over 4) |
+| `data` | standard base64, padding optional, or a `data:image/png;base64,` / `data:image/jpeg;base64,` prefix |
+| `label` | optional string, at most 256 bytes; sent as a text part just before its image |
+| `question` | required non-blank string, at most 16 KiB; sent as the last text part |
+| `detail` | `low`, `high` (default) or `max`: the long edge from the serving model's projector `detail` table |
+| `max_tokens` | integer 1 to 4096, default 512 |
+| `id_slot` | optional integer 0 to 1023, in the caller's own numbering; out of its range is 400 `slot_out_of_range` as for any request |
+| `stream` | optional `true` / `false` |
+
+**The images** (`lookimg`): each is read in this order, each check before the next costs memory:
+base64 length at most 11 MiB (`image_too_large`); valid base64 (`image_bad`); decoded at most
+8 MiB (`image_too_large`); PNG or JPEG by its magic bytes, nothing else (`image_format`); the header
+read with `image.DecodeConfig` (no pixel decoded yet): each side at most 8192 px and at most
+16 Mi pixels (`image_too_many_pixels`, so a decoded image is at most 64 MiB RGBA); then the
+decode (`image_bad` on any error; a decoder panic is caught); then a box-filter downscale so the
+long edge is at most the detail's (never up); then a re-encode, PNG to PNG and JPEG to JPEG
+(quality 90), which drops all metadata. A refusal is 400 with that code and `"image": <index>`.
+Nothing reaches the model server unless every image passed.
+
+**The request the model server gets** is built by the engine from these parts alone:
+`{"messages":[{"role":"user","content":[{label text}, {"type":"image_url","image_url":{"url":"data:<mime>;base64,<re-encoded>"}}, ..., {"type":"text","text":<question>}]}], "max_tokens", "stream", "stream_options":{"include_usage":true} (streamed), "id_slot" (given), "chat_template_kwargs" (the projector's catalog field, e.g. Bonfire's {"enable_thinking": false}; a caller cannot set it)}`.
+It goes through the proxy as a chat completion of the caller's: the door (a sleeping model is
+woken and the look held like any request), the caller's own slots and id_slot mapping, the
+sampler policy. The remote media checks are skipped for it alone (the mark is the engine's,
+set in the request's context, never a header).
+
+**Bounds.** At most 2 looks decode images at once, engine-wide; a caller from another machine
+has one look at a time (from its body to its answer); the built requests of remote looks hold at
+most 64 MiB in all; a remote look whose built request passes 16 MiB (the remote body bound) is
+400 `look_too_large`. Over any of these the answer is 429 `busy` at once: nothing waits for
+room. The body itself is read by the proxy's bounded read (16 MiB and 8 at once from other
+machines, 64 MiB locally; silence and total timeouts).
+
+**Answers.**
+- `409 vision_off` when the model server runs without a projector, when the served model has
+  none (a sleeping engine is not woken for it), or when a look woke the model and it came up
+  without one.
+- Non-streamed, 200: `{"text": "...", "tokens": {"image": -1, "prompt": N, "completion": N},
+  "ms": {"prefill": N, "total": N}}`. `text` is `choices[0].message.content`; `tokens.prompt` and
+  `tokens.completion` are the model server's `usage.prompt_tokens` and `usage.completion_tokens`
+  (prompt counts the image tokens and cached tokens); `ms.prefill` is `timings.prompt_ms` (it
+  includes the image encode, not the engine's decode) and `ms.total` is `timings.prompt_ms +
+  timings.predicted_ms`, rounded. llama-server says nowhere how many tokens the images became, so
+  `tokens.image` is -1; any figure the answer does not carry is -1. A refusal of the door or an
+  error of the model server is passed on as it came.
+- Streamed (`stream: true`): the chat-completion event stream exactly as the proxy streams it
+  (the hold's waiting word, every chunk, the usage chunk), and one more event just before
+  `data: [DONE]`: `data: {"object":"look.result","text":<all the deltas>,"tokens":{...},"ms":{...}}`
+  with the figures as above. A stream that ends without `[DONE]` (an error event) has no
+  `look.result`.
 
 #### Media from remote callers
 

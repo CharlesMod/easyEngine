@@ -57,6 +57,7 @@ var (
 		"device",     // llama-server device pin: env and args
 		"recovery",   // last error text
 		"yield",      // names the program the card yielded to
+		"build",      // the llama.cpp build and its move: the move's error text can name paths
 	}
 )
 

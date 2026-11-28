@@ -134,8 +134,10 @@ Worked examples (desktop uses about 800 MiB; RAM 24 GB free):
   recommended. e2b (2.6 GB) fits too, but it is the flagged fallback and is never preferred over e4b.
 - **6 GB or less.** Only e2b fits whole (2.6 GB); e4b is tight (2 of 3 slots at 8192 ctx at 6 GB); the reference model is not usable. e2b is the catalog's
   `fallback` model (see ENGINE.md §3): the plan and status carry a warning for it.
-  With no GPU, the planner picks the smallest model whose RAM is at most 60 % of free RAM after a 2 GiB OS
-  reserve (e2b) and marks the plan as an estimate: no CPU speed was measured, so expect it slow.
+  It is recommended only when no other model can run: where e4b fits at all (even tight), e4b is the pick.
+  With no GPU, the planner picks the smallest non-fallback model whose RAM is at most 60 % of free RAM after a
+  2 GiB OS reserve, else the smallest non-fallback model that fits (e4b), and e2b only when nothing else fits;
+  it marks the plan as an estimate: no CPU speed was measured, so expect it slow.
 
 Caveats: one card, one llama.cpp build, one driver. Other cards move `fixed` by a few hundred MiB
 (CUDA context, allocator granularity); the margin covers that and `calibrate()` adjusts after the first

@@ -227,7 +227,8 @@ Hugging Face and keeps `llama`, `uv` and `agent_runtime` as they are in the file
   one load (`upgrade.state` `failed`).
 - **Fallback.** `fallback: true` marks a model kept only as a last resort (today gemma4-e2b-q4km);
   `fallback_note` is a one-sentence, game-agnostic description of what to expect. The ladder is
-  gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback. The flag is carried into the plan
+  gemma4-rp-maxxed-q3kxl, gemma4-e4b-rp-q40, then the fallback, which is recommended only when no
+  other model can run (§5, "The fallback is the last resort"). The flag is carried into the plan
   (`models[].fallback`, `fallback_note`) and, when the selected local model is a fallback, into
   `GET status` as `model_fallback` and `model_note`. Front ends show it as a warning; the setup page
   does. `tools/gencatalog` sets it from the model spec.
@@ -565,6 +566,13 @@ reaches the floor, the planner still returns the best shape, flagged slow ("tigh
 With no usable GPU the recommendation is the smallest model whose estimated RAM is at most 60 %
 of `RAMAvail - 2 GiB`, else the smallest that fits at all. Nothing was measured on a CPU, so
 the verdict is marked `estimated` and says so.
+
+**The fallback is the last resort** (`plan.lastResort`). A `fallback` model (today the E2B,
+Flashlight) is a candidate for `recommended` only when no other model is: on a card, the best
+non-fallback, non-opt-in model that fits "yes", else the best that fits "tight", and only with
+neither the fallback ("yes", then "tight"); with no usable GPU, the CPU-only pick above among
+the non-fallback models first (so the E4B wins whenever it fits, comfortable or not), and the
+fallback only when nothing else fits. The fallback stays listed and installable everywhere.
 
 ### Choosing a shape, in order
 

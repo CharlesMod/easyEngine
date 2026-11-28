@@ -1531,32 +1531,39 @@ the first NDJSON line):
   cache and all, with no restart (`"resumed": true`), and any reshape its leave had asked for is
   cancelled. An attach of a key that stands replaces its presence (`"replaced": true`, the same id
   and slots). A new attachment is served from vacant slots when they suffice, the running ctx is
-  at least its floor, its options change nothing and the RAM prompt cache is off (below); else
-  the model grows. A **local** caller's grow drains: requests are held at the door while the
+  at least its floor, its options change nothing and the RAM prompt cache is off (below); a
+  remote one never from another client's vacant range (that client's prompts are still in it:
+  slots no client held, or its own, only); else the model grows. A **local** caller's grow drains: requests are held at the door while the
   replies in flight finish, and when `DrainMax` (2 min) comes first the ones still running are cut,
   each stream with its terminal event. A **remote** caller's grow or option change never drains:
   it waits for the door's next empty moment (`pending`, `why: waiting_for_idle`); its own requests
   held meanwhile are not in flight, so with no other traffic it grows at once.
 - **The last client's leave reshapes nothing.** The shape and its vacant range stay until (a) the
-  same key returns (it resumes: no restart, no charge), (b) the model server stops for another
+  same key returns (it resumes from its standing range: no restart, no charge), (b) the model server stops for another
   reason (an unload, sleep, a yield, a crash, the person's change: the next start uses the wants
   that stand then), or (c) a local caller with no slots of its own that the stale shape
   under-serves sends a request (the base has no range in it, or it has more slots than the
   standing wants and less context per slot than their max): that request is held and the engine
   reshapes then, as a local grow does. A remote anonymous request never restarts the engine. A
-  leave that is not the last reshapes, when idle, only when that gives someone something (an
-  unserved one served, an option handed over, more ctx to one below its max).
+  **local** leave that is not the last reshapes, when idle, only when that gives someone something
+  (an unserved one served, an option handed over, more ctx to one below its max). A **remote**
+  leave never reshapes by itself: an attachment left out or waiting for room is then given a
+  reshape of its own, when idle, charged to its own budget (a local one's to none); one whose
+  budget is spent waits for the next start made for another reason.
 - **Never held without an event.** A request is held only while something is coming that ends
   the hold: the model on its way up (the phase's word), a reshape asked for its attachment (the
   start that serves it), a stale shape's reshape (that start). A client with no slots in the
   running model and nothing coming for it (its budget spent, its floor short, no room beside the
   others) is answered at once, 503 `no_room` with the why.
-- **Restart budget.** A remote identity is charged only for a restart of a running model server
-  that its own attach or change of wants or options causes: 4 in the engine's life
-  (`restarts_left` in its answer and held lines). A re-attach under a key with the same profile as
-  that key last had (a hash kept per key for the engine's life) is a **return**: never charged,
-  though it still waits for idle if it needs a restart. Leaves, revokes and restarts for other
-  reasons are never charged; local callers and the master key are not budgeted. With the budget
+- **Restart budget.** Every restart of the model server is one of: a local caller's want (its
+  attach, change, leave or under-served request), the engine's own reasons (a load, the person's
+  change, a yield, memory, a crash), or a remote identity's attach or change of wants or options,
+  charged to it: 4 in the engine's life (`restarts_left` in its answer and held lines). No
+  sequence of acts by remote clients alone restarts the model uncharged. A **return** (the same
+  key again) is free only when it is served from its own standing range, with no restart; a return
+  that needs a restart (its range was reshaped away, or the model stopped meanwhile) is charged as
+  an attach is. Leaves and revokes are never charged and never restart by themselves; the master
+  key from another machine is not budgeted. With the budget
   spent a change is not made (`why: restart_budget_spent`): the attachment keeps what it has, or,
   with nothing, its requests get 503 `no_room` until a start that comes for another reason.
 - **Floors and ceilings.** A remote client's ctx floor never raises the others': it is clamped to
@@ -1652,7 +1659,7 @@ from its source; `api/paths.go`):
 
 | Paths | Slot | At the door |
 |---|---|---|
-| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` above 1 is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329) |
+| `/completion`, `/completions`, `/v1/completions`, `/chat/completions`, `/v1/chat/completions`, `/v1/messages`, `/infill` | one, by the body's `id_slot` (a prompt array: every task on that same slot) | confined; `n`/`n_cmpl` other than absent, `null` or the literal `1` is 400 `n_not_offered` (its child tasks take any free slots, server-task.h:329; the server casts the value to int32, so `-4294967294` would be 2) |
 | `POST /slots/{n}?action=erase` | one, by the path | confined; save and restore refused (403) |
 | `/embedding(s)`, `/v1/embeddings`, `/rerank(ing)`, `/v1/rerank(ing)`, `/tts`, `/(v1/)audio/speech`, `/(v1/)audio/transcriptions` (multipart), `GET /v1/realtime`, `/v1/systemone` | one the server picks | not confinable |
 | `/responses`, `/v1/responses` | one the server picks (its conversion drops `id_slot`, server-chat.cpp:32) | not confinable |
@@ -1666,7 +1673,8 @@ tokenize and model paths at all: the gate's scope, `api/scope.go`. The table hol
 callers and the master key from another machine, which the gate does not scope.)
 
 A confined request **fails closed**: its body must be exactly one JSON object (a byte-order mark,
-an empty body, an array, trailing data or nesting deeper than 64 is 400 `bad_request`); `id_slot`
+an empty body, an array, trailing data, a top-level key given twice or nesting deeper than 64 is
+400 `bad_request`: two readers may keep different ones of a doubled key); `id_slot`
 must be an integer (or -1, or absent); `/slots/{n}` must be ASCII digits (`1x`, ` 1`, `+1` are 400:
 llama-server would read each as 1). `id_slot` n in the client's numbering goes to its engine slot;
 outside `0..given-1` is 400 `slot_out_of_range`. Absent or -1 takes the least recently used slot of
@@ -1679,8 +1687,14 @@ A body the door must look at (a JSON POST it confines, and the stream lookup it 
 whole before the request reaches the door (a slow sender holds no slot, no count in flight, no
 drain): at most 64 MiB from a local caller and 16 MiB from a remote one (413 `body_too_large`),
 each read bounded by a network timeout on silence (30 s, `API.BodySilence`) and the whole read by
-a second one (5 min, `API.BodyTotal`; 400 `body_unread`), at most 8 remote bodies at once (the
-9th is 429 `busy`). Every other body (multipart uploads, GETs, the unconfinable paths) streams
+a second one (5 min, `API.BodyTotal`; 400 `body_unread`).
+
+**What the engine keeps for other machines is bounded**, whatever they send and however long they
+are held (`api/clientslots.go`): at most 8 remote bodies being read at once, each at most 16 MiB;
+at most 64 MiB of remote bodies read whose requests have not ended (held at the door or in
+flight); so at most 192 MiB of remote bodies in all. At most 8 requests of one remote client
+(every `--open` address counts as one) and 32 of all remote clients are held at the door at once.
+Over any of these: 429 `busy`. Every other body (multipart uploads, GETs, the unconfinable paths) streams
 through as it comes, as before.
 
 **Conversation ids.** llama-server's resumable streams key a session by the `X-Conversation-Id`
@@ -1688,9 +1702,20 @@ header (any case); a new request with a known id replaces and cancels that sessi
 /v1/stream?conv_id=` replays it and `DELETE /v1/stream?conv_id=` cancels it; `POST
 /v1/streams/lookup` takes `conversation_ids` (server-stream.cpp:235-253, :456-470, :510-546,
 :563-604). The engine owns that name space: every id a request gives (the header, the `conv_id`
-query, the lookup's list) is rewritten to one that carries its owner (the attachment's key, or the
-commons, hashed), and the lookup's answer is mapped back; a client replays or cancels only its
-own. A remote caller is refused the stream paths in every method.
+query, the lookup's list) is rewritten to one that carries its owner, hashed: the attachment's
+key; else, for a caller of this machine, the commons; else the remote client's own (a remote
+caller with no attachment never shares the commons, where its id could replace and so cancel a
+local stream). Only the part before the first `::` is owned: the lookup also matches a stored id
+that is the asked one then `::` (`<id>::<model>`, server-stream.cpp:533-536), so the rest is kept
+and a lookup of an id still finds its variants. The lookup's answer is mapped back; a client
+replays, cancels or finds only its own. A remote caller is refused the stream paths in every
+method.
+
+**A departed client's prompts.** A vacant range still carries the prompts of the client that held
+it (the slot's own cache; with the RAM prompt cache on, any slot may load them). A remote caller
+with no attachment is never sent to such a slot (rules 3-4 skip it), and while the RAM prompt cache
+is on and such a range stands it is 409 `attach_required`; a remote attach is never served from
+another client's vacant range. Callers of this machine trust each other and are served as before.
 
 A context saved from a client's slot goes back into that client's slot of the same number after a
 reshape; one saved from a slot no client owned goes back only into the same number when no client

@@ -139,24 +139,31 @@ one budget), never counted against a local caller's. None stating any: the profi
   waits for the door's next empty moment (the `idle` cause), never a drain. The last client's
   leave reshapes nothing: its vacant range waits for its return (no restart, no charge), for the
   model to stop for another reason, or for a local caller the stale shape under-serves (whose
-  request is held while it reshapes). Another leave reshapes, when idle, only if that gives
-  someone something. A remote identity is charged only for restarts its own attach or change
-  causes (a return with the same profile is free), 4 in the engine's life. Nothing is held
+  request is held while it reshapes). Another local leave reshapes, when idle, only if that gives
+  someone something; a remote leave never reshapes by itself (a waiting attachment's own reshape is
+  charged to it). Every restart is a local caller's want, the engine's own reason, or charged to
+  the remote identity whose attach or change caused it, 4 in the engine's life: a return is free
+  only when served from its own standing range. A remote attach is never served from another
+  client's vacant range, nor a remote caller with no attachment sent to one. Nothing is held
   without an event that ends the hold: a client with nothing coming is answered 503 at once.
 - **Slots belong to clients.** The engine decides whose every slot-touching request is: the
   attachment it names (of the caller's own identity), else a remote caller's one attachment with
   slots, else the commons (the base's range, or the slots nobody owns), else 409 `attach_required`
   for a remote caller (a local one passes). Local callers trust each other; an `--open` remote
   caller is held to the paired allow list; the master key from another machine is unrestricted.
-  `n`/`n_cmpl` above 1 in a confined body is 400 `n_not_offered` (llama-server would take free
-  slots for the children). A request's slot work is read from llama-server's own
+  `n`/`n_cmpl` other than absent, null or the literal 1 in a confined body is 400 `n_not_offered`
+  (llama-server would take free slots for the children; it casts the value to int32), and a
+  top-level key given twice is 400. A request's slot work is read from llama-server's own
   routes; a path that cannot be held to one range is refused to a remote caller while another
   client holds slots. A confined body that is not exactly one JSON object is refused (fail
   closed). `id_slot` in its own numbering is mapped to its engine slot, the reply's mapped back;
   absent or -1 takes its least recently used free slot (pick and mark one step). Bodies are read
   before the door (only the JSON POSTs the door looks at; 64 MiB local, 16 MiB and 8 at once
-  remote), each read under a network timeout on silence and a total bound. Conversation ids of resumable
-  streams carry their owner. Saved contexts are keyed by the
+  remote), each read under a network timeout on silence and a total bound; at most 64 MiB of
+  remote bodies kept until their requests end, 8 requests of one remote client and 32 of all held
+  at the door (429 `busy`). Conversation ids of resumable
+  streams carry their owner (a remote caller with no attachment its own, never the commons; an
+  id's `::<model>` tail kept). Saved contexts are keyed by the
   attachment's key and its own slot number, and laid back into the slot that key has after a
   start that renumbered; a key with no standing attachment at the lay-back is let go, and a slot
   no client owned goes back only into the same unowned number.

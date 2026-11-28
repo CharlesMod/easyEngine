@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/dirs"
@@ -80,6 +81,8 @@ func runEngine(args []string, kind launch, implicit bool) int {
 	host := fs.String("host", ifApp(appMode, conf.Listen.Host, "127.0.0.1"), "listen address (beyond loopback every request needs the bearer token: easy-engine token)")
 	open := fs.Bool("open", ifApp(appMode, conf.Listen.Open, false), "with a non-loopback --host: no token at all (anyone who can reach the port can use the engine)")
 	linger := fs.Duration("linger", 0, "keep running this long after the last parent exits")
+	idleSleep := fs.Duration("idle-sleep", 0, "unload the model after this long with nothing attached and nothing asked (default: settings idle_sleep_s, 10m)")
+	noIdleSleep := fs.Bool("no-idle-sleep", false, "never unload the model for being idle (settings idle_sleep: false)")
 	var parents pidList
 	fs.Var(&parents, "parent-pid", "game pid to watch (repeatable)")
 	y := ifApp(appMode, conf.Yield, settings.Defaults().Yield)
@@ -94,12 +97,19 @@ func runEngine(args []string, kind launch, implicit bool) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	lingerSet := false
+	lingerSet, idleSleepSet := false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "linger" {
+		switch f.Name {
+		case "linger":
 			lingerSet = true
+		case "idle-sleep":
+			idleSleepSet = true
 		}
 	})
+	if *idleSleep < 0 || *idleSleep > settings.IdleSleepMax*time.Second {
+		fmt.Fprintf(os.Stderr, "--idle-sleep must be 0 to %s\n", settings.IdleSleepMax*time.Second)
+		return 2
+	}
 	if kind == launchServe && len(parents) == 0 {
 		fmt.Fprintln(os.Stderr, "serve needs --parent-pid (use `setup` for a run without a game)")
 		return 2
@@ -134,6 +144,8 @@ func runEngine(args []string, kind launch, implicit bool) int {
 		Yield:       yc,
 		ProfilePath: *profile, ParentPIDs: parents, Host: *host, Port: *port,
 		Linger: *linger, LingerSet: lingerSet, Version: version, Open: *open,
+		IdleSleep: *idleSleep, IdleSleepSet: idleSleepSet, NoIdleSleep: *noIdleSleep,
+
 		DetachStdio: !setup,
 		Resident:    appMode, Tray: tr,
 		Started: func(p int) {

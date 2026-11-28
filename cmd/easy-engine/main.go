@@ -51,7 +51,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   easy-engine [app]   a tray icon, stays open and waits for a connection (settings in <data dir>/settings.json;
                         the serve flags below override it for one run)
-  easy-engine serve   --profile F --parent-pid P [--port N] [--linger D]
+  easy-engine serve   --profile F --parent-pid P [--port N] [--linger D] [--idle-sleep D | --no-idle-sleep]
                         [--yield-to-games [--yield-except IDS] [--yield-ignore NAMES] [--yield-floor-mib N]
                          [--yield-min-mib N] [--yield-grace D] [--yield-steady D] [--yield-strict]]
   easy-engine setup   [--profile F]

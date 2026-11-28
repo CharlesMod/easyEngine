@@ -61,11 +61,16 @@ func (y Yield) Steady() time.Duration { return time.Duration(y.SteadyS) * time.S
 
 // File is the whole of settings.json.
 type File struct {
-	Mode          string   `json:"mode"` // local | external
-	External      External `json:"external"`
-	LingerS       int      `json:"linger_s"`
-	KVType        string   `json:"kv_type"`
-	SamplerPolicy string   `json:"sampler_policy"` // enforce | fill | off
+	Mode     string   `json:"mode"` // local | external
+	External External `json:"external"`
+	LingerS  int      `json:"linger_s"`
+	// IdleSleep puts the model to sleep when the engine is idle (docs/ENGINE.md "Idle sleep"):
+	// nothing attached, nothing asked, for IdleSleepS seconds (LingerS after the last attachment
+	// left). Off keeps the model loaded until a person or a client says otherwise.
+	IdleSleep     bool   `json:"idle_sleep"`
+	IdleSleepS    int    `json:"idle_sleep_s"`
+	KVType        string `json:"kv_type"`
+	SamplerPolicy string `json:"sampler_policy"` // enforce | fill | off
 	// Streamer is the token streamer (docs/STREAMING.md): on (default) | off. Off is the proxy's
 	// plain byte copy, kept as a way back.
 	Streamer string `json:"streamer"`
@@ -92,13 +97,20 @@ var Streamers = []string{"on", "off"}
 // KeepContexts are the keep_context setting's values.
 var KeepContexts = []string{"on", "off", "always"}
 
+// IdleSleepMax caps idle_sleep_s: a week. Longer is idle sleep off (idle_sleep: false).
+const IdleSleepMax = 7 * 24 * 3600
+
+// DefaultIdleSleepS is idle_sleep_s by default: ten minutes of quiet.
+const DefaultIdleSleepS = 600
+
 // NameMax caps the name setting, in bytes.
 const NameMax = 63
 
 // Defaults is every setting at its default.
 func Defaults() File {
 	return File{
-		Mode: "local", LingerS: 0, KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on", KeepContext: "on", Discovery: "on",
+		Mode: "local", LingerS: 0, IdleSleep: true, IdleSleepS: DefaultIdleSleepS,
+		KVType: "q4_0", SamplerPolicy: "enforce", Streamer: "on", KeepContext: "on", Discovery: "on",
 		Listen: Listen{Host: "127.0.0.1", Port: DefaultPort},
 		Yield:  Yield{Except: []string{}, Ignore: []string{}, FloorMiB: 128, GraceS: 15, SteadyS: 60},
 	}
@@ -145,6 +157,9 @@ func (f File) Validate() (key, why string) {
 		return "name", fmt.Sprintf("name must be at most %d bytes", NameMax)
 	case f.LingerS < 0:
 		return "linger_s", "linger_s must not be negative"
+	case f.IdleSleepS < 0 || f.IdleSleepS > IdleSleepMax:
+		return "idle_sleep_s", fmt.Sprintf("idle_sleep_s must be 0 to %d seconds", IdleSleepMax)
+
 	case f.Listen.Port < 1 || f.Listen.Port > 65535:
 		return "port", fmt.Sprintf("port %d is out of range (1-65535)", f.Listen.Port)
 	case strings.TrimSpace(f.Listen.Host) == "":

@@ -409,9 +409,10 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	if stopped || s.Phase() == "sleeping" {
 		s.dropStarter(starterID, target.ID)
 		s.recordPrevious(starterID, target.ID)
-		s.finishSwap(upDone, "") // last: the done fact means the starter is let go too
-		s.setPhase("sleeping", "Stopped")
+		s.finishSwap(upDone, "")    // last: the done fact means the starter is let go too
+		s.sleepPhase("", "Stopped") // a sleep keeps its reason; else it is a stop
 		return
+
 	}
 	err := s.startLocked()
 	if err == nil && s.yielded() != nil {

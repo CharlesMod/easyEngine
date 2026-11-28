@@ -11,16 +11,24 @@ import (
 
 	"github.com/CharlesMod/easyEngine/app"
 	"github.com/CharlesMod/easyEngine/event"
+	"github.com/CharlesMod/easyEngine/run"
 	"github.com/CharlesMod/easyEngine/tray"
 )
 
 func isSleeping(e event.Event) bool { return phaseIs(e, "sleeping") }
 func isEnd(e event.Event) bool      { return requestIs(e, "end") }
 
+// idleAfter sets the idle rule's quiet for callers that only send requests (--idle-sleep).
+func idleAfter(d time.Duration) func(*app.Options) {
+	return func(o *app.Options) { o.IdleSleep, o.IdleSleepSet = d, true }
+}
+
 // A remote client with no parent: its request wakes the sleeping model and is held until it is
-// up; once it is gone, the keeper's linger puts the model to sleep and the engine stays.
-func TestRemoteRequestWakesThenLingerSleeps(t *testing.T) {
-	r := startFakeModel(t, 300*time.Millisecond, nil)
+// up; once its requests stop, the idle rule's quiet (idle_sleep_s, not the linger: it never
+// attached) puts the model to sleep and the engine stays.
+func TestRemoteRequestWakesThenIdleSleeps(t *testing.T) {
+	const quiet = 600 * time.Millisecond
+	r := startFakeModelWith(t, 0, nil, nil, idleAfter(quiet)) // linger 0: were it used, the sleep would come at once
 	s := r.follow(t)
 	if code := r.post(t); code != 200 {
 		t.Fatalf("the request was answered %d", code)
@@ -34,10 +42,16 @@ func TestRemoteRequestWakesThenLingerSleeps(t *testing.T) {
 		t.Fatal("the request was answered without the model ever being ready")
 	}
 	slept := evs[indexOf(evs, end, isSleeping)]
-	var ph struct{ Message string }
+	var ph struct {
+		Message     string
+		SleepReason string `json:"sleep_reason"`
+	}
 	body(slept, &ph)
-	if ph.Message != "Model unloaded" {
-		t.Fatalf("sleeping message %q", ph.Message)
+	if ph.Message != run.IdleMessage || ph.SleepReason != "idle" {
+		t.Fatalf("sleeping %+v", ph)
+	}
+	if d := slept.At.Sub(evs[end].At); d < quiet {
+		t.Fatalf("the model slept %v after the request ended, idle_sleep is %v", d, quiet)
 	}
 	if _, err := os.Stat(filepath.Join(r.dir, "engine.lock")); err != nil {
 		t.Fatal("no lock:", err)
@@ -52,11 +66,11 @@ func TestRemoteRequestWakesThenLingerSleeps(t *testing.T) {
 	}
 }
 
-// A request during the linger starts it over: the model sleeps no sooner than the linger after
-// the second request's end.
-func TestRequestDuringLingerCancelsIt(t *testing.T) {
-	const linger = 1500 * time.Millisecond
-	r := startFakeModelWith(t, linger, nil, map[string]string{"FAKELLAMA_CHAT_DELAY": "300ms"}, nil)
+// A request during the idle rule's moment starts it over: the model sleeps no sooner than the
+// quiet after the second request's end.
+func TestRequestDuringIdleMomentCancelsIt(t *testing.T) {
+	const linger = 1500 * time.Millisecond // the quiet, here idle_sleep
+	r := startFakeModelWith(t, 0, nil, map[string]string{"FAKELLAMA_CHAT_DELAY": "300ms"}, idleAfter(linger))
 	s := r.follow(t)
 	if code := r.post(t); code != 200 {
 		t.Fatalf("first request: %d", code)
@@ -84,10 +98,11 @@ func TestRequestDuringLingerCancelsIt(t *testing.T) {
 	}
 }
 
-// A request held while the model loads keeps it up: with a linger of 0 the model is still not
+// A request held while the model loads keeps it up: with a quiet of 0 the model is still not
 // put to sleep before the held request is answered.
 func TestHeldRequestKeepsTheModelUp(t *testing.T) {
-	r := startFakeModelWith(t, 0, nil, map[string]string{"FAKELLAMA_HEALTH_DELAY": "1s"}, nil)
+	r := startFakeModelWith(t, 0, nil, map[string]string{"FAKELLAMA_HEALTH_DELAY": "1s"}, idleAfter(0))
+
 	s := r.follow(t)
 	if code := r.post(t); code != 200 {
 		t.Fatalf("the held request was answered %d", code)

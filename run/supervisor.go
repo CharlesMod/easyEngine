@@ -23,6 +23,7 @@ import (
 	"github.com/CharlesMod/easyEngine/plan"
 	"github.com/CharlesMod/easyEngine/probe"
 	"github.com/CharlesMod/easyEngine/probe/gpusense"
+	"github.com/CharlesMod/easyEngine/settings"
 )
 
 // ErrBusy means an install job already runs.
@@ -79,6 +80,12 @@ type Status struct {
 	Errors    []string     `json:"errors"`
 	External  ExternalInfo `json:"external"`
 	LingerS   int          `json:"linger_s"`
+	// IdleSleep and IdleSleepS are the idle rule's settings (docs/ENGINE.md "Idle sleep").
+	IdleSleep  bool `json:"idle_sleep"`
+	IdleSleepS int  `json:"idle_sleep_s"`
+	// SleepReason says why no model is loaded while the phase is sleeping: idle (the idle rule),
+	// asked (POST sleep, or a person's stop), start (the app started asleep); "" otherwise.
+	SleepReason string `json:"sleep_reason"`
 	// First-run staging (docs/ENGINE.md section 7a).
 	ModelTier  string       `json:"model_tier"`
 	ModelStage string       `json:"model_stage"`
@@ -143,9 +150,13 @@ type Settings struct {
 	Mode     string   `json:"mode"`
 	External External `json:"external"`
 	// ClearAPIKey removes the stored key (an empty api_key keeps it).
-	ClearAPIKey bool   `json:"clear_api_key,omitempty"`
-	LingerS     int    `json:"linger_s"`
-	KVType      string `json:"kv_type"`
+	ClearAPIKey bool `json:"clear_api_key,omitempty"`
+	LingerS     int  `json:"linger_s"`
+	// IdleSleep turns the idle rule on or off and IdleSleepS is its quiet in seconds (0 to
+	// settings.IdleSleepMax); nil keeps the stored value. GET always says both.
+	IdleSleep  *bool  `json:"idle_sleep"`
+	IdleSleepS *int   `json:"idle_sleep_s"`
+	KVType     string `json:"kv_type"`
 	// SamplerPolicy is enforce | fill | off; empty keeps the stored value.
 	SamplerPolicy string `json:"sampler_policy,omitempty"`
 	// Streamer is the token streamer, on | off (docs/STREAMING.md); empty keeps the stored value.
@@ -221,6 +232,8 @@ type Supervisor struct {
 	port        int
 	llamaURL    string
 	userStopped bool
+	sleepReason string // status sleep_reason: why the phase is sleeping ("" when it is not)
+	idleMoment  idleMoment
 	jobRunning  bool
 	jobCancel   context.CancelFunc
 	loadCancel  context.CancelFunc
@@ -318,6 +331,9 @@ func New(cfg Config) (*Supervisor, error) {
 	s.say("engine", "", map[string]any{"version": cfg.Version, "api": APIVersion, "port": 0})
 	s.say("door", "", map[string]int{"held": 0})
 	s.sayModel()
+	s.mu.Lock()
+	s.sayIdleLocked()
+	s.mu.Unlock()
 	if note != "" {
 		s.addError("%s", note)
 	}
@@ -357,7 +373,15 @@ func (s *Supervisor) addError(format string, a ...any) {
 
 func (s *Supervisor) setPhaseLocked(phase, msg string) {
 	s.phase, s.message = phase, msg
-	s.say("phase", "", map[string]string{"phase": phase, "message": msg})
+	if phase != "sleeping" {
+		s.sleepReason = ""
+	}
+	b := map[string]string{"phase": phase, "message": msg}
+	if phase == "sleeping" {
+		b["sleep_reason"] = s.sleepReason
+	}
+	s.say("phase", "", b)
+
 	s.refreshLocked()
 	if phase == "ready" { // the reactor looks once: what waited for ready (an out-of-memory) is acted on
 		select {
@@ -432,6 +456,7 @@ func (s *Supervisor) Status() Status {
 		Version: s.cfg.Version, API: APIVersion, Port: s.port, Mode: s.st.Mode, Phase: s.phase, Message: s.message,
 		Model: s.st.Model, Backend: s.st.Backend, Errors: append(append([]string{}, s.errs...), s.sf.notes()...),
 		LingerS: s.st.LingerS, KVType: s.st.KVType, Restarts: s.restarts,
+		IdleSleep: s.st.IdleSleep, IdleSleepS: s.st.IdleSleepS, SleepReason: s.sleepReason,
 		External: ExternalInfo{BaseURL: s.st.External.BaseURL, Model: s.st.External.Model, APIKeySet: s.st.External.APIKey != ""},
 		Parents:  []Parent{},
 	}
@@ -798,7 +823,7 @@ func (s *Supervisor) Run() {
 			asleep := s.phase == "starting" // installed, local, not stopped (settle)
 			s.mu.Unlock()
 			if asleep {
-				s.setPhase("sleeping", "Model not loaded")
+				s.sleepPhase("start", "Model not loaded")
 			}
 			if needAgent {
 				s.wg.Add(1)
@@ -871,11 +896,11 @@ func (s *Supervisor) settle() {
 		return
 	}
 	if stopped {
-		s.setPhase("sleeping", "Stopped")
+		s.sleepPhase("asked", "Stopped")
 		return
 	}
 	if s.deferred.Load() { // started asleep and not yet woken: no model is loaded
-		s.setPhase("sleeping", "Model not loaded")
+		s.sleepPhase("start", "Model not loaded")
 		return
 	}
 	s.setPhase("starting", "Starting")
@@ -954,7 +979,7 @@ func (s *Supervisor) StopBy(byLocal bool) error {
 	local := s.Status().Mode == "local"
 	_, installed := s.resolveInstall()
 	if local && installed { // said before the stop: no request is proxied to a server being stopped
-		s.setPhase("sleeping", "Stopped")
+		s.sleepPhase("asked", "Stopped")
 	}
 	s.keepContexts("a stop", false)
 	s.stopServerLocked()
@@ -978,6 +1003,18 @@ func (s *Supervisor) Sleep() error { return s.SleepBy(true) }
 // SleepBy is Sleep asked by a caller of this machine (local) or not: one a remote caller asked
 // never refills a restart budget.
 func (s *Supervisor) SleepBy(byLocal bool) error {
+	return s.sleepFor(byLocal, "asked", "Model unloaded")
+}
+
+// IdleMessage is the phase message of an idle sleep.
+const IdleMessage = "Model unloaded: idle, the card is free"
+
+// SleepIdle is the idle rule's sleep (docs/ENGINE.md "Idle sleep"): a sleep like any other (the
+// slots are saved, the model server's process group is stopped, the budgets are whole again),
+// said with sleep_reason idle.
+func (s *Supervisor) SleepIdle() error { return s.sleepFor(true, "idle", IdleMessage) }
+
+func (s *Supervisor) sleepFor(byLocal bool, reason, msg string) error {
 	s.mu.Lock()
 	lc := s.loadCancel
 	local := s.st.Mode == "local"
@@ -991,7 +1028,7 @@ func (s *Supervisor) SleepBy(byLocal bool) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	// said before the stop: a request that arrives during it is held, and wakes the model again
-	s.setPhase("sleeping", "Model unloaded")
+	s.sleepPhase(reason, msg)
 	s.keepContexts("a sleep", false)
 	s.stopServerLocked()
 	if byLocal {
@@ -1040,7 +1077,9 @@ func (s *Supervisor) Settings() Settings {
 	if keepContext == "" {
 		keepContext = "on"
 	}
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext}
+	on, quiet := s.st.IdleSleep, s.st.IdleSleepS
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, IdleSleep: &on, IdleSleepS: &quiet,
+		KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext}
 }
 
 // LingerS is the stored linger setting.
@@ -1075,6 +1114,9 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 	if in.LingerS < 0 {
 		return fmt.Errorf("linger_s must not be negative")
 	}
+	if in.IdleSleepS != nil && (*in.IdleSleepS < 0 || *in.IdleSleepS > settings.IdleSleepMax) {
+		return fmt.Errorf("idle_sleep_s must be 0 to %d seconds", settings.IdleSleepMax)
+	}
 	if in.Streamer != "" && in.Streamer != "on" && in.Streamer != "off" {
 		return fmt.Errorf("streamer must be on or off")
 	}
@@ -1100,6 +1142,12 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.st.External.APIKey = ""
 	}
 	s.st.LingerS = in.LingerS
+	if in.IdleSleep != nil {
+		s.st.IdleSleep = *in.IdleSleep
+	}
+	if in.IdleSleepS != nil {
+		s.st.IdleSleepS = *in.IdleSleepS
+	}
 	if in.SamplerPolicy != "" && in.SamplerPolicy != s.st.SamplerPolicy {
 		s.logf("sampler policy %s -> %s", s.st.SamplerPolicy, in.SamplerPolicy)
 		s.st.SamplerPolicy = in.SamplerPolicy
@@ -1108,6 +1156,7 @@ func (s *Supervisor) setSettings(in Settings, persist bool) error {
 		s.st.KVType = in.KVType
 	}
 	kvChanged := s.st.KVType != oldKV
+	s.sayIdleLocked() // the idle rule's moment is armed again with the new settings
 	s.mu.Unlock()
 	if persist {
 		s.saveSettings()

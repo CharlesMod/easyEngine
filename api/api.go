@@ -430,6 +430,8 @@ type settingsPatch struct {
 	} `json:"external"`
 	ClearAPIKey   *bool   `json:"clear_api_key"`
 	LingerS       *int    `json:"linger_s"`
+	IdleSleep     *bool   `json:"idle_sleep"`
+	IdleSleepS    *int    `json:"idle_sleep_s"`
 	KVType        *string `json:"kv_type"`
 	SamplerPolicy *string `json:"sampler_policy"`
 	Streamer      *string `json:"streamer"`
@@ -457,6 +459,13 @@ func (p settingsPatch) apply(cur run.Settings) run.Settings {
 	if p.LingerS != nil {
 		cur.LingerS = *p.LingerS
 	}
+	if p.IdleSleep != nil {
+		cur.IdleSleep = p.IdleSleep
+	}
+	if p.IdleSleepS != nil {
+		cur.IdleSleepS = p.IdleSleepS
+	}
+
 	if p.KVType != nil {
 		cur.KVType = *p.KVType
 	}

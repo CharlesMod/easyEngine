@@ -39,13 +39,18 @@ type Options struct {
 	Host        string // default 127.0.0.1
 	// Open is serve --open: a non-loopback Host with no token. Without it a non-loopback
 	// listener requires the bearer token in <data dir>/tokens.json.
-	Open        bool
-	Port        int // default 47480
-	Linger      time.Duration
-	LingerSet   bool // Linger given on the command line; else the saved setting applies
-	Version     string
-	DetachStdio bool // serve mode: stdio goes to logs/engine-stdio.log (capped), never to the inherited pipes
-	Configure   func(*run.Config)
+	Open      bool
+	Port      int // default 47480
+	Linger    time.Duration
+	LingerSet bool // Linger given on the command line; else the saved setting applies
+	// IdleSleep (with IdleSleepSet) is --idle-sleep: the idle rule's quiet for this run, over
+	// the setting idle_sleep_s; NoIdleSleep is --no-idle-sleep (docs/ENGINE.md "Idle sleep").
+	IdleSleep    time.Duration
+	IdleSleepSet bool
+	NoIdleSleep  bool
+	Version      string
+	DetachStdio  bool // serve mode: stdio goes to logs/engine-stdio.log (capped), never to the inherited pipes
+	Configure    func(*run.Config)
 	// Yield, when set, makes the engine yield the card to other programs (serve --yield-to-games);
 	// the profile's yield_except ids are added to it.
 	Yield *run.YieldConfig
@@ -388,7 +393,10 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		})
 	}
 	attach := w.Add
-	present := func() {} // serve: a client's attach changes nothing of the engine's life
+	// serve: a client's attach changes nothing of the engine's life, and wakes a model the idle
+	// rule (or a sleep asked) put to sleep, as the app's attach does
+	present := func() { wakeForClient(sup) }
+
 	if o.Resident {
 		// a client that attached (by pid or a held connection) is the connection the app waits for
 		present = func() {
@@ -473,13 +481,26 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 			attached <- struct{}{}
 			wakeForClient(sup) // and load the model for them, as an attach does
 		}
-		go residentLoop(wctx, w, sup, attached, func() time.Duration {
-			if o.LingerSet {
-				return o.Linger
-			}
-			return time.Duration(sup.LingerS()) * time.Second
-		}, ctl.refresh)
+	}
+	// The idle rule, in both modes. The app's clients are its attached parents (the command
+	// line's too: the app does not end with them) and the clients' attachments; serve's clients
+	// are the attachments alone (an attach by pid is one), its --parent-pid parents keep the
+	// engine's process, not its model. --linger is serve's engine life, the app's model linger.
+	rule := func() idleRule {
+		on, quiet, linger := sup.IdleSettings()
+		if o.Resident && o.LingerSet {
+			linger = o.Linger
+		}
+		if o.IdleSleepSet {
+			quiet = o.IdleSleep
+		}
+		return idleRule{on: on && !o.NoIdleSleep, quiet: quiet, linger: linger}
+	}
+	if o.Resident {
+		go idleLoop(wctx, w, sup, attached, func() int { return len(w.PIDs()) + sup.Attached() }, rule, ctl.refresh)
 	} else {
+		go idleLoop(wctx, nil, sup, nil, sup.Attached, rule, ctl.refresh)
+
 		go func() {
 			defer close(gone)
 			for {

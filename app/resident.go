@@ -26,87 +26,135 @@ func up(phase string) bool {
 	return false
 }
 
-// residentLoop is the app's idea of "the clients are gone" (docs/EVENTS.md section 8). The
-// clients are the attached parents (by pid, their exit is the word) and the requests at the door
-// (a remote client that never attached a pid: the door's count of requests in flight and held).
-// Once a client has come since the model last went to sleep, and then no parent is attached and
-// the door is empty while a model is up, the keeper's linger (a named moment) is armed; a request
-// or an attach cancels it, and it is armed again when the door is empty again. When it comes
-// with still nobody there, the model is put to sleep; the engine stays.
+// idleRule is the idle rule's settings as the loop reads them each time it looks.
+type idleRule struct {
+	on     bool          // idle_sleep (and no --no-idle-sleep)
+	quiet  time.Duration // idle_sleep_s: the quiet for callers that only send requests
+	linger time.Duration // linger_s: the quiet after the last attachment left
+}
+
+// idleLoop is the idle rule, the same in the app and in serve (docs/ENGINE.md "Idle sleep",
+// docs/EVENTS.md section 8). The model sleeps when no attachment stands (clients: the app's
+// attached parents and the clients' attachments, held or by pid; serve's --parent-pid parents
+// are not clients, they keep the engine's process, not its model), no request is in flight or
+// held, a model is up, and the quiet has lasted its delay. The delay is a named moment armed
+// when the quiet begins and cancelled by any request begun or any attach: linger_s when the
+// quiet began with the last attachment leaving (no request begun since), else idle_sleep_s. A
+// change of the settings arms the same moment again for the new delay, counted from the start
+// of the quiet. When it comes with still nobody there, the model is put to sleep (SleepIdle);
+// the engine stays.
 //
-// It waits on words only: an attach, a parent's end (the Watcher), the hub's request, door and
-// phase facts, the moment, ctx.
-func residentLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, attached <-chan struct{},
-	linger func() time.Duration, after func()) {
+// It waits on words only: an attach, a parent's end (the Watcher, nil in serve), the hub's
+// request, door, phase, attachment and idle facts, the moment, ctx.
+func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, attached <-chan struct{},
+	clients func() int, rule func() idleRule, after func()) {
 	hub := sup.Hub()
-	wk, err := hub.Wake("request", "door", "phase", "attachment")
+	wk, err := hub.Wake("request", "door", "phase", "attachment", "idle")
 	if err != nil {
 		return
 	}
 	defer wk.Close()
 	// parents says when every attached parent has gone; again starts its next watch after an attach.
 	parents, again := make(chan struct{}, 1), make(chan struct{}, 1)
-	go func() {
-		for {
-			if !w.Run(ctx) {
-				return
+	if w != nil {
+		go func() {
+			for {
+				if !w.Run(ctx) {
+					return
+				}
+				poke(parents)
+				select {
+				case <-again:
+				case <-ctx.Done():
+					return
+				}
 			}
-			poke(parents)
-			select {
-			case <-again:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+		}()
+	}
 	var (
-		connected bool          // a client came since the model last went to sleep
-		fired     chan struct{} // the linger's moment, while armed
-		cancel    func() bool
-		armedAt   uint64 // the door's count of requests begun when the linger was armed: one begun since cancels it
+		fired      chan struct{} // the moment, while armed
+		cancel     func() bool
+		armedAt    uint64 // the door's count of requests begun when armed: one begun since cancels it
+		armedWhy   string
+		armedFor   time.Duration
+		quietAt    time.Time // when the quiet began (the moment counts from here)
+		lastBegun  = sup.Begun()
+		hadClients bool // an attachment stood when last looked
+		leftAttach bool // the last attachment left and no request has begun since
 	)
 	disarm := func() {
 		if cancel != nil {
 			cancel()
 		}
 		cancel, fired = nil, nil
+		sup.SetIdleMoment(false, "", 0)
 	}
-	defer disarm()
+	arm := func(why string, delay, left time.Duration) {
+		f := make(chan struct{})
+		fired, armedAt, armedWhy, armedFor = f, sup.Begun(), why, delay
+		sup.SetIdleMoment(true, why, delay)             // written before the moment can come
+		cancel = host.Moment(left, func() { close(f) }) // named moment: the idle rule's quiet
+	}
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
 	for {
-		door := sup.InFlight() + sup.Held()
-		pids := len(w.PIDs()) + sup.Attached() // attached parents and the clients' attachments (held or by pid)
-		if door > 0 || pids > 0 {
-			connected = true
+		if b := sup.Begun(); b != lastBegun {
+			lastBegun, leftAttach = b, false
+			if fired != nil {
+				disarm() // a request came: the quiet starts again at the door's next empty
+			}
 		}
-		if fired != nil && sup.Begun() != armedAt {
-			disarm() // a request came during the linger: it runs again from the door's next empty
-		}
-		idle := connected && pids == 0 && door == 0 && up(sup.Phase())
+		n := clients()
 		switch {
-		case idle && fired == nil:
-			f := make(chan struct{})
-			fired, armedAt = f, sup.Begun()
-			cancel = host.Moment(linger(), func() { close(f) }) // named moment: the keeper's linger
-		case !idle && fired != nil:
-			disarm()
+		case n > 0:
+			hadClients = true
+		case hadClients:
+			hadClients, leftAttach = false, true
+		}
+		r := rule()
+		idle := r.on && n == 0 && sup.InFlight()+sup.Held() == 0 && up(sup.Phase())
+		why, delay := "idle_sleep", r.quiet
+		if leftAttach {
+			why, delay = "linger", r.linger
+		}
+		switch {
+		case !idle:
+			if fired != nil {
+				disarm()
+			}
+		case fired == nil:
+			quietAt = time.Now()
+			arm(why, delay, delay)
+		case why != armedWhy || delay != armedFor:
+			// a setting changed while armed: the same moment, armed again for what is left
+			cancel()
+			left := delay - time.Since(quietAt)
+			if left < 0 {
+				left = 0
+			}
+			arm(why, delay, left)
 		}
 		select {
 		case <-attached:
-			connected = true
 			poke(again)
-			disarm() // an attach cancels the linger
+			if fired != nil {
+				disarm() // an attach cancels the moment
+			}
 		case <-parents:
 		case <-wk.C():
 		case <-fired:
 			fired, cancel = nil, nil
-			if sup.Begun() != armedAt || len(w.PIDs())+sup.Attached() > 0 || sup.InFlight()+sup.Held() > 0 {
+			sup.SetIdleMoment(false, "", 0)
+			if sup.Begun() != armedAt || clients() > 0 || sup.InFlight()+sup.Held() > 0 {
 				continue // somebody came: looked at again at the top
 			}
 			if up(sup.Phase()) {
-				sup.Sleep()
+				sup.SleepIdle()
 				after()
 			}
-			connected = false
 		case <-ctx.Done():
 			return
 		}

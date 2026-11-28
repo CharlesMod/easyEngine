@@ -29,7 +29,10 @@ type State struct {
 	Mode     string   `json:"-"` // local | external
 	External External `json:"-"`
 	LingerS  int      `json:"-"`
-	KVType   string   `json:"-"`
+	// IdleSleep and IdleSleepS are the idle rule's settings (settings.File).
+	IdleSleep  bool   `json:"-"`
+	IdleSleepS int    `json:"-"`
+	KVType     string `json:"-"`
 	// SamplerPolicy is enforce (default) | fill | off (docs/SAMPLERS.md).
 	SamplerPolicy string `json:"-"`
 	Model         string `json:"model"`
@@ -96,6 +99,7 @@ func loadAll(dir string) (st State, file settings.File, note string, serr *setti
 // applyFile sets the settings fields from the file.
 func (s *State) applyFile(f settings.File) {
 	s.Mode, s.LingerS, s.KVType, s.SamplerPolicy = f.Mode, f.LingerS, f.KVType, f.SamplerPolicy
+	s.IdleSleep, s.IdleSleepS = f.IdleSleep, f.IdleSleepS
 	s.External = External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey}
 }
 
@@ -189,7 +193,8 @@ func (s *Supervisor) fileLocked() settings.File {
 	e := s.st.External
 	return settings.File{
 		Mode: s.st.Mode, External: settings.External{BaseURL: e.BaseURL, Model: e.Model, APIKey: e.APIKey},
-		LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
+		LingerS: s.st.LingerS, IdleSleep: s.st.IdleSleep, IdleSleepS: s.st.IdleSleepS,
+		KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy,
 		Streamer: s.sf.streamer, KeepContext: s.sf.keepContext, Name: s.sf.name, Discovery: s.sf.discovery,
 		Listen: s.sf.listen, Yield: s.sf.yield,
 	}.Normalize()
@@ -297,12 +302,14 @@ func (s *Supervisor) ReloadSettings() {
 	cur := s.fileLocked()
 	s.mu.Unlock()
 	same := f.Mode == cur.Mode && f.External == cur.External && f.LingerS == cur.LingerS &&
+		f.IdleSleep == cur.IdleSleep && f.IdleSleepS == cur.IdleSleepS &&
 		f.KVType == cur.KVType && f.SamplerPolicy == cur.SamplerPolicy
 	if !same {
 		s.logf("settings.json changed: applying it")
 		s.setSettings(Settings{
 			Mode: f.Mode, External: External{BaseURL: f.External.BaseURL, Model: f.External.Model, APIKey: f.External.APIKey},
-			ClearAPIKey: f.External.APIKey == "", LingerS: f.LingerS, KVType: f.KVType, SamplerPolicy: f.SamplerPolicy,
+			ClearAPIKey: f.External.APIKey == "", LingerS: f.LingerS, IdleSleep: &f.IdleSleep, IdleSleepS: &f.IdleSleepS,
+			KVType: f.KVType, SamplerPolicy: f.SamplerPolicy,
 		}, false)
 	}
 	s.mu.Lock()

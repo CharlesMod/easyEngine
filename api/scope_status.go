@@ -36,6 +36,9 @@ type PairedStatus struct {
 	ModelParams       int64           `json:"model_params"`
 	ModelSizeClass    string          `json:"model_size_class"`
 	Held              int             `json:"held"`
+	// SleepReason is why no model is loaded while sleeping (idle | asked | start): a client
+	// may tell a model it can wake from one a person stopped.
+	SleepReason string `json:"sleep_reason"`
 }
 
 // StatusKept lists the run.Status JSON names a paired token sees; StatusRemoved the ones it does
@@ -43,24 +46,25 @@ type PairedStatus struct {
 var (
 	StatusKept = []string{"version", "api", "mode", "phase", "message", "progress", "model", "backend",
 		"shape", "tok_s", "model_tier", "model_stage", "kv_type", "restarts", "model_fallback",
-		"model_note", "sampler", "model_name", "model_codename", "model_codename_full", "model_selected", "model_params", "model_size_class", "held"}
+		"model_note", "sampler", "model_name", "model_codename", "model_codename_full", "model_selected", "model_params", "model_size_class", "held", "sleep_reason"}
 	StatusRemoved = []string{
-		"port",       // the control API's own port
-		"server_url", // the local model server's URL and port
-		"agent",      // the agent's pid and detail
-		"parents",    // watched parent pids
-		"errors",     // error texts can name paths and user names
-		"external",   // the owner's external endpoint
-		"linger_s",   // owner setting
-		"upgrade",    // carries error text
-		"contexts",   // saved slots, with other clients' ids
-		"custom",     // the owner's own file path
-		"previous",   // the previous model's file
-		"gpu",        // adapter ids and names
-		"device",     // llama-server device pin: env and args
-		"recovery",   // last error text
-		"yield",      // names the program the card yielded to
-		"build",      // the llama.cpp build and its move: the move's error text can name paths
+		"port",                       // the control API's own port
+		"server_url",                 // the local model server's URL and port
+		"agent",                      // the agent's pid and detail
+		"parents",                    // watched parent pids
+		"errors",                     // error texts can name paths and user names
+		"external",                   // the owner's external endpoint
+		"linger_s",                   // owner setting
+		"idle_sleep", "idle_sleep_s", // owner settings: the idle rule
+		"upgrade",  // carries error text
+		"contexts", // saved slots, with other clients' ids
+		"custom",   // the owner's own file path
+		"previous", // the previous model's file
+		"gpu",      // adapter ids and names
+		"device",   // llama-server device pin: env and args
+		"recovery", // last error text
+		"yield",    // names the program the card yielded to
+		"build",    // the llama.cpp build and its move: the move's error text can name paths
 		// other clients: their names, ids, pids and wants (a paired client learns of its own
 		// attachment from the attach answer and its held stream)
 		"attachments",
@@ -81,7 +85,7 @@ func PairedStatusOf(st run.Status) PairedStatus {
 		ModelTier: st.ModelTier, ModelStage: st.ModelStage, KVType: st.KVType, Restarts: st.Restarts,
 		ModelFallback: st.ModelFallback, ModelNote: st.ModelNote, Sampler: st.Sampler,
 		ModelName: st.ModelName, ModelCodename: st.ModelCodename, ModelCodenameFull: st.ModelCodenameFull, ModelSelected: st.ModelSelected, ModelParams: st.ModelParams, ModelSizeClass: st.ModelSizeClass,
-		Held: st.Held,
+		Held: st.Held, SleepReason: st.SleepReason,
 	}
 }
 

@@ -852,6 +852,36 @@ own clients (`status`, `stop`, `gpu`, `install`, a second `serve`) read the toke
 find the listen host in the lock. In external mode the engine's token is never sent on to the
 external endpoint.
 
+**Scope of a paired token.** The master token, the loopback listener, the setup page and an open
+listener may call everything. A token that pairing issued (§7f) is a client on another machine,
+such as a game mod: it may use the model and read how the engine is doing, and nothing else. The
+gate (`api/scope.go`, one check, one place) holds an allow list; whatever it does not name is
+refused with 403 `{"error":"...","code":"not_allowed"}`:
+
+- `/engine/v1`: `GET hello`; the keyless pairing paths (`POST pair`, `GET pair/{id}`,
+  `DELETE pair/{id}`); `GET status`, in the reduced view below; `POST attach`;
+  `DELETE attach/{id}`.
+- The proxy, on the cleaned path (`//v1/chat/completions`, a trailing slash and encoded forms
+  are judged as what they spell; a path with a `.` or `..` segment is refused): `POST`
+  `/v1/chat/completions`, `/chat/completions`, `/v1/completions`, `/completions`, `/completion`,
+  `/tokenize`, `/detokenize`, `/apply-template`; `GET` `/v1/models`, `/models`, `/health`,
+  `/v1/health`. Not `/slots`, `/props`, `/metrics`, `/lora*`, embeddings, rerank or infill; the
+  list can grow when a client needs one.
+- Refused to it: shutdown, settings, install, remove, model choice, `host`, start, stop, sleep,
+  wake, logs, the facts, events and book streams (they carry pids, paths and other clients), the
+  pairing list and answer, the chat window, and every other proxied path.
+
+**The reduced status.** For a paired token `GET status` has the same JSON names and shapes with
+fields removed (`api.PairedStatus`, copied field by field, so a field added to the full status
+stays hidden until it is classified; a test fails until it is). Kept: `version`, `api`, `mode`,
+`phase`, `message` (blank in the `error` and `yielded` phases), `progress`, `model`, `backend`,
+`shape`, `tok_s`, `model_tier`, `model_stage`, `kv_type`, `restarts`, `model_fallback`,
+`model_note`, `sampler`, `model_name`, `model_params`, `model_size_class`, `held`. Removed:
+`port`, `server_url`, `agent`, `parents`, `errors`, `external`, `linger_s`, `upgrade`,
+`contexts`, `custom`, `previous`, `gpu`, `device`, `recovery`, `yield` (paths, pids, the local
+model server's address, error texts, other clients, host program detail). Everything else needs
+the master token or the engine's own machine.
+
 `serve --open` makes a non-loopback listener with **no** token, and logs one warning line:
 `easy-engine: WARNING: listening on <host>:<port> with no token (--open); ...`. It makes no
 token file.
@@ -1280,6 +1310,8 @@ token.
 - Error bodies on these paths are fixed text: no file system or OS error reaches the network.
 - It cannot answer a request: answering needs a loopback listener or the master token; a paired
   client's token is refused (403), and so is anything without a token from the network (401).
+- A paired token is scoped: it may use the model and read the reduced status, nothing more
+  ("Scope of a paired token", §7).
 - The six-digit code is a comparison code, not a secret: the client and the engine both show
   it so the person can tell the right request from another; nothing accepts it as proof, and the
   only path that takes a code (`pairing/answer`) is closed to the network.

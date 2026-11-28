@@ -152,6 +152,22 @@ type Settings struct {
 	KeepContext string `json:"keep_context,omitempty"`
 	// Vision loads the served model's vision projector (run/vision.go); nil keeps the stored value.
 	Vision *bool `json:"vision,omitempty"`
+	// VisionForced is read-only (GET): serve --vision holds vision on for this run, so the stored
+	// Vision cannot turn it off. Absent when not forced.
+	VisionForced bool `json:"vision_forced,omitempty"`
+}
+
+// VisionForcedMsg is the words of the refusal to turn vision off while serve --vision holds it on.
+const VisionForcedMsg = "vision is on for this run by serve --vision; the setting cannot turn it off until the engine runs without it"
+
+// CheckVisionOff refuses (409 vision_forced) a request to turn vision off while serve --vision
+// holds it on, whatever the stored setting is: a PUT that says "vision": false must not look as if
+// it worked. nil asks nothing about vision. Nothing is changed.
+func (s *Supervisor) CheckVisionOff(v *bool) *ClientError {
+	if v != nil && !*v && s.cfg.Vision {
+		return cerr(409, "vision_forced", "%s", VisionForcedMsg)
+	}
+	return nil
 }
 
 // Route tells the proxy where a request goes.
@@ -1028,7 +1044,7 @@ func (s *Supervisor) Settings() Settings {
 		keepContext = "on"
 	}
 	vision := s.vis.setting
-	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext, Vision: &vision}
+	return Settings{Mode: s.st.Mode, External: e, LingerS: s.st.LingerS, KVType: s.st.KVType, SamplerPolicy: s.st.SamplerPolicy, Streamer: streamer, KeepContext: keepContext, Vision: &vision, VisionForced: s.cfg.Vision}
 }
 
 // LingerS is the stored linger setting.
@@ -1044,6 +1060,16 @@ func (s *Supervisor) SetSettings(in Settings) error { return s.setSettings(in, t
 // setSettings is SetSettings; persist says whether settings.json is written (not when the
 // settings came from the file itself, which is then left exactly as the keeper wrote it).
 func (s *Supervisor) setSettings(in Settings, persist bool) error {
+	if persist { // the file's own edit (persist false) is kept as written; see ReloadSettings
+		s.mu.Lock()
+		turnsOff := s.vis.setting
+		s.mu.Unlock()
+		if turnsOff { // a change true -> false; an unchanged false is not a request
+			if ce := s.CheckVisionOff(in.Vision); ce != nil {
+				return ce
+			}
+		}
+	}
 	if in.Mode == "" {
 		in.Mode = s.Settings().Mode
 	}

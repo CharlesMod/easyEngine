@@ -272,6 +272,7 @@ type projSite struct {
 	hits chan struct{}
 	n    atomic.Int32
 	bad  atomic.Bool
+	gone atomic.Bool // a request was cancelled by its client while the body was held
 }
 
 func newProjSite(t *testing.T, body []byte, gated bool) *projSite {
@@ -292,6 +293,7 @@ func newProjSite(t *testing.T, body []byte, gated bool) *projSite {
 			select {
 			case <-ps.gate:
 			case <-r.Context().Done():
+				ps.gone.Store(true)
 				return
 			}
 		}
@@ -582,4 +584,110 @@ func ptrOf(p *int) any {
 		return nil
 	}
 	return *p
+}
+
+// Task 3a. No room on the disk: the projector's download does not start, the note says so without
+// a path, text keeps serving; a later want checks again and downloads once there is room.
+func TestVisionNoRoomForTheProjector(t *testing.T) {
+	v := newVis(t, 800)
+	ps := newProjSite(t, v.proj, false)
+	v.p.URL = ps.srv.URL + "/proj.gguf"
+	var free atomic.Int64
+	free.Store(1 << 20)
+	s := v.start(t, func(c *run.Config) {
+		c.DiskFree = func(string) (int, error) { return int(free.Load()), nil }
+	})
+	free.Store(1) // 1 MiB: short of the headroom alone
+	visSet(t, s, true)
+	st := waitStatus(t, s, "the no-room note", func(st run.Status) bool { return strings.Contains(st.VisionNote, "no room on disk") })
+	if st.Phase != "ready" || st.Vision || st.VisionProgress != nil {
+		t.Fatalf("phase %s vision %v progress %v", st.Phase, st.Vision, st.VisionProgress)
+	}
+	if !strings.HasPrefix(st.VisionNote, "no room on disk for the vision projector (needs ") || !strings.HasSuffix(st.VisionNote, " MiB more)") ||
+		strings.Contains(st.VisionNote, v.e.Data) || strings.Contains(st.VisionNote, "/") {
+		t.Fatalf("note %q", st.VisionNote)
+	}
+	if ps.n.Load() != 0 {
+		t.Fatalf("the download was asked for with no room: %d requests", ps.n.Load())
+	}
+	// a later want asks again: with room it downloads
+	free.Store(1 << 20)
+	visSet(t, s, false)
+	visReady(t, s, false)
+	visSet(t, s, true)
+	st = visReady(t, s, true)
+	if ps.n.Load() != 1 || st.VisionNote != "" {
+		t.Fatalf("requests %d note %q", ps.n.Load(), st.VisionNote)
+	}
+	if got, err := os.ReadFile(v.file); err != nil || string(got) != string(v.proj) {
+		t.Fatalf("projector file: %v", err)
+	}
+}
+
+// Task 3b. Remove downloads lets a projector download in flight go: the request is cancelled,
+// the .part is gone, and it is not recorded as a failure.
+func TestVisionRemoveDownloadsCancelsTheProjector(t *testing.T) {
+	v := newVis(t, 800)
+	ps := newProjSite(t, v.proj, true)
+	v.p.URL = ps.srv.URL + "/proj.gguf"
+	s := v.start(t, nil)
+	visSet(t, s, true)
+	waitStatus(t, s, "the download", func(st run.Status) bool { return st.VisionProgress != nil })
+	if _, err := os.Stat(v.file + ".part"); err != nil {
+		t.Fatalf("no .part while downloading: %v", err)
+	}
+	if err := s.RemoveDownloads(); err != nil {
+		t.Fatal(err)
+	}
+	st := waitStatus(t, s, "removed", func(st run.Status) bool {
+		return st.Phase == "not_installed" && strings.HasPrefix(st.Message, "Removed")
+	})
+	if _, err := os.Stat(v.file + ".part"); err == nil {
+		t.Error("the .part is still there")
+	}
+	testkit.WaitFor(t, 20*time.Second, "the projector request to be cancelled", ps.gone.Load)
+	if st.VisionProgress != nil || strings.Contains(st.VisionNote, "could not be downloaded") {
+		t.Errorf("progress %v note %q", st.VisionProgress, st.VisionNote)
+	}
+	for _, e := range st.Errors {
+		if strings.Contains(e, "vision projector") {
+			t.Errorf("recorded as failed: %q", e)
+		}
+	}
+	if ents, _ := os.ReadDir(filepath.Join(v.e.Data, "models")); len(ents) != 0 {
+		t.Errorf("models left: %v", ents)
+	}
+}
+
+// Task 4. serve --vision holds vision on: turning it off through PUT is refused (409 vision_forced)
+// with nothing changed; turning it on is accepted; GET says it is forced.
+func TestVisionForcedRefusesOff(t *testing.T) {
+	v := newVis(t, 800)
+	v.put(t)
+	s := v.start(t, func(c *run.Config) { c.Vision = true })
+	if got := s.Settings(); !got.VisionForced || got.Vision == nil || *got.Vision {
+		t.Fatalf("settings %+v", got)
+	}
+	off, on := false, true
+	ce := s.CheckVisionOff(&off)
+	if ce == nil || ce.Status != 409 || ce.Code != "vision_forced" || ce.Msg != run.VisionForcedMsg {
+		t.Fatalf("check: %+v", ce)
+	}
+	if s.CheckVisionOff(&on) != nil || s.CheckVisionOff(nil) != nil {
+		t.Fatal("on or absent refused")
+	}
+	if err := s.SetSettings(run.Settings{Vision: &on}); err != nil {
+		t.Fatal(err)
+	}
+	err := s.SetSettings(run.Settings{Vision: &off})
+	var got *run.ClientError
+	if !errors.As(err, &got) || got.Code != "vision_forced" {
+		t.Fatalf("set off: %v", err)
+	}
+	if st := s.Settings(); st.Vision == nil || !*st.Vision {
+		t.Fatalf("stored vision moved: %+v", st.Vision)
+	}
+	if st := s.Status(); !st.Vision {
+		t.Fatal("vision went off")
+	}
 }

@@ -326,9 +326,19 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			a.settingsMu.Lock()
-			err := a.S.SetSettings(patch.apply(a.S.Settings()))
+			var err error
+			if ce := a.S.CheckVisionOff(patch.Vision); ce != nil { // before anything changes
+				err = ce
+			} else {
+				err = a.S.SetSettings(patch.apply(a.S.Settings()))
+			}
 			a.settingsMu.Unlock()
 			if err != nil {
+				var ce *run.ClientError
+				if errors.As(err, &ce) {
+					clientFail(w, ce)
+					return
+				}
 				fail(w, 400, err.Error())
 				return
 			}

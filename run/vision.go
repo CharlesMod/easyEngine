@@ -10,6 +10,7 @@ import (
 	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/core/fit"
 	"github.com/CharlesMod/easyEngine/fetch"
+	"github.com/CharlesMod/easyEngine/plan"
 )
 
 // Vision (docs/ENGINE.md, "Vision"): the served model's projector (catalog.Projector) is loaded
@@ -31,12 +32,14 @@ type visionState struct {
 	note    string // why vision is wanted and not loaded; "" otherwise
 	dl      *visionDL
 	failed  map[string]string // projector sha256 -> why its download failed; asked again on a new want
+	roomErr string            // the last "no room" detail put in status errors (said once per kind)
 }
 
 type visionDL struct {
 	file     string
 	progress *Progress
 	cancel   context.CancelFunc
+	done     chan struct{} // closed when the download goroutine has stopped writing and said so in vis
 }
 
 // VisionInfo is the hub fact "vision".
@@ -317,8 +320,30 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 	if s.vis.dl != nil {
 		return "the vision projector is downloading"
 	}
+	s.mu.Unlock()
+	short, err := s.projectorRoom(p)
+	s.mu.Lock()
+	if err != nil {
+		// the detail (sizes, no path) is in status errors; the note is plain
+		detail := err.Error()
+		say := s.vis.roomErr != detail
+		s.vis.roomErr = detail
+		if say {
+			s.mu.Unlock()
+			s.addError("vision projector %s: %v", p.File, err)
+			s.mu.Lock()
+		}
+		return fmt.Sprintf("no room on disk for the vision projector (needs %d MiB more)", short)
+	}
+	s.vis.roomErr = ""
+	if s.vis.dl != nil { // another want started it while the disk was read
+		return "the vision projector is downloading"
+	}
+	if _, ok := s.vis.failed[p.SHA256]; ok {
+		return projectorFailedNote
+	}
 	ctx, cancel := context.WithCancel(s.root)
-	dl := &visionDL{file: p.File, cancel: cancel}
+	dl := &visionDL{file: p.File, cancel: cancel, done: make(chan struct{})}
 	s.vis.dl = dl
 	path := s.projectorPath(p)
 	s.wg.Add(1)
@@ -344,6 +369,7 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 		}
 		s.refreshLocked()
 		s.mu.Unlock()
+		close(dl.done) // after the state is written: RemoveDownloads waits on it before it sweeps the .part
 		if letGo {
 			return
 		}
@@ -355,6 +381,25 @@ func (s *Supervisor) fetchProjector(m catalog.Model) string {
 		s.visionWantChanged("the vision projector is ready", true)
 	}()
 	return "the vision projector is downloading"
+}
+
+// projectorRoom checks the free disk for the projector's download as a model download does
+// (checkNeed: the file less the .part already there, logs, the host's files, headroom). It returns
+// the MiB short and the error (wrapping ErrNoSpace) when there is no room. Caller does not hold s.mu.
+func (s *Supervisor) projectorRoom(p *catalog.Projector) (shortMiB int, err error) {
+	var part int64
+	if st, e := os.Stat(s.projectorPath(p) + ".part"); e == nil {
+		part = st.Size()
+	}
+	need := plan.NeedOf([]plan.DiskStep{plan.ModelStep("vision projector", p.Size, part)}, s.logRoom(), s.hostFiles())
+	err = s.checkNeed(need, "the vision projector")
+	if !errors.Is(err, ErrNoSpace) {
+		return 0, nil
+	}
+	if free, e := s.cfg.DiskFree(s.dir); e == nil {
+		shortMiB = int((need.Total - int64(free)<<20 + (1 << 20) - 1) >> 20)
+	}
+	return max(shortMiB, 1), err
 }
 
 // projectorFailedNote is the note of a projector download that failed: the error itself (which

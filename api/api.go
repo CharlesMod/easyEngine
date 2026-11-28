@@ -331,6 +331,10 @@ func (a *API) engine(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
+			if msg := patch.idleForced(a.S); msg != "" {
+				fail(w, 409, msg) // the flag wins for this run: a change would not take effect
+				return
+			}
 			a.settingsMu.Lock()
 			err := a.S.SetSettings(patch.apply(a.S.Settings()))
 			a.settingsMu.Unlock()
@@ -436,6 +440,20 @@ type settingsPatch struct {
 	SamplerPolicy *string `json:"sampler_policy"`
 	Streamer      *string `json:"streamer"`
 	KeepContext   *string `json:"keep_context"`
+}
+
+// idleForced is the refusal for a patch that would change an idle setting a flag forces for this
+// run (--no-idle-sleep, --idle-sleep): "" when none. Sending the value that acts is no change.
+func (p settingsPatch) idleForced(s *run.Supervisor) string {
+	f := s.IdleForced()
+	on, quiet, _ := s.IdleSettings()
+	if p.IdleSleep != nil && f.Off && *p.IdleSleep != on {
+		return "idle_sleep is forced off by --no-idle-sleep for this run; restart without it to change it"
+	}
+	if p.IdleSleepS != nil && f.QuietSet && *p.IdleSleepS != int(quiet/time.Second) {
+		return "idle_sleep_s is set by --idle-sleep for this run; restart without it to change it"
+	}
+	return ""
 }
 
 // apply lays the named fields over the current settings (whose api key is blank: SetSettings

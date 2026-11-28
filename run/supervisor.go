@@ -83,6 +83,9 @@ type Status struct {
 	// IdleSleep and IdleSleepS are the idle rule's settings (docs/ENGINE.md "Idle sleep").
 	IdleSleep  bool `json:"idle_sleep"`
 	IdleSleepS int  `json:"idle_sleep_s"`
+	// IdleSleepForced says a flag (--no-idle-sleep, --idle-sleep) forces the two above for this
+	// run; they are then the effective values, not the file's.
+	IdleSleepForced bool `json:"idle_sleep_forced"`
 	// SleepReason says why no model is loaded while the phase is sleeping: idle (the idle rule),
 	// asked (POST sleep, or a person's stop), start (the app started asleep); "" otherwise.
 	SleepReason string `json:"sleep_reason"`
@@ -234,7 +237,8 @@ type Supervisor struct {
 	userStopped bool
 	sleepReason string // status sleep_reason: why the phase is sleeping ("" when it is not)
 	idleMoment  idleMoment
-	idleSeen    idleSeen // the door's arrivals and the attachments' leaves, local or not (idle.go)
+	idleSeen    idleSeen  // the door's arrivals and the attachments' leaves, local or not (idle.go)
+	idleForce   IdleForce // the command line's --no-idle-sleep / --idle-sleep (idle.go)
 
 	jobRunning bool
 	jobCancel  context.CancelFunc
@@ -458,9 +462,13 @@ func (s *Supervisor) Status() Status {
 		Version: s.cfg.Version, API: APIVersion, Port: s.port, Mode: s.st.Mode, Phase: s.phase, Message: s.message,
 		Model: s.st.Model, Backend: s.st.Backend, Errors: append(append([]string{}, s.errs...), s.sf.notes()...),
 		LingerS: s.st.LingerS, KVType: s.st.KVType, Restarts: s.restarts,
-		IdleSleep: s.st.IdleSleep, IdleSleepS: s.st.IdleSleepS, SleepReason: s.sleepReason,
-		External: ExternalInfo{BaseURL: s.st.External.BaseURL, Model: s.st.External.Model, APIKeySet: s.st.External.APIKey != ""},
-		Parents:  []Parent{},
+		SleepReason: s.sleepReason,
+		External:    ExternalInfo{BaseURL: s.st.External.BaseURL, Model: s.st.External.Model, APIKeySet: s.st.External.APIKey != ""},
+		Parents:     []Parent{},
+	}
+	{
+		on, quiet, forced := s.idleEffectiveLocked()
+		st.IdleSleep, st.IdleSleepS, st.IdleSleepForced = on, int(quiet/time.Second), forced
 	}
 	if s.progress != nil {
 		p := *s.progress
@@ -1011,11 +1019,6 @@ func (s *Supervisor) SleepBy(byLocal bool) error {
 // IdleMessage is the phase message of an idle sleep.
 const IdleMessage = "Model unloaded: idle, the card is free"
 
-// SleepIdle is the idle rule's sleep (docs/ENGINE.md "Idle sleep"): a sleep like any other (the
-// slots are saved, the model server's process group is stopped, the budgets are whole again),
-// said with sleep_reason idle.
-func (s *Supervisor) SleepIdle() error { return s.sleepFor(true, "idle", IdleMessage) }
-
 func (s *Supervisor) sleepFor(byLocal bool, reason, msg string) error {
 	s.mu.Lock()
 	lc := s.loadCancel
@@ -1041,6 +1044,7 @@ func (s *Supervisor) sleepFor(byLocal bool, reason, msg string) error {
 
 // Wake loads the model after Sleep.
 func (s *Supervisor) Wake() error {
+	s.idleSeen.wakes.Add(1) // the idle rule's word: a wake (idle.go)
 	defer func() { s.mu.Lock(); s.waking = false; s.mu.Unlock() }()
 	return s.Start()
 }

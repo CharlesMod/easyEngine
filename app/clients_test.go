@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A held attachment is a client of the app: its attach wakes the model, and while it holds the
 // model is not put to sleep; when its connection ends, the linger runs and the model sleeps.
 func TestResidentHeldAttachmentIsAClient(t *testing.T) {
-	r := startFakeModel(t, 0, nil) // linger 0: the model sleeps as soon as nobody is there
+	// linger 0, and the floor after a wake (the attach woke the model) made short
+	r := startFakeModelWith(t, 0, nil, nil, shortFloor(200*time.Millisecond))
 	waitPhase(t, r, "sleeping")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -369,6 +369,9 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 		return Result{}, err
 	}
 	sup.SetPort(port)
+	// the idle flags are the effective settings for this run: status and the idle fact say so
+	sup.SetIdleForce(run.IdleForce{Off: o.NoIdleSleep, Quiet: o.IdleSleep, QuietSet: o.IdleSleepSet})
+
 	// The keeper's file is followed as it changes (an event, not a poll); the watch is made
 	// before the engine answers anyone, so no edit slips between.
 	ch, stopWatch, werr := osevents.Changes(settings.Path(dir))
@@ -487,14 +490,11 @@ func Serve(ctx context.Context, o Options) (Result, error) {
 	// are the attachments alone (an attach by pid is one), its --parent-pid parents keep the
 	// engine's process, not its model. --linger is serve's engine life, the app's model linger.
 	rule := func() idleRule {
-		on, quiet, linger := sup.IdleSettings()
+		on, quiet, linger := sup.IdleSettings() // the flags over the file (SetIdleForce)
 		if o.Resident && o.LingerSet {
 			linger = o.Linger
 		}
-		if o.IdleSleepSet {
-			quiet = o.IdleSleep
-		}
-		return idleRule{on: on && !o.NoIdleSleep, quiet: quiet, linger: linger}
+		return idleRule{on: on, quiet: quiet, linger: linger}
 	}
 	if o.Resident {
 		go idleLoop(wctx, w, sup, attached, func() int { return len(w.PIDs()) + sup.Attached() }, rule, ctl.refresh)

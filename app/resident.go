@@ -12,82 +12,96 @@ import (
 // wakeForClient loads the model for a client that has just attached, when it was put to sleep
 // (not when a person stopped it: that stays stopped). A request at the proxy wakes it too.
 func wakeForClient(sup *run.Supervisor) {
-	if st := sup.Status(); st.Phase == "sleeping" && st.Message != "Stopped" {
+	if sup.Phase() == "sleeping" && !sup.StoppedByPerson() { // by the stop itself, never its words
 		go sup.Wake()
 	}
 }
 
-// up is a phase in which a model is loaded or on its way up: the linger may put it to sleep.
-func up(phase string) bool {
-	switch phase {
-	case "ready", "resizing", "starting", "loading":
-		return true
-	}
-	return false
-}
-
-// loaded is a phase in which a model is loaded: the idle rule's quiet counts from here (a load
-// in progress is not quiet yet; once it is ready, the quiet begins).
-func loaded(phase string) bool { return phase == "ready" || phase == "resizing" }
-
-// traffic is what the idle rule compares between looks: the requests begun (Begun) and the
-// requests that came to the door, held or not, answered or refused, and the attachments that
-// left, each with how many were remote (run.Supervisor.IdleSeen).
+// traffic is what the idle rule compares between looks: the requests begun (Begun) and what
+// the supervisor counts (run.IdleTraffic: arrivals at the door, held or not, answered or
+// refused; attachments' leaves; each with how many were remote; wakes; the last traffic's time).
 type traffic struct {
-	begun, arrivals, remoteArrivals, leaves, remoteLeaves uint64
+	begun uint64
+	run.IdleTraffic
 }
 
 func trafficOf(sup *run.Supervisor) traffic {
-	var t traffic
-	t.begun = sup.Begun()
-	t.arrivals, t.remoteArrivals, t.leaves, t.remoteLeaves = sup.IdleSeen()
-	return t
+	return traffic{begun: sup.Begun(), IdleTraffic: sup.IdleSeen()}
 }
 
-// requests is one number that moves with any request at the door.
-func (t traffic) requests() uint64 { return t.begun + t.arrivals }
+// moved says any request or leave since o.
+func (t traffic) moved(o traffic) bool {
+	return t.begun != o.begun || t.Arrivals != o.Arrivals || t.Leaves != o.Leaves
+}
 
-// idleDelay is the moment's delay for what the quiet follows, and its why (the delay's name and
-// the cause: linger/local_leave, idle_sleep/remote_leave, ...). A local leave takes linger_s; a
-// remote leave or remote requests take idle_sleep_s but never less than run.RemoteIdleFloor (no
-// remote identity can load and unload the model faster: docs/ENGINE.md section 6c); local
-// requests and the engine's own load take idle_sleep_s exactly.
-func idleDelay(cause string, r idleRule) (string, time.Duration) {
-	switch cause {
-	case "local_leave":
-		return "linger/" + cause, r.linger
-	case "remote_leave", "remote_requests":
-		if r.quiet < run.RemoteIdleFloor {
-			return "remote_floor/" + cause, run.RemoteIdleFloor
-		}
+// stretch is what the busy stretch before a quiet held: kind is the last thing seen (load:
+// nothing since the model was loaded; requests; leave: the last attachment left; wake: a wake
+// somebody asked for), remote is sticky (any remote request or leave in the stretch, whatever
+// came after it), woke is sticky (a wake was asked in the stretch).
+type stretch struct {
+	kind         string
+	remote, woke bool
+}
+
+// idleDelay is the moment's delay for the stretch the quiet follows, and its why
+// (<delay>/<cause>). Remote traffic anywhere in the stretch: idle_sleep_s, never less than the
+// floor (run.RemoteIdleFloor): no remote identity loads and unloads the model faster (docs/
+// ENGINE.md section 6c). A wake asked for (POST wake, an attach that woke the model) and then
+// nothing but a local leave or nothing at all: the delay, never less than the floor. Else the
+// exact settings: linger_s after a local leave, idle_sleep_s after local requests or a load.
+func idleDelay(st stretch, r idleRule, floor time.Duration) (string, time.Duration) {
+	base, name := r.quiet, "idle_sleep"
+	if st.kind == "leave" {
+		base, name = r.linger, "linger"
 	}
-	return "idle_sleep/" + cause, r.quiet
+	floored := func(cause string) (string, time.Duration) {
+		if base < floor {
+			return "floor/" + cause, floor
+		}
+		return name + "/" + cause, base
+	}
+	switch {
+	case st.remote && st.kind == "leave":
+		base, name = r.quiet, "idle_sleep" // a remote leave never takes the linger
+		return floored("remote_leave")
+	case st.remote:
+		return floored("remote_requests")
+	case st.woke && st.kind != "requests":
+		return floored("wake")
+	case st.kind == "leave":
+		return name + "/local_leave", base
+	case st.kind == "requests":
+		return name + "/local_requests", base
+	}
+	return name + "/load", base
 }
 
 // idleRule is the idle rule's settings as the loop reads them each time it looks.
 type idleRule struct {
-	on     bool          // idle_sleep (and no --no-idle-sleep)
-	quiet  time.Duration // idle_sleep_s: the quiet for callers that only send requests
-	linger time.Duration // linger_s: the quiet after the last attachment left
+	on     bool          // idle_sleep, under --no-idle-sleep
+	quiet  time.Duration // idle_sleep_s (or --idle-sleep): the quiet after requests or a load
+	linger time.Duration // linger_s: the quiet after the last local attachment left
 }
 
-// idleLoop is the idle rule, the same in the app and in serve (docs/ENGINE.md "Idle sleep",
+// idleLoop is the idle rule, the same in the app and in serve (docs/ENGINE.md section 6c,
 // docs/EVENTS.md section 8). The model sleeps when no attachment stands (clients: the app's
 // attached parents and the clients' attachments, held or by pid; serve's --parent-pid parents
 // are not clients, they keep the engine's process, not its model), no request is in flight or
-// held, a model is up, and the quiet has lasted its delay. The delay is a named moment armed
-// when the quiet begins and cancelled by any request begun or any attach: linger_s when the
-// quiet began with the last attachment leaving (no request begun since), else idle_sleep_s. A
-// change of the settings arms the same moment again for the new delay, counted from the start
-// of the quiet. When it comes with still nobody there, the model is put to sleep (SleepIdle);
-// the engine stays.
+// held, the engine is at rest with a model loaded (run.Supervisor.IdleSleepable: phase ready,
+// no swap, job, reshape, drain or yield), and the quiet has lasted its delay (idleDelay). The
+// delay is a named moment armed when the quiet begins; anything that ends the rest (a request,
+// an attach, a phase away from ready) disarms it, and the next quiet begins anew. A request the
+// loop never saw in flight is found when the moment comes: the quiet then counts from that
+// request's time. A change of the settings arms the same moment again for what is left of the
+// new delay. The sleep itself is SleepIdle, one decision with the door; a request that wins the
+// race makes it decline, and the quiet starts again.
 //
 // It waits on words only: an attach, a parent's end (the Watcher, nil in serve), the hub's
-// request, door, phase, attachment and idle facts, the moment, ctx.
+// request, door, phase, attachment, idle, job, upgrade, yield and nudge words, the moment, ctx.
 func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, attached <-chan struct{},
 	clients func() int, rule func() idleRule, after func()) {
 	hub := sup.Hub()
-	wk, err := hub.Wake("request", "door", "phase", "attachment", "idle")
+	wk, err := hub.Wake("request", "door", "phase", "attachment", "idle", "job", "upgrade", "yield", "nudge")
 	if err != nil {
 		return
 	}
@@ -112,29 +126,30 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 	var (
 		fired      chan struct{} // the moment, while armed
 		cancel     func() bool
-		armedAt    traffic // the door's traffic when armed: any since cancels it
+		armedAt    traffic // the traffic when armed: any request or leave since is found at the fire
 		armedWhy   string
 		armedFor   time.Duration
+		armedSt    stretch   // the stretch the armed quiet follows
 		quietAt    time.Time // when the quiet began (the moment counts from here)
+		requietAt  time.Time // set at a fire that found traffic: the next quiet counts from it
 		seen       = trafficOf(sup)
 		hadClients bool // an attachment stood when last looked
-		// cause is what the quiet follows: load (nothing since the model was loaded, or only the
-		// engine's own), local_requests | remote_requests (the last requests at the door; remote
-		// when any of them came from another machine), local_leave | remote_leave (the last
-		// attachment left and no request came since; remote when a remote attachment left)
-		cause = "load"
+		st         = stretch{kind: "load"}
 	)
 	disarm := func() {
 		if cancel != nil {
 			cancel()
 		}
 		cancel, fired = nil, nil
-		sup.SetIdleMoment(false, "", 0)
+		sup.SetIdleMoment(false, "", 0, 0)
 	}
 	arm := func(why string, delay, left time.Duration) {
+		if left < 0 {
+			left = 0
+		}
 		f := make(chan struct{})
 		fired, armedAt, armedWhy, armedFor = f, trafficOf(sup), why, delay
-		sup.SetIdleMoment(true, why, delay)             // written before the moment can come
+		sup.SetIdleMoment(true, why, delay, left)       // written before the moment can come
 		cancel = host.Moment(left, func() { close(f) }) // named moment: the idle rule's quiet
 	}
 	defer func() {
@@ -144,48 +159,48 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 	}()
 	for {
 		now := trafficOf(sup)
-		// the cause is read from the arrivals alone: a request arrives (EnterAs) before it begins,
-		// and a look between the two must not take its begin for another, local, request
-		if now.arrivals != seen.arrivals {
-			cause = "local_requests"
-			if now.remoteArrivals != seen.remoteArrivals {
-				cause = "remote_requests"
+		if now.RemoteArrivals != seen.RemoteArrivals || now.RemoteLeaves != seen.RemoteLeaves {
+			st.remote = true // whatever the loop saw or missed in between
+		}
+		if now.Wakes != seen.Wakes {
+			st.woke = true
+			if now.Arrivals == seen.Arrivals {
+				st.kind = "wake"
 			}
+		}
+		if now.Arrivals != seen.Arrivals {
+			st.kind = "requests"
 		}
 		n := clients()
 		switch {
 		case n > 0:
 			hadClients = true
-		case hadClients:
-			hadClients, cause = false, "local_leave" // a parent's exit, a local attachment's leave
-			if now.remoteLeaves != seen.remoteLeaves {
-				cause = "remote_leave"
-			}
+		case hadClients || now.Leaves != seen.Leaves:
+			hadClients, st.kind = false, "leave" // the last attachment left (seen or not)
 		}
 		seen = now
 		r := rule()
-		idle := r.on && n == 0 && sup.InFlight()+sup.Held() == 0 && loaded(sup.Phase())
-		why, delay := idleDelay(cause, r)
+		idle := r.on && n == 0 && sup.InFlight()+sup.Held() == 0 && sup.IdleSleepable()
 		switch {
 		case !idle:
 			if fired != nil {
 				disarm()
 			}
 		case fired == nil:
+			// a new quiet: the stretch it follows is what came since the last one began
+			armedSt, st.remote, st.woke = st, false, false
+			why, delay := idleDelay(armedSt, r, sup.IdleFloor())
 			quietAt = time.Now()
-			arm(why, delay, delay)
-		case why != armedWhy || delay != armedFor:
-			// a setting changed while armed: the same moment, armed again for what is left (from
-			// now when a request the loop did not see in flight came since it was armed)
-			cancel()
-			if trafficOf(sup).requests() != armedAt.requests() {
-				quietAt = time.Now()
+			if !requietAt.IsZero() {
+				quietAt, requietAt = requietAt, time.Time{}
 			}
-			left := delay - time.Since(quietAt)
-			if left < 0 {
-				left = 0
+			arm(why, delay, delay-time.Since(quietAt))
+		case !trafficOf(sup).moved(armedAt): // traffic since it was armed is the fire's to find
+			if why, delay := idleDelay(stretch{kind: armedSt.kind, remote: armedSt.remote || st.remote, woke: armedSt.woke || st.woke}, r, sup.IdleFloor()); why != armedWhy || delay != armedFor {
+				// a setting changed while armed: the same moment, armed again for what is left
+				cancel()
+				arm(why, delay, delay-time.Since(quietAt))
 			}
-			arm(why, delay, left)
 		}
 		select {
 		case <-attached:
@@ -197,17 +212,24 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 		case <-wk.C():
 		case <-fired:
 			fired, cancel = nil, nil
-			sup.SetIdleMoment(false, "", 0)
-			if trafficOf(sup).requests() != armedAt.requests() || clients() > 0 || sup.InFlight()+sup.Held() > 0 {
-				// somebody came since it was armed (a request the loop never saw in flight, or
-				// one it did): the quiet starts again from here, looked at again at the top
+			sup.SetIdleMoment(false, "", 0, 0)
+			if t := trafficOf(sup); t.moved(armedAt) {
+				// traffic the loop never saw in flight came while armed: the next quiet counts
+				// from its time, looked at again at the top
+				requietAt = t.Last
+				if requietAt.IsZero() || requietAt.After(time.Now()) {
+					requietAt = time.Now()
+				}
 				continue
 			}
-			if up(sup.Phase()) {
-				sup.SleepIdle()
-				cause = "load" // what wakes it next says its own cause
+			if clients() > 0 || sup.InFlight()+sup.Held() > 0 {
+				continue
+			}
+			if sup.SleepIdle() == nil {
+				st = stretch{kind: "load"} // what wakes it next says its own stretch
 				after()
 			}
+			// a request won the race with the decision: the quiet starts again at the top
 		case <-ctx.Done():
 			return
 		}

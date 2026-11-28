@@ -176,6 +176,9 @@ type Config struct {
 	AgentStable time.Duration // default 60s: a run this long counts as stable (a quick failure is shorter)
 	CmdTimeout  time.Duration // default 5 min for uv commands
 	SwapDrain   time.Duration // default 2 min: named moment, longest wait for requests in flight before a model swap
+	// IdleFloor is the idle rule's floor after remote traffic or an asked-for wake (0:
+	// RemoteIdleFloor, 60 s); tests shorten it.
+	IdleFloor time.Duration
 	// Crash recovery (run/recover.go).
 	CrashQuick  time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
 	CrashSteps  int           // default 2: quick crashes in a row at one shape before one step down

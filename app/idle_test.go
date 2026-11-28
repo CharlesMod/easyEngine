@@ -71,8 +71,27 @@ func startEngine(t *testing.T, resident bool, parents []int, tweak func(*app.Opt
 	return r, e
 }
 
+// shortFloor makes the idle rule's floor (after remote traffic or an asked-for wake) d.
+func shortFloor(d time.Duration) func(*app.Options) {
+	return func(o *app.Options) {
+		prev := o.Configure
+		o.Configure = func(c *run.Config) {
+			prev(c)
+			c.IdleFloor = d
+		}
+	}
+}
+
 // put sends PUT settings (loopback: no token) and wants 200.
 func (r *residentRun) put(t *testing.T, body string) {
+	t.Helper()
+	if code := r.putCode(t, body); code != 200 {
+		t.Fatalf("PUT settings %s: %d", body, code)
+	}
+}
+
+// putCode sends PUT settings and answers the code.
+func (r *residentRun) putCode(t *testing.T, body string) int {
 	t.Helper()
 	req, _ := http.NewRequest("PUT", "http://127.0.0.1:"+strconv.Itoa(r.port)+"/engine/v1/settings", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
@@ -82,9 +101,7 @@ func (r *residentRun) put(t *testing.T, body string) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("PUT settings %s: %d", body, resp.StatusCode)
-	}
+	return resp.StatusCode
 }
 
 // postControl sends POST /engine/v1/<what> and answers the code.
@@ -101,11 +118,13 @@ func (r *residentRun) postControl(t *testing.T, what string) int {
 }
 
 type idleFact struct {
-	Armed      bool   `json:"armed"`
-	Why        string `json:"why"`
-	DelayMS    int64  `json:"delay_ms"`
-	IdleSleep  bool   `json:"idle_sleep"`
-	IdleSleepS int    `json:"idle_sleep_s"`
+	Armed           bool   `json:"armed"`
+	Why             string `json:"why"`
+	DelayMS         int64  `json:"delay_ms"`
+	IdleSleep       bool   `json:"idle_sleep"`
+	IdleSleepS      int    `json:"idle_sleep_s"`
+	IdleSleepForced bool   `json:"idle_sleep_forced"`
+	LeftMS          int64  `json:"left_ms"`
 }
 
 // armed says e is the idle fact armed for why, after delay.
@@ -183,12 +202,13 @@ func fakeGone(t *testing.T, r *residentRun, e *testkit.Env) {
 }
 
 type idleStatus struct {
-	Phase       string `json:"phase"`
-	Message     string `json:"message"`
-	SleepReason string `json:"sleep_reason"`
-	IdleSleep   bool   `json:"idle_sleep"`
-	IdleSleepS  int    `json:"idle_sleep_s"`
-	Parents     []struct {
+	Phase           string `json:"phase"`
+	Message         string `json:"message"`
+	SleepReason     string `json:"sleep_reason"`
+	IdleSleepForced bool   `json:"idle_sleep_forced"`
+	IdleSleep       bool   `json:"idle_sleep"`
+	IdleSleepS      int    `json:"idle_sleep_s"`
+	Parents         []struct {
 		Pid   int  `json:"pid"`
 		Alive bool `json:"alive"`
 	} `json:"parents"`
@@ -215,7 +235,8 @@ func TestServeParentKeepsTheEngineNotTheModel(t *testing.T) {
 	fakeGone(t, r, e)
 	var st idleStatus
 	r.get(t, "/engine/v1/status", &st)
-	if st.Phase != "sleeping" || st.SleepReason != "idle" || st.Message != run.IdleMessage || !st.IdleSleep || st.IdleSleepS != settings.DefaultIdleSleepS {
+	// --idle-sleep 300ms forces the quiet: status says the effective value (0 s) and that it is forced
+	if st.Phase != "sleeping" || st.SleepReason != "idle" || st.Message != run.IdleMessage || !st.IdleSleep || st.IdleSleepS != 0 || !st.IdleSleepForced {
 		t.Fatalf("status %+v", st)
 	}
 	if len(st.Parents) != 1 || st.Parents[0].Pid != par.pid || !st.Parents[0].Alive {
@@ -245,10 +266,12 @@ func TestServeParentKeepsTheEngineNotTheModel(t *testing.T) {
 
 // serve: a settings change while the moment is armed arms it again (idle_sleep_s 600 -> 0 sleeps
 // at once); an attachment by pid wakes the model and keeps it loaded however long it is silent
-// (idle_sleep_s 0); when it leaves, linger_s (0) applies, not idle_sleep_s (an hour by then).
+// (idle_sleep_s 0); when it leaves, the wake it asked for keeps the model the floor (linger_s 0
+// is less), not idle_sleep_s (an hour by then).
 func TestServeAttachmentKeepsTheModelThenLingerAfterItLeaves(t *testing.T) {
 	par := newSleeper(t) // keeps the engine (an attach by pid is a parent of serve's life too)
-	r, _ := startEngine(t, false, []int{par.pid}, nil)
+	const floor = 150 * time.Millisecond
+	r, _ := startEngine(t, false, []int{par.pid}, shortFloor(floor))
 	s := r.follow(t)
 	r.awaitArmed(t, "idle_sleep/load", settings.DefaultIdleSleepS*time.Second)
 	r.put(t, `{"idle_sleep_s": 0}`)
@@ -276,8 +299,8 @@ func TestServeAttachmentKeepsTheModelThenLingerAfterItLeaves(t *testing.T) {
 	if i := indexOf(evs, from, anyArmed); i < left {
 		t.Fatalf("the idle moment was armed (event %d) while the attachment stood", i)
 	}
-	if indexOf(evs, left, armed("linger/local_leave", 0)) < 0 {
-		t.Fatal("the moment after the attachment left was not the linger")
+	if indexOf(evs, left, armed("floor/wake", floor)) < 0 {
+		t.Fatal("the moment after the attachment that woke the model left was not the floor")
 	}
 }
 
@@ -319,7 +342,19 @@ func TestNoIdleSleepFlag(t *testing.T) {
 	})
 	s := r.follow(t)
 	s.until(t, "ready", func(evs []event.Event) bool { return indexOf(evs, 0, isReady) >= 0 || r.status(t).Phase == "ready" })
-	r.put(t, `{"idle_sleep": true, "idle_sleep_s": 0}`)
+	// a change the flags override is refused, not taken as if it worked
+	if code := r.putCode(t, `{"idle_sleep": true, "idle_sleep_s": 0}`); code != 409 {
+		t.Fatalf("PUT idle_sleep under --no-idle-sleep: %d", code)
+	}
+	var st idleStatus
+	r.get(t, "/engine/v1/status", &st)
+	if st.IdleSleep || !st.IdleSleepForced {
+		t.Fatalf("status %+v", st)
+	}
+	if f := r.idleNow(t); f.IdleSleep || !f.IdleSleepForced {
+		t.Fatalf("idle fact %+v", f)
+	}
+	r.put(t, `{"idle_sleep": false, "linger_s": 0}`) // the value that acts: no change, accepted
 	if code := r.post(t); code != 200 {
 		t.Fatalf("request: %d", code)
 	}
@@ -520,10 +555,10 @@ func TestRemoteFloorWhenIdleSleepIsZero(t *testing.T) {
 	if code := r.postFrom(t, fwd); code != 200 {
 		t.Fatalf("remote request: %d", code)
 	}
-	r.awaitArmed(t, "remote_floor/remote_requests", run.RemoteIdleFloor)
+	r.awaitArmed(t, "floor/remote_requests", run.RemoteIdleFloor)
 	leave := r.holdFrom(t, s, fwd)
 	leave()
-	r.awaitArmed(t, "remote_floor/remote_leave", run.RemoteIdleFloor)
+	r.awaitArmed(t, "floor/remote_leave", run.RemoteIdleFloor)
 	if i := indexOf(s.events(), indexOf(s.events(), from, isReady), isSleeping); i >= 0 {
 		t.Fatalf("the model slept (event %d) before the floor", i)
 	}

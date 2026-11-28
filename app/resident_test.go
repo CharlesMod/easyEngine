@@ -362,7 +362,7 @@ func waitPhase(t *testing.T, r *residentRun, phase string) {
 
 func TestLastParentGoneThenLingerPutsTheModelToSleepNotTheEngine(t *testing.T) {
 	par := newSleeper(t)
-	r := startFakeModel(t, 200*time.Millisecond, []int{par.pid})
+	r := startFakeModelWith(t, 200*time.Millisecond, []int{par.pid}, nil, shortFloor(200*time.Millisecond))
 	waitPhase(t, r, "ready")
 	par.kill()
 	waitPhase(t, r, "sleeping")

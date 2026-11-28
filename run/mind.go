@@ -137,6 +137,7 @@ func (s *Supervisor) end(id string, re *RequestEnd) {
 		s.tokS = re.TokS
 		s.mu.Unlock()
 	}
+	s.idleSeen.touch() // the idle rule counts its quiet from the last end (idle.go)
 	d.mu.Lock()
 	d.inflight--
 	n := d.inflight

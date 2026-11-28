@@ -410,7 +410,14 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 		s.dropStarter(starterID, target.ID)
 		s.recordPrevious(starterID, target.ID)
 		s.finishSwap(upDone, "")    // last: the done fact means the starter is let go too
-		s.sleepPhase("", "Stopped") // a sleep keeps its reason; else it is a stop
+		if stopped { // a person's stop: it stays a stop
+			s.sleepPhase("asked", "Stopped")
+		} else { // a sleep keeps its reason and its words (an idle sleep is still one)
+			s.mu.Lock()
+			msg := s.message
+			s.mu.Unlock()
+			s.sleepPhase("", msg)
+		}
 		return
 
 	}

@@ -55,7 +55,7 @@ var (
 		"errors",                     // error texts can name paths and user names
 		"external",                   // the owner's external endpoint
 		"linger_s",                   // owner setting
-		"idle_sleep", "idle_sleep_s", // owner settings: the idle rule
+		"idle_sleep", "idle_sleep_s", "idle_sleep_forced", // owner settings: the idle rule
 		"upgrade",  // carries error text
 		"contexts", // saved slots, with other clients' ids
 		"custom",   // the owner's own file path

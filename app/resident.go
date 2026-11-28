@@ -37,10 +37,11 @@ func (t traffic) moved(o traffic) bool {
 // stretch is what the busy stretch before a quiet held: kind is the last thing seen (load:
 // nothing since the model was loaded; requests; leave: the last attachment left; wake: a wake
 // somebody asked for), remote is sticky (any remote request or leave in the stretch, whatever
-// came after it), woke is sticky (a wake was asked in the stretch).
+// came after it: remote_requests or remote_leave, whichever remote act was seen last), woke is
+// sticky (a wake was asked in the stretch).
 type stretch struct {
-	kind         string
-	remote, woke bool
+	kind, remote string
+	woke         bool
 }
 
 // idleDelay is the moment's delay for the stretch the quiet follows, and its why
@@ -61,11 +62,9 @@ func idleDelay(st stretch, r idleRule, floor time.Duration) (string, time.Durati
 		return name + "/" + cause, base
 	}
 	switch {
-	case st.remote && st.kind == "leave":
-		base, name = r.quiet, "idle_sleep" // a remote leave never takes the linger
-		return floored("remote_leave")
-	case st.remote:
-		return floored("remote_requests")
+	case st.remote != "":
+		base, name = r.quiet, "idle_sleep" // remote traffic never takes the linger
+		return floored(st.remote)
 	case st.woke && st.kind != "requests":
 		return floored("wake")
 	case st.kind == "leave":
@@ -130,6 +129,7 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 		armedWhy   string
 		armedFor   time.Duration
 		armedSt    stretch   // the stretch the armed quiet follows
+		armedRest  uint64    // the phase's changes when the quiet began (run.RestSeq)
 		quietAt    time.Time // when the quiet began (the moment counts from here)
 		requietAt  time.Time // set at a fire that found traffic: the next quiet counts from it
 		seen       = trafficOf(sup)
@@ -159,8 +159,12 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 	}()
 	for {
 		now := trafficOf(sup)
-		if now.RemoteArrivals != seen.RemoteArrivals || now.RemoteLeaves != seen.RemoteLeaves {
-			st.remote = true // whatever the loop saw or missed in between
+		// remote traffic is sticky for the stretch, whatever the loop saw or missed in between
+		if now.RemoteArrivals != seen.RemoteArrivals {
+			st.remote = "remote_requests"
+		}
+		if now.RemoteLeaves != seen.RemoteLeaves {
+			st.remote = "remote_leave"
 		}
 		if now.Wakes != seen.Wakes {
 			st.woke = true
@@ -188,7 +192,8 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 			}
 		case fired == nil:
 			// a new quiet: the stretch it follows is what came since the last one began
-			armedSt, st.remote, st.woke = st, false, false
+			armedSt, st.remote, st.woke = st, "", false
+			armedRest = sup.RestSeq()
 			why, delay := idleDelay(armedSt, r, sup.IdleFloor())
 			quietAt = time.Now()
 			if !requietAt.IsZero() {
@@ -196,7 +201,7 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 			}
 			arm(why, delay, delay-time.Since(quietAt))
 		case !trafficOf(sup).moved(armedAt): // traffic since it was armed is the fire's to find
-			if why, delay := idleDelay(stretch{kind: armedSt.kind, remote: armedSt.remote || st.remote, woke: armedSt.woke || st.woke}, r, sup.IdleFloor()); why != armedWhy || delay != armedFor {
+			if why, delay := idleDelay(armedSt, r, sup.IdleFloor()); why != armedWhy || delay != armedFor {
 				// a setting changed while armed: the same moment, armed again for what is left
 				cancel()
 				arm(why, delay, delay-time.Since(quietAt))
@@ -225,7 +230,7 @@ func idleLoop(ctx context.Context, w *lifecycle.Watcher, sup *run.Supervisor, at
 			if clients() > 0 || sup.InFlight()+sup.Held() > 0 {
 				continue
 			}
-			if sup.SleepIdle() == nil {
+			if sup.SleepIdleSince(armedRest) == nil {
 				st = stretch{kind: "load"} // what wakes it next says its own stretch
 				after()
 			}

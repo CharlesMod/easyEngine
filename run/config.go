@@ -179,6 +179,9 @@ type Config struct {
 	// IdleFloor is the idle rule's floor after remote traffic or an asked-for wake (0:
 	// RemoteIdleFloor, 60 s); tests shorten it.
 	IdleFloor time.Duration
+	// IdleBeforeOp and IdleDecided are test seams: SleepIdle about to wait for the operation
+	// lock, and SleepIdle between its decision (phase sleeping said) and the model server's stop.
+	IdleBeforeOp, IdleDecided func()
 	// Crash recovery (run/recover.go).
 	CrashQuick  time.Duration // default 2 min: named moment; a run shorter than this that crashes is a quick crash, one longer clears the record
 	CrashSteps  int           // default 2: quick crashes in a row at one shape before one step down

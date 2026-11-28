@@ -409,8 +409,8 @@ func (s *Supervisor) swapTo(ctx context.Context, target catalog.Model) {
 	if stopped || s.Phase() == "sleeping" {
 		s.dropStarter(starterID, target.ID)
 		s.recordPrevious(starterID, target.ID)
-		s.finishSwap(upDone, "")    // last: the done fact means the starter is let go too
-		if stopped { // a person's stop: it stays a stop
+		s.finishSwap(upDone, "") // last: the done fact means the starter is let go too
+		if stopped {             // a person's stop: it stays a stop
 			s.sleepPhase("asked", "Stopped")
 		} else { // a sleep keeps its reason and its words (an idle sleep is still one)
 			s.mu.Lock()

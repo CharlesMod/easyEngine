@@ -23,13 +23,6 @@ const RemoteIdleFloor = 60 * time.Second
 // not at rest (not ready, a swap, a job, a reshape, a yield): nothing was changed.
 var ErrIdleBusy = errors.New("idle sleep: not idle at the decision")
 
-// Test seams (run/export_idle_test.go): SleepIdle about to wait for the operation lock, and
-// SleepIdle between its decision (phase sleeping said) and the stop of the model server.
-var (
-	idleBeforeOp atomic.Pointer[func()]
-	idleDecided  atomic.Pointer[func()]
-)
-
 // SleepIdle is the idle rule's sleep (docs/ENGINE.md "Idle sleep"). The decision is one step
 // with the door: under the operation lock and the supervisor's lock (the lock a request takes
 // to be routed and begun), it looks that nothing is in flight or held and the engine is at rest,
@@ -37,12 +30,26 @@ var (
 // one after it is held and wakes the model as at any sleeping engine (its Start waits for the
 // operation lock). So no request is forwarded to a server this is about to stop. The sleep is
 // then a sleep like any other: the slots saved, the process group stopped, budgets whole.
-func (s *Supervisor) SleepIdle() error {
-	hook(&idleBeforeOp)
+func (s *Supervisor) SleepIdle() error { return s.SleepIdleSince(s.RestSeq()) }
+
+// RestSeq counts the phase's changes: the idle rule takes it when its quiet begins and gives it
+// to SleepIdleSince, which declines when the phase has left ready (a swap, a reshape) since.
+func (s *Supervisor) RestSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.phaseSeq
+}
+
+// SleepIdleSince is SleepIdle for a quiet that began at rest seq: the phase must not have
+// changed since (coming back to ready begins a new quiet).
+func (s *Supervisor) SleepIdleSince(seq uint64) error {
+	if f := s.cfg.IdleBeforeOp; f != nil {
+		f()
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.mu.Lock()
-	if !s.idleSleepableLocked() || s.inflightNow() != 0 || s.door.held.Load() != 0 {
+	if s.phaseSeq != seq || !s.idleSleepableLocked() || s.inflightNow() != 0 || s.door.held.Load() != 0 {
 		s.mu.Unlock()
 		return ErrIdleBusy
 	}
@@ -50,7 +57,9 @@ func (s *Supervisor) SleepIdle() error {
 	s.setPhaseLocked("sleeping", IdleMessage)
 	s.mu.Unlock()
 	s.logf("phase sleeping: %s", IdleMessage)
-	hook(&idleDecided)
+	if f := s.cfg.IdleDecided; f != nil {
+		f()
+	}
 	s.keepContexts("a sleep", false)
 	s.stopServerLocked()
 	s.refillBudgets("the model was unloaded")

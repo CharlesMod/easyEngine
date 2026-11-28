@@ -220,7 +220,7 @@ type idleStatus struct {
 func TestServeParentKeepsTheEngineNotTheModel(t *testing.T) {
 	par := newSleeper(t)
 	const quiet = 300 * time.Millisecond
-	r, e := startEngine(t, false, []int{par.pid}, idleAfter(quiet))
+	r, e := startEngine(t, false, []int{par.pid}, func(o *app.Options) { idleAfter(quiet)(o); shortFloor(quiet)(o) }) // the wake below keeps the floor
 	s := r.follow(t)
 	evs := s.until(t, "the model ready, then asleep for being idle", func(evs []event.Event) bool {
 		return indexOf(evs, indexOf(evs, 0, isReady)+1, sleptFor("idle")) > 0
@@ -248,7 +248,8 @@ func TestServeParentKeepsTheEngineNotTheModel(t *testing.T) {
 		t.Fatalf("wake: %d", code)
 	}
 	s.until(t, "woken, then asleep again", func(evs []event.Event) bool {
-		return indexOf(evs, indexOf(evs, from, isReady)+1, sleptFor("idle")) > 0
+		rd := indexOf(evs, from, isReady)
+		return rd >= 0 && indexOf(evs, rd+1, sleptFor("idle")) > 0
 	})
 	select {
 	case <-r.res:
@@ -591,8 +592,16 @@ func TestUnseenRequestRestartsTheQuiet(t *testing.T) {
 	}
 	evs = s.until(t, "asleep", func(evs []event.Event) bool { return indexOf(evs, first, sleptFor("idle")) > 0 })
 	slept := indexOf(evs, first, sleptFor("idle"))
-	if again := indexOf(evs, first+1, armed("idle_sleep/local_requests", quiet)); again < 0 || again > slept {
+	again := indexOf(evs, first+1, armed("idle_sleep/local_requests", quiet))
+	if again < 0 || again > slept {
 		t.Fatalf("the moment was not armed again before the sleep (armed %d, slept %d)", again, slept)
+	}
+	// the new quiet counts from the request, not from the moment that found it: what is left
+	// when armed again is less than the whole delay
+	var f idleFact
+	body(evs[again], &f)
+	if f.LeftMS >= f.DelayMS {
+		t.Fatalf("armed again for %d ms of %d: counted from the fire, not from the request", f.LeftMS, f.DelayMS)
 	}
 	if d := evs[slept].At.Sub(sent); d < quiet {
 		t.Fatalf("slept %v after the last request, the quiet is %v", d, quiet)

@@ -239,6 +239,7 @@ type Supervisor struct {
 	idleMoment  idleMoment
 	idleSeen    idleSeen  // the door's arrivals and the attachments' leaves, local or not (idle.go)
 	idleForce   IdleForce // the command line's --no-idle-sleep / --idle-sleep (idle.go)
+	phaseSeq    uint64    // the phase's changes (RestSeq)
 
 	jobRunning bool
 	jobCancel  context.CancelFunc
@@ -378,6 +379,9 @@ func (s *Supervisor) addError(format string, a ...any) {
 }
 
 func (s *Supervisor) setPhaseLocked(phase, msg string) {
+	if phase != s.phase {
+		s.phaseSeq++ // the idle rule's rest: a quiet counts only while the phase stays (idle.go)
+	}
 	s.phase, s.message = phase, msg
 	if phase != "sleeping" {
 		s.sleepReason = ""

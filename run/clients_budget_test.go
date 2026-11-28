@@ -403,8 +403,8 @@ func TestChangeWhileLoadingIsNotLost(t *testing.T) {
 	}
 	testkit.WaitPhase(t, s, "sleeping", 15*time.Second)
 	go s.Wake()
-	testkit.WaitPhase(t, s, "loading", 15*time.Second) // its merge is taken; the server loads
-	clAttach(t, s, remoteReq("client-1", "x", 8)) // the change, while the start loads
+	testkit.WaitPhase(t, s, "loading", 15*time.Second)              // its merge is taken; the server loads
+	clAttach(t, s, remoteReq("client-1", "x", 8))                   // the change, while the start loads
 	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil { // the load goes on
 		t.Fatal(err)
 	}

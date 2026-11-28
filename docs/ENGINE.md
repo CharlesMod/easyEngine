@@ -1420,7 +1420,7 @@ from another machine.
    "agent": {"id": "my-agent", "wheel": "/abs/agent.whl", "args": ["run"]}}}
 ```
 
-The profile is the `--profile` file's shape (§8) plus `server` and `models`. A profile with no
+The profile is the `--profile` file's shape (§8) plus `server`, `models` and `catalog`. A profile with no
 `slots` states no wants (it counts for presence only, as `{pid}` alone does). 200 (with `hold`,
 the first NDJSON line):
 
@@ -1514,6 +1514,15 @@ the first NDJSON line):
 - **Agent.** One: the base profile's (as before), else the first attachment in order that brings
   one; it runs while that attachment stands. Remote clients bring none.
 - **Model.** The person's selection; `models` is advice in the answer, never a swap.
+- **Catalog overlay** (local callers and the `--profile` file only): `"catalog": {"models": [...]}`,
+  up to 16 entries of the catalog's own model shape (`id`, `name`, `file`, `url`, `sha256`,
+  `size`, and optionally `footprint`, `sampler`, ...). Each is checked by the catalog's rules (a
+  plain id and file name; an https URL, or a loopback http one, with its sha256 and size; or no URL
+  for an import-only entry). It adds models, never replaces one: an id already in the catalog is
+  400 `catalog_invalid` unless the entry is the very same (an overlay brought again adds nothing),
+  and so is a file name another model uses. Taken models stay for the engine's life (the selection
+  and installs stay the person's). A remote client's `catalog` is 400 `catalog_not_allowed`: it
+  would make this machine download what its person did not choose.
 - **Host.** The host pid is `POST host`'s, else the base profile's `host_pid`, else the first parent
   pid, else the first local attachment's `host_pid` or pid; other programs' card use is measured.
 

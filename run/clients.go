@@ -45,6 +45,49 @@ type ServerOpts struct {
 	Speculative json.RawMessage `json:"speculative,omitempty"`
 }
 
+// CatalogOverlay is the models a local client adds to the catalog (catalog.Catalog.WithModels).
+type CatalogOverlay struct {
+	Models []catalog.Model `json:"models"`
+}
+
+// overlay is the catalog with a profile's overlay added, or the refusal (400 catalog_invalid);
+// nil, nil when the profile brings none (or nothing new).
+func (s *Supervisor) overlay(p Profile) (*catalog.Catalog, *ClientError) {
+	if p.Catalog == nil || len(p.Catalog.Models) == 0 {
+		return nil, nil
+	}
+	cat, err := s.catalog()
+	if err != nil {
+		return nil, cerr(503, "catalog_unavailable", "the engine's catalog could not be read: %v", err)
+	}
+	next, err := cat.WithModels(p.Catalog.Models)
+	if err != nil {
+		return nil, cerr(400, "catalog_invalid", "%v", err)
+	}
+	return next, nil
+}
+
+// takeOverlay puts a profile's overlay in the engine's catalog (checked again against the
+// catalog that stands now: another attach may have added since). It stays for the engine's life.
+func (s *Supervisor) takeOverlay(p Profile) *ClientError {
+	if p.Catalog == nil || len(p.Catalog.Models) == 0 {
+		return nil
+	}
+	if _, ce := s.overlay(p); ce != nil {
+		return ce
+	}
+	s.mu.Lock()
+	next, err := s.cat.WithModels(p.Catalog.Models) // s.cat is set: overlay read it
+	if err == nil {
+		s.cat = next
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return cerr(400, "catalog_invalid", "%v", err)
+	}
+	return nil
+}
+
 // ModelPrefs is advice: the models a client can use and prefers. The selection stays the
 // person's; a client is told, never a model swapped under another.
 type ModelPrefs struct {
@@ -202,6 +245,9 @@ func (s *Supervisor) clientsInit() {
 	name := s.cfg.Profile.Game
 	if name == "" {
 		name = baseKey
+	}
+	if ce := s.takeOverlay(s.cfg.Profile); ce != nil {
+		s.logf("profile: the catalog overlay was not taken: %s", ce.Msg)
 	}
 	b := &attachment{id: baseID, name: name, identity: "engine", key: baseKey, local: true, base: true,
 		prof: s.cfg.Profile, wanting: true, notify: make(chan struct{}, 1)}
@@ -884,6 +930,9 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 		}
 		wanting = req.Profile.Slots > 0
 		prof.defaults()
+		if _, ce := s.overlay(prof); ce != nil {
+			return AttachView{}, nil, ce
+		}
 	}
 	key := req.Identity + "/" + name
 	oldWire := req.Profile == nil && !req.Hold
@@ -1045,6 +1094,10 @@ func (s *Supervisor) AttachClient(req AttachRequest) (AttachView, *AttachHold, *
 	}
 	if stopOld != nil {
 		stopOld()
+	}
+	if ce := s.takeOverlay(prof); ce != nil {
+		// another attach added a different model of the same id since the check: said, not taken
+		s.logf("clients: %s's catalog overlay was not taken: %s", name, ce.Msg)
 	}
 	v.Status, v.Resumed, v.Replaced = "attached", resumed, replaced
 	s.sayClients()

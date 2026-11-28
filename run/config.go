@@ -50,6 +50,9 @@ type Profile struct {
 	// model. Both are merged across clients; neither changes what another client was given.
 	Server *ServerOpts `json:"server,omitempty"`
 	Models *ModelPrefs `json:"models,omitempty"`
+	// Catalog is a local client's catalog overlay: models it adds to the engine's catalog (never
+	// replacing one), checked by the catalog's own rules, kept for the engine's life once taken.
+	Catalog *CatalogOverlay `json:"catalog,omitempty"`
 }
 
 // AgentSpec describes the agent the engine installs and runs.

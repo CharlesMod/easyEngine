@@ -157,8 +157,9 @@ the engine by a client, with its profile, keyed by (identity, name). The `--prof
   else the first attachment that brings one. The model stays the person's selection; a client's
   `models` is advice.
 - **Facts**: `attachment` (keyed), `wants` (with `unserved` and `vacant`), `client` gains
-  `attachments`, `request` and `context` gain the attachment and the client's slot number. The
-  catalog a profile may bring is a later step (after the catalog's build-rung schema).
+  `attachments`, `request` and `context` gain the attachment and the client's slot number. A
+  local profile may bring a catalog overlay: models added (never replacing one), checked by the
+  catalog's own rules, kept for the engine's life.
 
 ## 6. The prompt cache across a reshape
 

@@ -10,6 +10,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -288,17 +289,60 @@ func (c *Catalog) validate() error {
 		}
 	}
 	for _, m := range c.Models {
-		if err := checkName("model id", m.ID); err != nil {
-			return err
-		}
-		if err := checkName("model file", m.File); err != nil {
-			return err
-		}
-		if err := checkDownload("model", m.ID, m.URL, m.SHA256, m.Size); err != nil {
+		if err := checkModel(m); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func checkModel(m Model) error {
+	if err := checkName("model id", m.ID); err != nil {
+		return err
+	}
+	if err := checkName("model file", m.File); err != nil {
+		return err
+	}
+	return checkDownload("model", m.ID, m.URL, m.SHA256, m.Size)
+}
+
+// MaxOverlayModels is how many models one overlay may add.
+const MaxOverlayModels = 16
+
+// WithModels is a copy of c with extra models added after its own (a client's local overlay):
+// each is checked by the rules of a catalog entry (a plain id and file name, an https or loopback
+// URL with its sha256 and size, or none for an import-only entry). An id that c already has is
+// refused unless the entry is the same one (an overlay brought again adds nothing): an id means
+// one thing to every client, and a built-in is never replaced. Two models of the overlay may not
+// share an id or a file, nor take a file c's models use. c itself is not changed.
+func (c *Catalog) WithModels(extra []Model) (*Catalog, error) {
+	if len(extra) > MaxOverlayModels {
+		return nil, fmt.Errorf("an overlay adds at most %d models, not %d", MaxOverlayModels, len(extra))
+	}
+	ids, files := map[string]Model{}, map[string]string{}
+	for _, m := range c.Models {
+		ids[m.ID] = m
+		files[m.File] = m.ID
+	}
+	out := *c
+	out.Models = append([]Model{}, c.Models...)
+	for _, m := range extra {
+		if err := checkModel(m); err != nil {
+			return nil, err
+		}
+		if have, ok := ids[m.ID]; ok {
+			if reflect.DeepEqual(have, m) {
+				continue
+			}
+			return nil, fmt.Errorf("model id %q is already in the catalog: an overlay adds models, never replaces one", m.ID)
+		}
+		if id, ok := files[m.File]; ok {
+			return nil, fmt.Errorf("model file %q is already %q's", m.File, id)
+		}
+		ids[m.ID], files[m.File] = m, m.ID
+		out.Models = append(out.Models, m)
+	}
+	return &out, nil
 }
 
 var reported sync.Map // override-problem notes already logged

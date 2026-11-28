@@ -91,6 +91,8 @@ func checkProfile(p *Profile, local bool, h *Help) *ClientError {
 			return cerr(400, "agent_not_allowed", "a client on another machine may not bring an agent")
 		case p.HostFilesMiB != 0:
 			return cerr(400, "path_not_allowed", "host_files_mib is about this machine's disk; a remote client may not send it")
+		case p.Catalog != nil:
+			return cerr(400, "catalog_not_allowed", "a client on another machine may not bring models: this machine would download what its person did not choose")
 		}
 		if sv := p.Server; sv != nil {
 			switch {

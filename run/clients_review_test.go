@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CharlesMod/easyEngine/catalog"
 	"github.com/CharlesMod/easyEngine/host"
 	"github.com/CharlesMod/easyEngine/internal/testkit"
+	"github.com/CharlesMod/easyEngine/run"
 )
 
 // Where the system gives no word of a pid's end, the old wire's {pid} makes no attachment: a
@@ -101,5 +103,45 @@ func TestClientUnownedContextNeverIntoAClientsSlot(t *testing.T) {
 	}
 	if !saved || laid || !letGo {
 		t.Fatalf("saved %v laid back %v let go %v", saved, laid, letGo)
+	}
+}
+
+// A local client's catalog overlay adds its models (kept once taken); a bad one, one that
+// would replace a built-in, and any from a remote client are refused with nothing registered.
+func TestClientCatalogOverlay(t *testing.T) {
+	e := testkit.New(t)
+	s := ready(t, e)
+	n := len(s.CatalogNow().Models)
+	builtin := s.CatalogNow().Models[0]
+	p := clProf(0, 0, 0)
+	p.Slots = 0
+	p.Catalog = &run.CatalogOverlay{Models: []catalog.Model{{ID: "local-extra", Name: "Extra", File: "local-extra.gguf",
+		URL: "https://example.com/local-extra.gguf", SHA256: strings.Repeat("cd", 32), Size: 123456}}}
+	clAttach(t, s, clReq("o", nil, true, p))
+	if m, ok := s.CatalogNow().Model("local-extra"); !ok || m.Size != 123456 || len(s.CatalogNow().Models) != n+1 {
+		t.Fatalf("overlay not taken: %d models", len(s.CatalogNow().Models))
+	}
+	clAttach(t, s, clReq("o", nil, true, p)) // brought again: the same, nothing added
+	if len(s.CatalogNow().Models) != n+1 {
+		t.Fatal("added twice")
+	}
+	replace := clProf(0, 0, 0)
+	b2 := builtin
+	b2.URL = "https://example.com/other.gguf"
+	replace.Catalog = &run.CatalogOverlay{Models: []catalog.Model{b2}}
+	before := s.Attached()
+	if e := clRefused(t, s, clReq("r", nil, true, replace)); e.Code != "catalog_invalid" || e.Status != 400 {
+		t.Fatalf("replace: %+v", e)
+	}
+	remote := clReq("x", nil, true, p)
+	remote.Identity, remote.Local = "client-1", false
+	if e := clRefused(t, s, remote); e.Code != "catalog_not_allowed" {
+		t.Fatalf("remote: %+v", e)
+	}
+	if s.Attached() != before {
+		t.Fatal("a refused attach was registered")
+	}
+	if m, _ := s.CatalogNow().Model(builtin.ID); m.URL != builtin.URL {
+		t.Fatal("a built-in was replaced")
 	}
 }

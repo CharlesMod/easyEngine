@@ -46,3 +46,6 @@ func (s *Supervisor) HeldReserve() (int, bool) {
 
 // Listeners is how many listeners a request is said to as a word.
 func (s *Supervisor) Listeners() int { return int(s.listeners.Load()) }
+
+// CatalogNow is the catalog the engine uses now (overlays included).
+func (s *Supervisor) CatalogNow() *catalog.Catalog { c, _ := s.catalog(); return c }

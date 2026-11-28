@@ -90,6 +90,8 @@ type Model struct {
 	// SamplerMatch lists name fragments by which an external endpoint's model name is
 	// recognised as this model (see ModelByName).
 	SamplerMatch []string `json:"sampler_match,omitempty"`
+	// Projector is the model's vision projector, if it has one (projector.go).
+	Projector *Projector `json:"projector,omitempty"`
 }
 
 // TPSPoint is a measured per-stream decode speed with NCpuMoe expert layers on the CPU. It is
@@ -293,7 +295,7 @@ func (c *Catalog) validate() error {
 			return err
 		}
 	}
-	return nil
+	return checkFiles(c.Models)
 }
 
 func checkModel(m Model) error {
@@ -303,7 +305,10 @@ func checkModel(m Model) error {
 	if err := checkName("model file", m.File); err != nil {
 		return err
 	}
-	return checkDownload("model", m.ID, m.URL, m.SHA256, m.Size)
+	if err := checkDownload("model", m.ID, m.URL, m.SHA256, m.Size); err != nil {
+		return err
+	}
+	return checkProjector(m)
 }
 
 // MaxOverlayModels is how many models one overlay may add.
@@ -341,6 +346,9 @@ func (c *Catalog) WithModels(extra []Model) (*Catalog, error) {
 		}
 		ids[m.ID], files[m.File] = m, m.ID
 		out.Models = append(out.Models, m)
+	}
+	if err := checkFiles(out.Models); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

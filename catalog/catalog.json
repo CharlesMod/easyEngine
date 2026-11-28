@@ -368,7 +368,21 @@
         "gemma4rpmaxxed",
         "gemma426b",
         "gemma4a4b"
-      ]
+      ],
+      "projector": {
+        "file": "gemma-4-26B-A4B-it-mmproj-F16.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/c099eb48e663fd284577b04978a94ffccb261841/mmproj-F16.gguf",
+        "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+        "size": 1193058784,
+        "load_mib": 1296,
+        "image_mib": 130,
+        "max_image_tokens": 512,
+        "detail": {
+          "low": 512,
+          "high": 768,
+          "max": 1024
+        }
+      }
     },
     {
       "id": "gemma4-e4b-rp-q40",

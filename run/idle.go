@@ -67,7 +67,7 @@ func (s *Supervisor) SleepIdleSince(seq uint64) error {
 }
 
 // IdleSleepable says the engine is at rest with a model loaded: phase ready, local, no swap,
-// job, reshape, drain or yield under way. The idle rule's quiet counts only while it holds.
+// job, reshape or yield under way (a drain says resizing: the mind's own field is not read here). The idle rule's quiet counts only while it holds.
 func (s *Supervisor) IdleSleepable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,7 +76,7 @@ func (s *Supervisor) IdleSleepable() bool {
 
 func (s *Supervisor) idleSleepableLocked() bool {
 	if s.phase != "ready" || s.st.Mode != "local" || s.swapping || s.jobRunning || s.removing ||
-		s.reshape || s.yieldInfo != nil || s.srv == nil || s.srv.drain != nil {
+		s.reshape || s.yieldInfo != nil {
 		return false
 	}
 	if u := s.upg; u != nil && u.state == upSwapping {

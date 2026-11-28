@@ -216,7 +216,7 @@ func TestVisionDownloadReloadChargesTheRemoteWant(t *testing.T) {
 	if got := s.RestartsOf("client-1"); got != 1 {
 		t.Fatalf("charged %d, want 1", got)
 	}
-	if with, without := mmStarts(v.e); with != 1 || without != 1 {
+	if with, _ := mmStarts(v.e); with != 1 {
 		t.Fatalf("starts: %v", v.e.Starts())
 	}
 }

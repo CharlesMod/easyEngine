@@ -149,7 +149,7 @@ func (s *Supervisor) startLocked() error {
 	}
 	s.setPhase("starting", "Choosing a shape")
 	s.clearExcl() // every client is in the merge again: the shape is chosen afresh
-	s.dropStep() // every start tries the selected model first (tiers.go)
+	s.dropStep()  // every start tries the selected model first (tiers.go)
 	if in, ok := s.resolveInstall(); ok {
 		s.planVision(in) // before the room is read: the room is given less for a projector
 	}

@@ -63,7 +63,6 @@ func TestLookGateOneRemoteLookPerIdentity(t *testing.T) {
 	}
 }
 
-
 // What parseLook accepts at the edges, and the defaults.
 func TestParseLookEdges(t *testing.T) {
 	q, ce := parseLook([]byte(`{"images":[{"data":"AAAA"}],"question":"q"}`))

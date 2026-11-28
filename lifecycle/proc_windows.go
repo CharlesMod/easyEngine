@@ -64,6 +64,11 @@ func terminate(p *Proc, force bool) {
 	}
 }
 
+// reapGroup does nothing on Windows. terminate there only kills the leader process
+// (force makes no difference), and the job object (KILL_ON_JOB_CLOSE) closes only at
+// engine exit, so a surviving descendant is killed then, not at Stop.
+func reapGroup(p *Proc) {}
+
 // KillPid kills a pid.
 func KillPid(pid int) {
 	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))

@@ -61,6 +61,7 @@ func (p *Proc) Tail() string {
 // Stop asks the child (and its process group) to end, then kills it after grace.
 func (p *Proc) Stop(grace time.Duration) {
 	if p.Exited() {
+		reapGroup(p) // a leader that died on its own may have left members
 		return
 	}
 	terminate(p, false)
@@ -73,6 +74,7 @@ func (p *Proc) Stop(grace time.Duration) {
 		case <-time.After(5 * time.Second): // watchdog for silence: a child that outlives even the kill
 		}
 	}
+	reapGroup(p) // the leader is gone; kill any group member that ignored the terminate
 }
 
 // Kill ends the child at once.

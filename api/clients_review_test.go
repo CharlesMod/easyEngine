@@ -757,14 +757,46 @@ func TestConversationIDsCarryTheirOwner(t *testing.T) {
 	}
 	// the lookup's ids go in owned and come back as the client sent them
 	c, b, _ := do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(A.id)))
-	if c != 200 || !strings.Contains(b, `"conversation_id":"abc"`) || strings.Contains(b, idA) {
+	if c != 200 || !strings.Contains(b, `"conversation_id":"abc"`) || strings.Contains(b, idA) || strings.Contains(b, idB) {
 		t.Fatalf("lookup: %d %s", c, b)
 	}
 	if l := convLog(e); l[len(l)-1] != idA {
 		t.Fatalf("lookup sent %s, want %s", l[len(l)-1], idA)
 	}
-	// a remote caller never reaches the stream paths
+	// S5: an id then "::" and more (llama-server's lookup reads "<id>::<model>") keeps its tail, so
+	// a lookup of the id still finds its variants, and they come back as the client named them
+	mc := withConv(A.id)
+	mc["X-Conversation-Id"] = "abc::m1"
+	if c, b, _ := do(t, "POST", srv.URL+"/v1/chat/completions", `{"messages":[]}`, mc); c != 200 {
+		t.Fatalf("A abc::m1: %d %s", c, b)
+	}
+	if l := convLog(e); l[len(l)-1] != idA+"::m1" {
+		t.Fatalf("abc::m1 sent as %s, want %s::m1", l[len(l)-1], idA)
+	}
+	c, b, _ = do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(A.id)))
+	if c != 200 || !strings.Contains(b, `"conversation_id":"abc::m1"`) || !strings.Contains(b, `"conversation_id":"abc"`) {
+		t.Fatalf("lookup of abc with its variant: %d %s", c, b)
+	}
+	// B's lookup of the same id finds none of A's
+	c, b, _ = do(t, "POST", srv.URL+"/v1/streams/lookup", `{"conversation_ids":["abc"]}`, hdr(asClient(B.id)))
+	if c != 200 || strings.Contains(b, `"abc`) {
+		t.Fatalf("B's lookup saw A's: %d %s", c, b)
+	}
+	// S4: a remote caller with no attachment has its own name space, never the commons (its id
+	// would otherwise replace, and so cancel, a local stream of the same id)
 	_, rs, _ := remoteSrv(t, s)
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(1, map[string]string{"X-Conversation-Id": "abc"})); c != 200 {
+		t.Fatalf("remote abc: %d %s", c, b)
+	}
+	if c, b, _ := do(t, "POST", rs.URL+"/v1/chat/completions", `{"messages":[]}`, as(2, map[string]string{"X-Conversation-Id": "abc"})); c != 200 {
+		t.Fatalf("remote 2 abc: %d %s", c, b)
+	}
+	l = convLog(e)
+	r1, r2 := l[len(l)-3], l[len(l)-1]
+	if l[len(l)-4] != "HEADER" || l[len(l)-2] != "HEADER" || r1 == idC || r2 == idC || r1 == r2 || r1 == idA || r1 == idB {
+		t.Fatalf("remote ids %s, %s; commons %s, A %s, B %s", r1, r2, idC, idA, idB)
+	}
+	// a remote caller never reaches the stream paths
 	for _, m := range []string{"GET", "DELETE"} {
 		if c, b, _ := do(t, m, rs.URL+"/v1/stream?conv_id=abc", "", as(1)); c != 403 {
 			t.Fatalf("remote %s /v1/stream: %d %s", m, c, b)
